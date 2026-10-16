@@ -31,8 +31,10 @@ class FakeCLI:
         self.sent = []
         self.recoveries = []
         self.on_queue = None
+        self.calls = []
 
     def __call__(self, argv, data=None, timeout=60, limit=None):
+        self.calls.append(list(argv))
         if argv[1:3] == ["conversations", "find"]:
             if "--id" in argv:
                 query = argv[argv.index("--id") + 1]
@@ -252,6 +254,54 @@ class ConversationTests(unittest.TestCase):
         self.fake.events[entry["state_dir"]][0]["direction"] = "outgoing"
         with self.assertRaisesRegex(conv.ConversationError, "not an incoming"):
             conv.reply(self.settings, 1, "different")
+
+    def test_private_to_group_paginated_read_and_reply_preserves_failed_requests(self):
+        entries = []
+        for index in (2, 0):
+            self.choose(index)
+            entry = conv.selected(self.settings)[1]
+            entries.append(entry)
+            self.fake.events[entry["state_dir"]] = [
+                {"cursor": cursor, "channel_id": entry["channel_id"], "session_id": entry["session_id"],
+                 "account": self.settings["account"], "talker": entry["talker"],
+                 "kind": "message_observed", "direction": "incoming", "server_id": 10 + cursor,
+                 "message": {"talker": entry["talker"], "server_id": 10 + cursor,
+                             "sender": "synthetic_peer", "content": {"Text": "question " + str(cursor)}}}
+                for cursor in (1, 2)]
+        private, group = entries
+        failed = {"request_id": "historical-failed", "text": "previous independent intent",
+                  "status": "indeterminate", "attempt_number": 1,
+                  "attempts": [{"attempt_number": 1, "status": "indeterminate", "evidence": "retained"}]}
+        state = group["state_dir"]
+        self.fake.outboxes[state] = {failed["request_id"]: failed.copy()}
+        original = json.dumps(self.fake.outboxes[state], sort_keys=True)
+        # Model/runner coordination is not needed for a manual channel read or reply.
+        with mock.patch.object(conv.interactive, "takeover", side_effect=AssertionError("runner started")), \
+             mock.patch.object(conv.interactive, "handback", side_effect=AssertionError("runner started")):
+            for entry in (private, group):
+                conv.select(self.settings, entry["conversation_id"])
+                self.assertTrue(conv.focus_conversation(self.settings)["focused"])
+                first = conv.read(self.settings, limit=1)
+                self.assertEqual(first["conversation"]["conversation_id"], entry["conversation_id"])
+                self.assertTrue(first["has_more"])
+                second = conv.read(self.settings, after=first["next_cursor"], limit=1)
+                self.assertFalse(second["has_more"])
+                self.assertEqual([first["events"][0]["cursor"], second["events"][0]["cursor"]], [1, 2])
+                reply = conv.reply(self.settings, 2, "answer to " + entry["kind"])
+                self.assertEqual(reply["request_id"], conv.runner.reply_request_id(entry["channel_id"], 12))
+                self.assertTrue(conv.reply(self.settings, 2, "answer to " + entry["kind"])["already_completed"])
+                self.assertEqual(conv.read(self.settings, after=1)["events"], second["events"])
+        self.assertEqual(len(self.fake.sent), 2)
+        self.assertNotEqual(self.fake.sent[0][1], self.fake.sent[1][1])
+        self.assertEqual(self.fake.recoveries, [])
+        self.assertFalse(any("ack" in call for call in self.fake.calls))
+        self.assertEqual(json.dumps({failed["request_id"]: self.fake.outboxes[state][failed["request_id"]]},
+                                    sort_keys=True), original)
+        sent_before = list(self.fake.sent)
+        with self.assertRaisesRegex(conv.ConversationError, "unresolved"):
+            conv.send(self.settings, failed["request_id"], failed["text"])
+        self.assertEqual(self.fake.sent, sent_before)
+        self.assertEqual(conv.selected(self.settings)[1], group)
 
     def test_recover_unsent_send_requires_stable_conversation_and_reuses_exact_intent(self):
         self.choose(2)

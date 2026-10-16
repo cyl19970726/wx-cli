@@ -153,6 +153,29 @@ class SenderTests(unittest.TestCase):
                                   focus_result if action == "focus-group" else {"id": prefix, "ok": True})
         return request, config, tid
 
+    def test_prior_helper_blocks_new_desktop_actions_even_after_lock_release(self):
+        # A timed-out helper launched by `open` can outlive its Python driver
+        # and the driver's UI lock. A different request must not overlap it.
+        for listing in ("42 /private/WeChatTestBridge --input /private/prior.job.json",
+                        driver.Refused("process inspection unavailable")):
+            with self.subTest(listing=type(listing).__name__), tempfile.TemporaryDirectory() as root:
+                ui = Path(root)
+                ui.chmod(0o700)
+                config = dict(self.config, ui_dir=ui)
+                driver.private_create(ui / "previous.client-result.json", {"status": "indeterminate"})
+                fd = os.open(ui / "sender.lock", os.O_CREAT | os.O_RDWR, 0o600)
+                os.close(fd)
+                before = {path.name: path.read_bytes() for path in ui.iterdir()}
+                with mock.patch.object(driver, "call", side_effect=(listing if isinstance(listing, Exception)
+                                                                    else None), return_value=listing), \
+                     mock.patch.object(driver, "status", return_value=0), \
+                     mock.patch.object(driver, "bridge") as bridge:
+                    for action in (lambda: driver.focus_only(config), lambda: driver.run(self.request, config)):
+                        with self.assertRaisesRegex(driver.Refused, "prior helper process"):
+                            action()
+                    bridge.assert_not_called()
+                self.assertEqual(before, {path.name: path.read_bytes() for path in ui.iterdir()})
+
     def test_unsent_proof_requires_exact_prepare_failure_and_rejects_replay(self):
         with tempfile.TemporaryDirectory() as root:
             request, config, tid = self._prior_unsent_artifacts(root)
@@ -362,6 +385,90 @@ class SenderTests(unittest.TestCase):
                     driver.bridge({"ui_dir": ui, "helper_app": "/private/bridge.app"}, tid,
                                   "inspect", {}, driver.time.monotonic() + 2, 1)
 
+    def test_slow_focus_completion_or_failure_preserves_single_attempt(self):
+        # Native search has a six-second polling budget *after* search setup.
+        # Exercise the real bridge wait, including a result later than eight
+        # seconds, without operating the desktop or sleeping in real time.
+        for focus_only, focus_ok in ((True, True), (False, True), (True, False), (False, False)):
+            with self.subTest(focus_only=focus_only, focus_ok=focus_ok), tempfile.TemporaryDirectory() as root:
+                ui = Path(root)
+                ui.chmod(0o700)
+                config = dict(self.config, ui_dir=ui, target_group="Synthetic Group",
+                              helper_app="/private/bridge.app", expected_pid=42,
+                              window_size={"width": 880, "height": 640},
+                              composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                              button_point={"x": 800, "y": 610},
+                              conversation_list_rect={"x": 60, "y": 55, "width": 240, "height": 500},
+                              search_point={"x": 155, "y": 28})
+                frame = {"x": 0, "y": 0, "width": 880, "height": 640}
+                clock = [0.0]
+                pending = []
+                actions = []
+
+                def advance(seconds):
+                    clock[0] += seconds
+                    if pending and clock[0] >= pending[0][0]:
+                        _, tid, command = pending.pop()
+                        if not focus_ok:
+                            driver.private_create(ui / (tid + ".result.json"), {
+                                "id": tid, "ok": False, "error": "Selected chat header is not exact target and kind"})
+                            return
+                        evidence = {key: command[key] for key in
+                                    ("targetGroup", "targetKind", "expectedPID", "expectedWindowID", "expectedFrame")}
+                        evidence.update(id=tid, source="search", category="group-chats", selectedAt=1234.5)
+                        driver.private_create(ui / (tid + ".focus-evidence.json"), evidence)
+                        driver.private_create(ui / (tid + ".result.json"), {
+                            "id": tid, "ok": True, "focused": True, "alreadySelected": False,
+                            "source": "search", "category": "group-chats", "targetKind": "group",
+                            "focusEvidenceID": tid})
+
+                def fake_open(argv, _deadline, limit=driver.MAX_OUTPUT):
+                    if "--input" not in argv:
+                        return ""
+                    command = driver.private_read(Path(argv[-1]))
+                    tid, action = command["id"], command["action"]
+                    actions.append(action)
+                    result = {"id": tid, "ok": True}
+                    suffix = ".result.json"
+                    if action == "inspect":
+                        result.update(weChatPID=42, windows=[{"id": 20, "frame": frame}],
+                                      session={"onConsole": True, "locked": False},
+                                      permissions={"accessibility": True, "screenRecording": True,
+                                                   "postEvents": True})
+                    elif action == "focus-group":
+                        pending.append((clock[0] + 9, tid, command))
+                        return ""
+                    else:
+                        self.assertFalse(pending)
+                        result["prepared" if action == "prepare-visual" else "submitted"] = True
+                        suffix = "." + action + ".result.json"
+                    driver.private_create(ui / (tid + suffix), result)
+                    return ""
+
+                with mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                     mock.patch.object(driver.time, "sleep", side_effect=advance), \
+                     mock.patch.object(driver, "call", side_effect=fake_open), \
+                     mock.patch.object(driver, "status", side_effect=lambda *_: (advance(4), 0)[1]), \
+                     mock.patch.object(driver, "verify_target", side_effect=lambda *_: advance(5)), \
+                     mock.patch.object(driver, "channel", return_value="{}"), \
+                     mock.patch.object(driver, "observe", return_value=1):
+                    if focus_only:
+                        if focus_ok:
+                            self.assertTrue(driver.focus_only(config)["focused"])
+                        else:
+                            with self.assertRaisesRegex(driver.Uncertain, "header mismatch"):
+                                driver.focus_only(config)
+                        self.assertEqual(actions, ["inspect", "focus-group"])
+                    else:
+                        result = driver.run(self.request, config)
+                        self.assertEqual(result["status"], "ui_observed" if focus_ok else "indeterminate")
+                        self.assertEqual(actions, ["inspect", "focus-group"] +
+                                         (["prepare-visual", "submit-visual"] if focus_ok else []))
+                        artifacts = {path.name: path.read_bytes() for path in ui.iterdir()}
+                        with self.assertRaisesRegex(driver.Uncertain, "already attempted"):
+                            driver.run(self.request, config)
+                        self.assertEqual(artifacts, {path.name: path.read_bytes() for path in ui.iterdir()})
+
     def test_focus_group_runs_before_draft_or_submit(self):
         with tempfile.TemporaryDirectory() as root:
             ui = Path(root)
@@ -470,6 +577,7 @@ class SenderTests(unittest.TestCase):
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
                  mock.patch.object(driver, "verify_target"), \
                  mock.patch.object(driver, "status", return_value=0), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False), \
                  mock.patch.object(driver, "call", return_value="") as activate:
                 with self.assertRaisesRegex(driver.Refused, "permissions"):
                     driver.focus_only(config)

@@ -4,8 +4,9 @@ Mac mini Codex 负责实现；当前本地 Codex 负责独立审查、验收和�
 
 ## 当前起点
 
-- 基线分支：`codex/general-conversation-cli`，当前提交 `6c53c0a`。本地全套 CI 已通过：Rust 841 项通过、11 项原有忽略；Python 3.9 和 3.12 各自运行 scripts 74 项、package 49 项；Swift 检查通过。
-- Mac mini 当前 native helper 是 v5，来源提交 `fa3187b`。v5 有限导航和只读分页读取已通过；没有 v5 发送证据。v3 私人及群消息各有一条历史收件确认；v4 一次群发送在输入前的 focus 阶段失败，原请求保留且不得重试。运行器当前停止。
+- 源码基线：`main` 的合入提交 `bfe335e`（PR #3），本 checkout 的 `origin/main` 指向该提交。原 `codex/general-conversation-cli` 的 `fa69774` 已合入；`6c53c0a` 不再是当前起点。开发分支 `codex/macmini-conversation-reliability` 在此基线上整理候选修复，等待本机独立审查与验收。
+- 当前候选修复 focus 等待预算、只读弹窗观察及遗留 helper 并发保护，并补充私人会话返回群、分页和稳定请求 ID 的合成回归。已完成的离线矩阵为 Rust 841 项通过、11 项原有忽略；Python 3.9 和 3.12 各自 scripts 76 项、安装 wheel 后 package 50 项通过；Swift 参数、完整源码 typecheck 和隔离构建通过。命令、工具版本及限制见[候选验证记录](CONVERSATIONS_RELIABILITY_20261017.md)；这些结果不代表现场验收或接受合并。
+- 已记录的现场基线仍为 v5 native helper，来源提交 `fa3187b`。v5 有限导航和只读分页读取已通过；没有 v5 发送证据。v3 私人及群消息各有一条历史收件确认；v4 一次群发送在输入前的 focus 阶段失败，原请求保留且不得重试。2026-10-17 的只读状态快照显示运行器停止、无 manual pending，保留 3 条历史 uncertain；候选尚未部署，后续现场操作前须重新检查实际状态。
 - 当前首项工作是完成可靠的通用“私人会话 → 返回群 → 读取并回复”流程。不得扩展协议/hooks、无关客户数据或多常驻 Agent 范围。测试联系人和群的身份只写入忽略的私有运行笔记，不写公共文档、提交或聊天输出。
 
 ## 分工与工作路径

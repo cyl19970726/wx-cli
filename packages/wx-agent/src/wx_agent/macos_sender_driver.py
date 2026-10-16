@@ -24,6 +24,10 @@ from datetime import datetime, timezone
 MAX_INPUT = 70 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 BUDGET = 48.0
+# Native focus performs guarded search setup before its six-second result
+# polling budget, then reconfirms the row and selected header. Allow that whole
+# action to finish; an eight-second wait can orphan a still-running helper.
+FOCUS_SECONDS = 18.0
 
 
 class Refused(Exception):
@@ -654,7 +658,7 @@ def observe(config, request, after, deadline, details=None):
 
 def focus_only(config):
     """Select the configured group without reading stdin or touching the outbox."""
-    deadline = time.monotonic() + 18.0
+    deadline = time.monotonic() + BUDGET
     ui = config["ui_dir"]
     lock_path = ui / "sender.lock"
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -664,6 +668,8 @@ def focus_only(config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
+        if _helper_is_live(None, deadline):
+            raise Refused("prior helper process is still live or cannot be inspected")
         status(config, deadline)
         verify_target(config, deadline)
         tid = "focus-" + uuid.uuid4().hex
@@ -676,7 +682,7 @@ def focus_only(config):
                    "expectedWindowID": window_id, "expectedFrame": frame,
                    "conversationListRect": config["conversation_list_rect"],
                    "searchPoint": config["search_point"]}
-        result = bridge(config, tid, "focus-group", command, deadline, 8.0)
+        result = bridge(config, tid, "focus-group", command, deadline, FOCUS_SECONDS)
         focus_proof = focus_result_ok(result, config, tid, window_id, frame)
         return {"focused": True, "already_selected": False, "source": "search",
                 "target_kind": config.get("conversation_kind", "group"), "focus_evidence_id": tid,
@@ -698,6 +704,8 @@ def run(request, config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
+        if _helper_is_live(None, deadline):
+            raise Refused("prior helper process is still live or cannot be inspected")
         report_path = ui / (tid + ".client-result.json")
         report = {"id": tid, "attempt_number": attempt_number,
                   "request_id": request["request_id"], "stage": "started", "status": "indeterminate",
@@ -725,7 +733,7 @@ def run(request, config):
                              "expectedWindowID": window_id, "expectedFrame": frame,
                              "conversationListRect": config["conversation_list_rect"],
                              "searchPoint": config["search_point"]}
-            focused = bridge(config, focus_id, "focus-group", focus_command, deadline, 8.0)
+            focused = bridge(config, focus_id, "focus-group", focus_command, deadline, FOCUS_SECONDS)
             focus_proof = focus_result_ok(focused, config, focus_id, window_id, frame)
             command = _prepare_command(request, config, window_id, frame, focus_id)
             report["target_kind"] = config.get("conversation_kind", "group")

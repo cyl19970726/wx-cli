@@ -739,12 +739,17 @@ private func searchPopupResult(_ input: FocusInputs, step: String,
         throw Failure("Search popup screenshot geometry changed")
     }
     let (_, _, currentPopup) = try await freshFocus(input, step: "\(step)-confirm", allowSearchPopup: true)
-    guard let currentPopup, currentPopup.windowID == popup.windowID,
-          abs(currentPopup.frame.minX - popup.frame.minX) <= 3,
-          abs(currentPopup.frame.minY - popup.frame.minY) <= 3,
-          abs(currentPopup.frame.width - popup.frame.width) <= 3,
-          abs(currentPopup.frame.height - popup.frame.height) <= 3 else {
+    switch VisualParameters.searchPopupDisposition(capturedID: popup.windowID,
+        capturedFrame: popup.frame, currentID: currentPopup?.windowID,
+        currentFrame: currentPopup?.frame, beforeClick: expectedPopupID != nil) {
+    case .pollAgain:
+        // Discard stale pixels without clicking. The next bounded observation
+        // must independently resolve a unique category-eligible exact result.
+        return SearchProbe(windows: [main] + (currentPopup.map { [$0] } ?? []), selection: nil)
+    case .refuse:
         throw Failure("Search popup changed during capture")
+    case .stable:
+        break
     }
     let candidates = try popupCandidates(image)
     let selection = VisualParameters.uniqueSearchResult(candidates, target: input.targetGroup,
@@ -770,12 +775,12 @@ private func runFocus(_ command: Command) async throws -> [String: Any] {
     _ = try await freshFocus(input, step: "focus-initial")
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(input.id).focus-attempted.json"))
     try await pasteSearch(input)
-    let searchStarted = Date()
+    let searchStarted = ProcessInfo.processInfo.systemUptime
     var polls: [FocusPollDiagnostic] = []
-    while VisualParameters.withinFocusSearchBudget(Date().timeIntervalSince(searchStarted)) {
+    while VisualParameters.withinFocusSearchBudget(ProcessInfo.processInfo.systemUptime - searchStarted) {
         let probe = try await searchPopupResult(input, step: "focus-search-result")
         polls.append(FocusPollDiagnostic(
-            elapsedMs: Int(Date().timeIntervalSince(searchStarted) * 1_000),
+            elapsedMs: Int((ProcessInfo.processInfo.systemUptime - searchStarted) * 1_000),
             windowCount: probe.windows.count,
             windows: probe.windows.map(focusWindowDiagnostic),
             popupPresent: probe.windows.count == 2,

@@ -20,6 +20,25 @@ import Foundation
         precondition(!VisualParameters.withinFocusSearchBudget(6))
         precondition(!VisualParameters.withinFocusSearchBudget(-0.001))
         precondition(!VisualParameters.withinFocusSearchBudget(.infinity))
+        let shortPopup = CGRect(x: 229, y: 306, width: 368, height: 194)
+        let loadedPopup = CGRect(x: 229, y: 306, width: 368, height: 500)
+        for beforeClick in [false, true] {
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 7, currentFrame: loadedPopup, beforeClick: beforeClick) == .stable)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 7, currentFrame: loadedPopup.offsetBy(dx: 3, dy: -3),
+                beforeClick: beforeClick) == .stable)
+            let expected: SearchPopupDisposition = beforeClick ? .refuse : .pollAgain
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: shortPopup,
+                currentID: 7, currentFrame: loadedPopup, beforeClick: beforeClick) == expected)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 8, currentFrame: loadedPopup, beforeClick: beforeClick) == expected)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: nil, currentFrame: nil, beforeClick: beforeClick) == expected)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 7, currentFrame: loadedPopup.offsetBy(dx: 4, dy: 0),
+                beforeClick: beforeClick) == expected)
+        }
         let poll = FocusPollDiagnostic(elapsedMs: 451, windowCount: 1,
             windows: [FocusWindowDiagnostic(id: 7, x: 10, y: 20, width: 880, height: 640)],
             popupPresent: false, popupSelected: false)

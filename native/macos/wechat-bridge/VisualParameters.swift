@@ -37,6 +37,12 @@ struct SearchSelection: Equatable {
     let category: SearchCategory
 }
 
+enum SearchPopupDisposition {
+    case stable
+    case pollAgain
+    case refuse
+}
+
 struct FocusWindowDiagnostic: Codable {
     let id: UInt32
     let x: Double
@@ -56,6 +62,22 @@ struct FocusPollDiagnostic: Codable {
 enum VisualParameters {
     static func withinFocusSearchBudget(_ elapsed: TimeInterval) -> Bool {
         elapsed.isFinite && elapsed >= 0 && elapsed < 6
+    }
+
+    // Search results can resize or replace their popup while loading. An
+    // observation may wait for another capture, but the pre-click confirmation
+    // must reject any change. Both windows have already passed navigation guards.
+    static func searchPopupDisposition(capturedID: UInt32, capturedFrame: CGRect,
+                                       currentID: UInt32?, currentFrame: CGRect?,
+                                       beforeClick: Bool) -> SearchPopupDisposition {
+        if currentID == capturedID, let frame = currentFrame,
+           abs(frame.minX - capturedFrame.minX) <= 3,
+           abs(frame.minY - capturedFrame.minY) <= 3,
+           abs(frame.width - capturedFrame.width) <= 3,
+           abs(frame.height - capturedFrame.height) <= 3 {
+            return .stable
+        }
+        return beforeClick ? .refuse : .pollAgain
     }
 
     // Calibrated against the 880x640 WeChat window. The title sits near y=27;

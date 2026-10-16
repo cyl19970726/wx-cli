@@ -64,6 +64,10 @@ records each probe's elapsed time, WeChat window IDs and frames, and whether a
 popup and eligible result were seen. It contains no OCR text, chat titles or
 message content. Timeout errors distinguish an unseen popup from a visible
 popup without a unique eligible result.
+The search budget uses monotonic time. During read-only discovery, a popup
+that resizes, disappears, or changes ID during capture causes those pixels to
+be discarded and another observation within the same budget. Any such change
+during the final pre-click confirmation still stops navigation.
 Title matching depends
 on fresh OCR and is not proof of delivery or account identity.
 
@@ -179,3 +183,12 @@ was seen; independent receipt is still a separate check. It keeps a private
 attempt report and refuses to replay a request. Any uncertain stage returns
 `indeterminate`, which the outbox and channel runner must not automatically
 retry. See the linked validation scope for the historical evidence and limitations.
+
+The Python driver waits up to 18 seconds for the complete native focus action,
+including setup and result reconfirmation, within its 48-second total budget.
+After acquiring the shared UI lock, both focus-only and sending refuse to
+launch a helper if any earlier helper remains live or process inspection fails.
+A timeout can outlive the driver lock; acquiring that lock alone is insufficient
+evidence that the desktop is idle. These source changes have offline coverage;
+their deployment and live acceptance status are recorded in
+[the reliability candidate record](../../../docs/CONVERSATIONS_RELIABILITY_20261017.md).
