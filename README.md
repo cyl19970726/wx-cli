@@ -4,7 +4,7 @@
 
 本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。当前开发方向是单群 Agent 渠道；只在授权测试账号中做过有限现场验证，尚未承诺客户环境、媒体发送、多群或全天无人值守。
 
-[开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [消息契约](docs/contracts.md) · [验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
+[开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [交互原理图](docs/diagrams/agent-channel.html) · [消息契约](docs/contracts.md) · [验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
 
 ## 一个仓库，三个执行层
 

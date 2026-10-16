@@ -1,0 +1,408 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "微信单群 Agent：读取、记忆与一次发送",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-agent-channel-20261016-123000/agent-channel.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/cyl19970726/wx-cli.git",
+      "revision": "8f216b7656c084caede5738bf8654cdc3bf238ef"
+    }
+  },
+  "components": [
+    {
+      "id": "wechat",
+      "type": "external",
+      "label": "微信客户端",
+      "sublabel": "已授权的单个群",
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture.md",
+          "line": 3,
+          "end_line": 3
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 647,
+          "end_line": 681
+        }
+      ],
+      "tag": "登录且桌面可用"
+    },
+    {
+      "id": "channel",
+      "type": "backend",
+      "label": "Rust channel",
+      "sublabel": "加密副本解析与订阅",
+      "pos": [
+        270,
+        260
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 311,
+          "end_line": 334
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 459,
+          "end_line": 488
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 649,
+          "end_line": 730
+        }
+      ],
+      "tag": "wx-cli"
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "Agent 运行器",
+      "sublabel": "入站编排与启停控制",
+      "pos": [
+        500,
+        260
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/channel_agent.py",
+          "line": 348,
+          "end_line": 387
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/channel_agent.py",
+          "line": 389,
+          "end_line": 445
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/wechat_agent_ctl.py",
+          "line": 141,
+          "end_line": 190
+        }
+      ],
+      "tag": "wx-agent"
+    },
+    {
+      "id": "outbox",
+      "type": "backend",
+      "label": "Rust 发件箱",
+      "sublabel": "先记录尝试再执行",
+      "pos": [
+        730,
+        260
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 177,
+          "end_line": 220
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 414,
+          "end_line": 457
+        }
+      ],
+      "tag": "未知结果停发"
+    },
+    {
+      "id": "sender",
+      "type": "security",
+      "label": "macOS 发送",
+      "sublabel": "Python 驱动与 Swift",
+      "pos": [
+        960,
+        260
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 395,
+          "end_line": 455
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 647,
+          "end_line": 681
+        }
+      ],
+      "tag": "群与草稿核验"
+    },
+    {
+      "id": "journal",
+      "type": "database",
+      "label": "事件与消费游标",
+      "sublabel": "channel.sqlite3",
+      "pos": [
+        270,
+        60
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 414,
+          "end_line": 439
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 649,
+          "end_line": 730
+        }
+      ],
+      "tag": "显式确认"
+    },
+    {
+      "id": "model",
+      "type": "backend",
+      "label": "Codex 文案适配",
+      "sublabel": "无工具的文本生成",
+      "pos": [
+        500,
+        60
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/codex_reply_agent.py",
+          "line": 114,
+          "end_line": 141
+        }
+      ],
+      "tag": "可替换适配器"
+    },
+    {
+      "id": "memory",
+      "type": "backend",
+      "label": "会话笔记",
+      "sublabel": "JSON · 来源与版本",
+      "pos": [
+        500,
+        460
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/memory.py",
+          "line": 181,
+          "end_line": 237
+        }
+      ],
+      "tag": "CLI 显式更新"
+    },
+    {
+      "id": "intents",
+      "type": "database",
+      "label": "发送意图与尝试",
+      "sublabel": "outgoing.sqlite3",
+      "pos": [
+        730,
+        460
+      ],
+      "size": [
+        150,
+        74
+      ],
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 336,
+          "end_line": 351
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 414,
+          "end_line": 457
+        }
+      ],
+      "tag": "请求 ID 幂等"
+    }
+  ],
+  "connections": [
+    {
+      "id": "read",
+      "from": "wechat",
+      "to": "channel",
+      "label": "副本",
+      "variant": "emphasis"
+    },
+    {
+      "id": "events",
+      "from": "channel",
+      "to": "runner",
+      "label": "事件",
+      "variant": "emphasis"
+    },
+    {
+      "id": "queue",
+      "from": "runner",
+      "to": "outbox",
+      "label": "入队",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch",
+      "from": "outbox",
+      "to": "sender",
+      "label": "一次尝试",
+      "variant": "security"
+    },
+    {
+      "id": "journal-io",
+      "from": "channel",
+      "to": "journal",
+      "label": "读写"
+    },
+    {
+      "id": "generate",
+      "from": "runner",
+      "to": "model",
+      "label": "生成"
+    },
+    {
+      "id": "text",
+      "from": "model",
+      "to": "runner",
+      "label": "文案"
+    },
+    {
+      "id": "read-memory",
+      "from": "runner",
+      "to": "memory",
+      "label": "读取笔记"
+    },
+    {
+      "id": "source-check",
+      "from": "memory",
+      "to": "channel",
+      "label": "来源核验",
+      "variant": "security",
+      "fromSide": "left",
+      "toSide": "bottom"
+    },
+    {
+      "id": "outbox-io",
+      "from": "outbox",
+      "to": "intents",
+      "label": "持久化"
+    },
+    {
+      "id": "verify-outgoing",
+      "from": "sender",
+      "to": "channel",
+      "label": "核对本地出站",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          1035,
+          580
+        ],
+        [
+          345,
+          580
+        ]
+      ]
+    },
+    {
+      "id": "ui-send",
+      "from": "sender",
+      "to": "wechat",
+      "label": "核验后点击发送",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          1150,
+          297
+        ],
+        [
+          1150,
+          660
+        ],
+        [
+          115,
+          660
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "同仓库分层",
+      "items": [
+        "Rust 是事件、游标和发件箱的唯一负责人",
+        "Python 编排模型与派生笔记；Swift 执行桌面动作",
+        "项目 skill 指导 CLI 调用，不自带后台监听"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "有来源的需求记忆",
+      "items": [
+        "笔记由操作者或接入 Agent 显式维护",
+        "写入及加载均核验同群入站来源；revision 防覆盖",
+        "来源存在不等于解释正确，回复模型不自动写回"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "发送条件",
+      "items": [
+        "只处理身份明确的入站文本，出站不触发自答",
+        "失败或不明状态停发，不换请求 ID 重试",
+        "本地出站记录不等于收件确认"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "本图范围",
+      "items": [
+        "代码架构概览：省略参数、锁文件及解析库内部",
+        "新包尚未替换旧运行端；32 分钟实测属于旧部署",
+        "MCP、多群和自动摘要尚未实现"
+      ]
+    }
+  ]
+}
