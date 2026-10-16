@@ -31,6 +31,42 @@ import Foundation
         let searchBox = GroupOCRCandidate(text: "合成测试群", x: 150, y: 28)
         precondition(VisualParameters.uniqueExactGroup([searchBox, oneRow], target: "合成测试群", minimumY: 55) == oneRow)
         precondition(VisualParameters.uniqueExactGroup([searchBox], target: "合成测试群", minimumY: 55) == nil)
+        let title = HeaderOCRCandidate(text: "测试群 (3)", bounds: CGRect(x: 315, y: 19, width: 120, height: 16))
+        let sender = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 320, y: 68, width: 90, height: 15))
+        let privateTitle = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 315, y: 19, width: 100, height: 16))
+        precondition(VisualParameters.headerTitleRect(imageWidth: 880, imageHeight: 640) ==
+                     CGRect(x: 300, y: 8, width: 420, height: 42))
+        precondition(VisualParameters.headerOCRRect(imageWidth: 880, imageHeight: 640) ==
+                     CGRect(x: 300, y: 0, width: 420, height: 90))
+        precondition(VisualParameters.headerTitleRect(imageWidth: 879, imageHeight: 640) == nil)
+        precondition(VisualParameters.uniqueHeaderTitle([title, sender], target: "测试群",
+                                                        imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([title, sender], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(VisualParameters.uniqueHeaderTitle([privateTitle, sender], target: "Synthetic Peer",
+                                                        imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, privateTitle], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, title], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([sender], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 639))
+        let crossingBoundary = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 315, y: 43, width: 100, height: 14))
+        let clippedLeftEdge = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 300, y: 19, width: 100, height: 16))
+        let clippedTopEdge = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 315, y: 8, width: 100, height: 16))
+        precondition(!VisualParameters.uniqueHeaderTitle([crossingBoundary], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([clippedLeftEdge], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([clippedTopEdge], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, crossingBoundary], target: "Synthetic Peer",
+                                                         imageWidth: 880, imageHeight: 640))
         let token = "private-sentinel"
         precondition(VisualParameters.copyIsExpected(expected: "a b\n😊", sentinel: token,
                                                      beforeCount: 10, afterCount: 11,

@@ -192,19 +192,27 @@ private func capture(_ window: SCWindow, destination: URL) async throws -> CGIma
 }
 
 private func headerContainsGroup(_ image: CGImage, target: String) async throws -> Bool {
-    // The chat header is above the message pane, away from the sidebar.
-    let crop = CGRect(x: CGFloat(image.width) * 0.30,
-                      y: 0,
-                      width: CGFloat(image.width) * 0.70,
-                      height: min(150, CGFloat(image.height) * 0.23)).integral
+    guard let crop = VisualParameters.headerOCRRect(imageWidth: image.width,
+            imageHeight: image.height) else {
+        throw Failure("Chat header geometry is not calibrated for this window")
+    }
     guard let header = image.cropping(to: crop) else { throw Failure("Cannot crop chat header") }
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.recognitionLanguages = ["zh-Hans", "en-US"]
     request.usesLanguageCorrection = false
     try VNImageRequestHandler(cgImage: header).perform([request])
-    return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-        .contains { VisualParameters.exactGroupTitle($0, target: target) }
+    let candidates = (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
+        guard let text = result.topCandidates(1).first?.string else { return nil }
+        let bounds = result.boundingBox
+        return HeaderOCRCandidate(text: text, bounds: CGRect(
+            x: crop.minX + bounds.minX * crop.width,
+            y: crop.minY + (1 - bounds.maxY) * crop.height,
+            width: bounds.width * crop.width,
+            height: bounds.height * crop.height))
+    }
+    return VisualParameters.uniqueHeaderTitle(candidates, target: target,
+        imageWidth: image.width, imageHeight: image.height)
 }
 
 private func sessionSummary() -> [String: Any] {
