@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wx-agent"
+version = "0.1.0"
+description = "Local, guarded WeChat channel agent for wx-cli"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/cyl19970726/wx-cli"
+
+[project.scripts]
+wx-agent = "wx_agent.cli:main"
+wx-agent-sender = "wx_agent.macos_sender_driver:main"
+wx-agent-reply = "wx_agent.codex_reply_agent:main"
+wx-agent-probe = "wx_agent.sender_guard_probe:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

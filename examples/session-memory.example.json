@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "binding": {
+    "channel_id": "synthetic-channel",
+    "session_id": "synthetic-session",
+    "account": "synthetic-account",
+    "talker": "synthetic_group@chatroom"
+  },
+  "summary": "合成示例：讨论一个活动报名网站。",
+  "summary_source_cursors": [1],
+  "confirmed": [{"text": "首期只支持网页报名。", "source_cursors": [1]}],
+  "open_questions": [{"text": "是否需要在线付款？", "source_cursors": [1]}]
+}

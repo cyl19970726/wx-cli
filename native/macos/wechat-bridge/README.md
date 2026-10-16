@@ -1,0 +1,159 @@
+# WeChat Test Bridge
+
+Single-purpose macOS helper source for a controlled WeChat text test. It is an
+`LSUIElement` app with bundle ID `io.codex.wechat-test-bridge`, targeting arm64
+macOS 14 or later. It uses native Apple frameworks only. Build with `./build.sh`;
+the script places the app in the repository's ignored `.local/bridge-build/`,
+signs it ad hoc, and verifies its signature. No app bundle or runtime output is
+committed. A rebuild can change the code signature associated with macOS permissions.
+
+Limited live text, group-selection and refusal tests are summarized in
+[validation scope](../../../docs/REAL_READ_VALIDATION_20261015.md). Installing the
+Python package does not rebuild or replace this separately authorized app.
+
+## Commands
+
+Put each JSON input under `~/wechat-wx-cli-test/ui/`, then launch from the
+logged-in macOS desktop context:
+
+```sh
+open -g -n "/path/to/WeChat Test Bridge.app" --args --input "$HOME/wechat-wx-cli-test/ui/command.json"
+```
+
+Actions are `request-permissions`, `inspect`, `capture`, `focus-group`,
+`prepare-visual`, and `submit-visual`. The first three check permissions,
+inspect WeChat window metadata, and take a window-only PNG, respectively. `inspect` reports
+`frontmost` and session lock flags separately.
+
+`focus-group` takes its own unique `id` and the exact test-group title. Use a
+fresh `inspect` and `capture` to calibrate the sole window and the left
+conversation list/search control; these coordinates are examples, not defaults:
+
+```json
+{"id":"example-focus-001","action":"focus-group",
+ "targetGroup":"Synthetic Test Group","expectedPID":12345,
+ "expectedWindowID":678,
+ "expectedFrame":{"x":100,"y":100,"width":900,"height":650},
+ "conversationListRect":{"x":0,"y":60,"width":270,"height":570},
+ "searchPoint":{"x":100,"y":30}}
+```
+
+The helper first checks the current chat header for the exact title. If it
+already matches, it returns without selecting another chat. Otherwise it
+requires a unique exact OCR match in the visible conversation list; if absent,
+it pastes and copies back the exact group title in the calibrated search box,
+then requires a unique exact match in bounded search results. It verifies the
+row again immediately before clicking and rechecks the chat header afterward.
+Missing, ambiguous, moved, or mismatched results stop. Before navigation it
+creates `<id>.focus-attempted.json`; an uncertain attempt with the same ID is
+not replayed. The output is `<id>.result.json`. Group title matching depends
+on fresh OCR and is not proof of delivery or account identity.
+
+The two visual actions use the **same** transaction `id` and all the same input
+fields. Change only `action` from `prepare-visual` to `submit-visual`:
+
+```json
+{"id":"example-001","action":"prepare-visual",
+ "targetGroup":"Synthetic Test Group","expectedDraft":"old draft",
+ "text":"Hello, test message 😊\nSecond line",
+ "expectedPID":12345,"expectedWindowID":678,
+ "expectedFrame":{"x":100,"y":100,"width":900,"height":650},
+ "composerRect":{"x":310,"y":500,"width":560,"height":95},
+ "buttonPoint":{"x":830,"y":610}}
+```
+
+`body` is accepted as an alias for `text`; if both appear, they must match.
+`text` supports Unicode Chinese, punctuation, emoji, tabs, and multiple lines.
+It must contain meaningful text, have at most 2,000 Swift characters and
+16,000 UTF-8 bytes, and contain no NUL, DEL, or other control characters except
+tab and line endings. `expectedDraft` follows the same limits and may be empty.
+Only CRLF/CR-to-LF normalization is allowed when comparing copied text; spaces
+and all other characters remain significant. `targetGroup` must be an explicit
+single-line name of at most 100 characters. The example PID, window ID, frame,
+composer rect, and button point are not defaults: obtain them from a fresh
+`inspect` and `capture` immediately before use. Rects/points are image-relative;
+the frame is in global screen coordinates.
+
+The app requires its output directory and parent to be owned by the current
+user, non-symlinks, and mode `0700`. Runtime output stays in
+`~/wechat-wx-cli-test/ui/`. This path is currently fixed in the code and must
+be made configurable before using the helper as a reusable channel component.
+Deployment alone does not make this a validated or production-ready sender.
+Read-only actions write `<id>.result.json`; visual actions write
+`<id>.<action>.result.json` and step-named window PNGs.
+`prepare-visual` creates `<id>.visual-state.json` exclusively before the first
+mouse event. It becomes `prepared` only after exact copied-text verification.
+`submit-visual` requires that state and creates `<id>.submit-attempted.json`
+exclusively before the Send click. A failed or uncertain attempt cannot be
+replayed with the same ID.
+
+Every UI step requires one WeChat process/window, the declared PID/ID/frame,
+WeChat frontmost, `onConsole=true`, no explicit locked flag, Accessibility,
+Screen Recording, Post Events access, a nonblank window-only screenshot, and
+fresh OCR of the exact `targetGroup` header. An absent lock flag remains
+`unknown`; it is not proof of unlock. Send must be the unique recognized button
+in the lower conversation pane. The helper never uses Return to send.
+
+For draft verification, the helper clicks the declared composer, selects it,
+sets a unique clipboard sentinel, copies, and compares the copied plain text
+exactly to `expectedDraft` or `text`. If copying an empty draft leaves the
+sentinel unchanged, it additionally requires a visually blank composer; any
+uncertainty stops. Preparation pastes plain text over the selected old draft,
+then copies it back to verify. Submission copies it back again before a fresh
+header and Send-button check and one click. It does not send media.
+
+The original clipboard is snapshotted in memory only and never written to an
+output file. Restoration occurs only if the pasteboard change count still
+matches the helper's last known write. A detected external change is preserved
+and stops the command. macOS pasteboard has no atomic compare-and-swap, so an
+unobserved change in the tiny interval between the final count check and
+restoration cannot be ruled out. Large or unreadable clipboard items stop the
+command rather than being discarded.
+
+Posting a Send click is **not delivery proof**; verify independently with the
+authorized test account. A failed step may leave a partial draft. `./test-parameters.sh`
+runs local, no-GUI checks of text validation, line-ending comparison,
+transaction consistency, empty-copy handling, and clipboard restoration
+conditions.
+
+## Outbox sender integration
+
+`wx-agent-sender` from the installed `wx-agent` package is the one-attempt
+driver for `wx-cli outbox send --request-id ... --driver /ABS/venv/bin/wx-agent-sender`. It reads
+the outbox JSON from standard input and returns a JSON object with `status`
+(`ui_observed`, `failed`, or `indeterminate`) and nonempty `evidence`.
+The executable and its `WX_SENDER_CONFIG` must reside on the Mac running
+WeChat; `outbox send` passes the driver path to that same machine. The private
+configuration is a `0600` JSON file in a `0700` parent directory. It binds the
+encrypted-copy channel (`binding` as returned by `channel status`, including a
+known `self_wxid`), absolute `wx_cli` and `channel_state_dir` paths, exact
+`target_group`, absolute built `helper_app`, `helper_sha256` of its executable,
+fixed private `ui_dir` (`~/wechat-wx-cli-test/ui`), `expected_pid`, current
+`window_size`, `composer_rect`, `button_point`, `conversation_list_rect`, and
+`search_point`. `expected_draft` is optional and defaults to empty. Use fresh
+window inspection and capture to set the geometry; never reuse example values.
+
+To select the configured test group independently of any message or outbox
+request, run this on the Mac with the unlocked WeChat desktop and the final
+helper's permissions restored:
+
+```sh
+WX_SENDER_CONFIG=/ABS/private/sender-config.json \
+  /ABS/venv/bin/wx-agent sender --focus-only
+```
+
+This reads no message from stdin, creates no outgoing intent, and does not
+prepare a draft or click Send. It returns JSON with `focused`,
+`already_selected`, and `source` (`current`, `visible-list`, or `search`) on
+success. Failure returns `focused:false` and a reason. `--focus-only` uses the
+same bound account, exact group title, window calibration, UI lock, and fresh
+header verification as the sender. Its result is a focus check, never a send
+or delivery confirmation.
+
+The driver inspects the window, focuses the group, prepares and verifies the
+Unicode draft, records a fresh channel cursor, submits once, and seeks the
+matching local outgoing event. Its `ui_observed` result means this local event
+was seen; independent receipt is still a separate check. It keeps a private
+attempt report and refuses to replay a request. Any uncertain stage returns
+`indeterminate`, which the outbox and channel runner must not automatically
+retry. See the linked validation scope for the historical evidence and limitations.

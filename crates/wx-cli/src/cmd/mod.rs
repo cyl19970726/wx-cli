@@ -21,3 +21,6 @@ pub mod watch;
 
 #[cfg(test)]
 mod thin_client_tests;
+
+pub mod channel;
+pub mod outgoing;

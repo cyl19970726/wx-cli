@@ -1,2 +1,13 @@
 /target
 .DS_Store
+
+# Local account records, keys and test runtime state
+.local/
+__pycache__/
+*.py[cod]
+
+# Local package builds and environments
+.venv/
+packages/wx-agent/build/
+packages/wx-agent/dist/
+*.egg-info/
