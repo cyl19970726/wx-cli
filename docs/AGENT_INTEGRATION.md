@@ -18,3 +18,5 @@
 会话原文由 Rust channel 保留；模型最近上下文之外，笔记保存有来源的摘要、已确认事项和未决问题。笔记由操作者或接入 Agent 显式更新，回复模型不自行写回。新功能的离线通过与旧版真实实测分开记录。
 
 MCP 尚未实现。未来只增加相同命令/协议的工具适配层，不增加第二套消息进度、记忆或发送重试。不同群未来可以分别选择按需或常驻模式，各自隔离会话、consumer 和策略；这不要求所有群统一自动回复。当前仍只支持已有配置的单群，尚未实现群注册表、逐群模式配置或共享 GUI 的多群发送调度。
+
+目标能力与当前范围见[会话 CLI 能力图](diagrams/conversation-capabilities.html)；可重建输入位于 [tree JSON](diagrams/conversation-capabilities.tree.json)。

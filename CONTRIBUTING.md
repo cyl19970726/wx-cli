@@ -13,7 +13,6 @@ cargo test --locked
 cargo build --locked
 python3 scripts/test_local_channel.py --binary target/debug/wx-cli
 PYTHONPATH=packages/wx-agent/src python3 -W error::ResourceWarning -m unittest discover -s scripts -p 'test_*.py'
-PYTHONPATH=packages/wx-agent/src python3 -W error::ResourceWarning -m unittest discover -s packages/wx-agent/tests -p 'test_*.py'
 python3 -m pip wheel --no-deps --wheel-dir .local/wheels ./packages/wx-agent
 python3 scripts/check_package.py .local/wheels/wx_agent-0.2.0-py3-none-any.whl --tests packages/wx-agent/tests
 native/macos/wechat-bridge/test-parameters.sh
@@ -21,7 +20,7 @@ python3 scripts/check_public_source.py
 git diff --check
 ```
 
-Use Python 3.9 or newer; CI exercises the supported floor and a newer version. Package smoke builds a wheel, installs it in an isolated environment and checks entrypoints outside the checkout. Native parameter tests do not operate WeChat or prove desktop delivery. Check the workflow for the exact current matrix.
+Use Python 3.9 or newer; CI exercises the supported floor and a newer version. `check_package.py` installs the wheel in an isolated environment and runs the entire package test suite outside the checkout, including console entrypoints. Those tests require an installed package; a source-only `PYTHONPATH` does not provide the entrypoints. Native parameter tests do not operate WeChat or prove desktop delivery. Check the workflow for the exact current matrix.
 
 ## Changes and reviews
 
