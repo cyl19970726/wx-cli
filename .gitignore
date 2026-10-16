@@ -1,2 +1,22 @@
 /target
 .DS_Store
+
+# Local account records, keys and test runtime state
+.local/
+__pycache__/
+*.py[cod]
+
+# Local package builds and environments
+.venv/
+packages/wx-agent/build/
+packages/wx-agent/dist/
+*.egg-info/
+
+# Diagram review receipts contain local paths; publish source and HTML only
+.archify/**
+!.archify/README.md
+!.archify/*/
+!.archify/*/candidate.json
+.archify/*/visual-check/
+.archify/*/review-*/
+.archify/*/rebuild-review/

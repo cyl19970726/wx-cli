@@ -1,0 +1,11 @@
+{
+  "wx_cli": "/ABS/bin/wx-cli",
+  "state_dir": "/ABS/private/channel",
+  "consumer": "requirements-agent",
+  "agent_command": ["/ABS/venv/bin/wx-agent", "reply", "--codex", "/ABS/bin/codex", "--model", "gpt-6-astra"],
+  "sender_driver": "/ABS/venv/bin/wx-agent-sender",
+  "start_after": 0,
+  "poll_seconds": 3,
+  "read_retries": 0,
+  "retry_base_seconds": 1
+}

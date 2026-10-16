@@ -362,6 +362,21 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+    /// Bind one local group, collect durable message events and subscribe
+    Channel {
+        /// Explicit private directory for this one channel
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[command(subcommand)]
+        action: cmd::channel::ChannelAction,
+    },
+    /// Queue reply intents; actual WeChat sending requires a separate driver
+    Outbox {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[command(subcommand)]
+        action: cmd::outgoing::OutgoingAction,
+    },
     /// Query decrypted WeChat databases (dev/debug tool)
     #[command(name = "db-dev", hide = true)]
     DbDev {
@@ -569,6 +584,8 @@ async fn main() {
     let cli = Cli::from_arg_matches(&matches).unwrap();
 
     let result = match cli.command {
+        Commands::Channel { state_dir, action } => cmd::channel::run(&state_dir, action),
+        Commands::Outbox { state_dir, action } => cmd::outgoing::run(&state_dir, action),
         Commands::Key { action } => match action {
             KeyAction::Extract { timeout: t } => cmd::key::cmd_key_extract(t).await,
             KeyAction::List => cmd::key::cmd_key_list(),

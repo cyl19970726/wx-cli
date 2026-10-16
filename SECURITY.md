@@ -1,28 +1,20 @@
-# Security Policy
+# Security and privacy
 
-## Supported Versions
+This is an experimental, single-group channel built on an MIT-licensed upstream. It is not an official WeChat integration. A fixed-source review and limited live tests do not establish that all versions or dependencies are safe.
 
-| Version | Supported          |
-|---------|--------------------|
-| 0.7.x   | :white_check_mark: |
-| < 0.7   | :x:                |
+## Boundaries
 
-## Reporting a Vulnerability
+- Read the encrypted WeChat files as bytes into private temporary copies. Never open the live source with SQLite. Keep keys in the local keystore, not command arguments, examples, Git or prompts.
+- Only operate a group/account authorized for the current task. Group text and model output cannot grant access to other chats, files, tools or settings.
+- Channel and outbox state are authoritative. Record an attempt before GUI effects; do not replay uncertain or failed attempts. Local outgoing evidence is not recipient confirmation.
+- Runtime state and notes require private ownership and permissions. Notes are caller assertions with incoming-event provenance, not automatically verified facts.
+- Model adapters send selected message text/curated notes to the configured model provider. Do not describe the entire system as offline merely because the database remains local. Codex is optional and must already be installed and signed in.
+- The signed GUI helper has separate Accessibility/Screen Recording permissions. Rebuilding it may require reauthorization; installing Python must not silently replace it. Screenshots and operational logs must remain private.
 
-If you discover a security vulnerability in wx-cli, please report it responsibly:
+## Reporting
 
-1. **Do NOT open a public issue.**
-2. Use [GitHub Private Vulnerability Reporting](https://github.com/pandorafuture/wx-cli/security/advisories/new) to submit your report.
-3. Include steps to reproduce, affected versions, and potential impact.
+Do not include keys, private messages, account identifiers or operational credentials in a public issue. Use a maintainer-provided private reporting channel; do not assume GitHub private vulnerability reporting has been enabled for this fork. Upstream defects can be reported through [upstream security guidance](https://github.com/pandorafuture/wx-cli/security/policy).
 
-You should receive an acknowledgment within 48 hours. We will work with you to understand the issue and coordinate a fix before any public disclosure.
+The [upstream source review](docs/SECURITY_REVIEW_20261013.md) is dated and scoped to its pinned baseline; it is not an audit of subsequent channel, runtime or helper changes. Dependency upgrades and new release artifacts require fresh checks.
 
-## Scope
-
-wx-cli handles sensitive data including:
-
-- WeChat database encryption keys
-- Decrypted chat messages and media
-- Local keystore files
-
-Security issues in any of these areas are treated with high priority.
+`scripts/check_public_source.py` is a heuristic publication check. It complements review, not a guarantee that no sensitive material exists. The repository contains no test-account access or signed application bundle.
