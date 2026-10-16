@@ -2,28 +2,61 @@
   "schema_version": 1,
   "diagram_type": "tree",
   "meta": {
-    "title": "微信会话 CLI 能力规划",
+    "title": "微信会话 CLI：实现与实机验证",
     "locale": "zh-CN",
-    "subtitle": "现有单群闭环已实测；通用多会话能力仍是规划目标。",
-    "output": ".archify/tree-conversation-capabilities-20261016-155423/conversation-capabilities.html",
+    "subtitle": "通用会话 CLI 已实现；v3 授权目标有界实测通过，个人新发与完整往返仍未验收。",
+    "output": ".archify/tree-conversation-capabilities-20261016-general/conversation-capabilities.html",
     "quality_profile": "showcase",
     "repository": {
       "url": "https://github.com/cyl19970726/wx-cli.git",
       "provider": "github",
-      "revision": "9cefab34df807ff566dc0bf08aa72489ec241276"
+      "revision": "fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b"
     },
     "views": [
       {
-        "id": "current",
-        "label": "当前单群",
-        "focus": ["verified", "selection", "incremental_read", "manual_reply", "handoff", "gui_target"],
-        "note": "仅代表一个已配置测试群的实测闭环"
+        "id": "implemented",
+        "label": "已实现",
+        "focus": [
+          "generic_cli",
+          "find_select",
+          "session_state",
+          "read_page",
+          "manual_ops",
+          "controller_handoff",
+          "identity_guard",
+          "shared_ui_lock"
+        ],
+        "note": "代码与离线检查确认；不代表每种桌面操作均已实测成功"
       },
       {
-        "id": "target",
-        "label": "目标多会话",
-        "focus": ["general", "conversation_id", "agent_modes", "reply_policy", "session_state", "shared_gui", "mcp"],
-        "note": "规划能力，尚未实现"
+        "id": "field",
+        "label": "实机状态",
+        "focus": [
+          "field_checks",
+          "metadata_unique",
+          "read_field",
+          "v3_deployed",
+          "group_send",
+          "private_send",
+          "old_receipts",
+          "p3_wrong_target",
+          "return_popup",
+          "roundtrip_pending",
+          "v5_nav_read",
+          "v4_send_refused",
+          "send_current_unverified"
+        ],
+        "note": "v3 已完成个人和群单条发送核验；返群短弹窗 v4 修复仍待现场复验"
+      },
+      {
+        "id": "future",
+        "label": "未来扩展",
+        "focus": [
+          "future",
+          "resident_agents",
+          "mcp"
+        ],
+        "note": "尚未实现"
       }
     ]
   },
@@ -32,143 +65,396 @@
     "gapX": 42,
     "gapY": 32,
     "nodeW": 184,
-    "nodeMaxW": 250
+    "nodeMaxW": 255
   },
   "nodes": [
     {
       "id": "cli",
       "label": "微信会话 CLI",
-      "sublabel": "能力现状与目标"
+      "sublabel": "代码能力、实机证据与后续范围"
     },
     {
-      "id": "verified",
-      "label": "当前：单群闭环",
+      "id": "generic_cli",
+      "label": "已实现：通用手动 CLI",
       "parent": "cli",
-      "sublabel": "已实测：一个已配置测试群",
+      "sublabel": "群聊与个人会话按需操作；Agent 可选，不自动回复所有会话",
       "sources": [
-        { "path": "docs/INTERACTIVE_CLI.md", "line": 3, "end_line": 5, "label": "单群范围与入口" },
-        { "path": "docs/INTERACTIVE_CLI.md", "line": 38, "label": "高层初始化边界" },
-        { "path": "crates/wx-cli/src/cmd/channel.rs", "line": 22, "end_line": 72, "label": "底层通道命令范围" }
+        {
+          "path": "docs/CONVERSATIONS_CLI.md",
+          "line": 1,
+          "end_line": 3,
+          "label": "功能范围"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 571,
+          "end_line": 639,
+          "label": "CLI 命令入口"
+        }
       ]
     },
     {
-      "id": "selection",
-      "label": "查找并选定已绑定群",
-      "parent": "verified",
-      "sublabel": "精确名称查找；拒绝切换其他 ID",
+      "id": "find_select",
+      "label": "发现并选择会话",
+      "parent": "generic_cli",
+      "sublabel": "群/个人按稳定 conversation_id 选择",
       "sources": [
-        { "path": "crates/wx-cli/src/cmd/groups.rs", "line": 14, "end_line": 28, "label": "群查找参数" },
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 268, "end_line": 297, "label": "查找与绑定校验" }
+        {
+          "path": "crates/wx-cli/src/cmd/conversations.rs",
+          "line": 63,
+          "end_line": 69,
+          "label": "稳定 ID 派生"
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/conversations.rs",
+          "line": 127,
+          "end_line": 178,
+          "label": "群与个人元数据发现"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 134,
+          "end_line": 160,
+          "label": "ID 或名称查询"
+        }
       ]
-    },
-    {
-      "id": "incremental_read",
-      "label": "加密副本读取与增量分页",
-      "parent": "verified",
-      "sublabel": "事件游标、发送者、方向；历史有界",
-      "sources": [
-        { "path": "crates/wx-cli/src/cmd/groups.rs", "line": 1, "end_line": 1, "label": "私有副本元数据查询" },
-        { "path": "crates/wx-cli/src/cmd/channel_snapshot.rs", "line": 115, "end_line": 157, "label": "快照文件范围" },
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 300, "end_line": 315, "label": "游标分页读取" }
-      ]
-    },
-    {
-      "id": "manual_reply",
-      "label": "按需回复或跳过",
-      "parent": "verified",
-      "sublabel": "操作者决定是否回复；同来源防重复",
-      "sources": [
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 348, "end_line": 426, "label": "显式回复与重试核验" },
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 429, "end_line": 497, "label": "skip 审计与游标确认" },
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 593, "end_line": 618, "label": "reply 与 skip 命令入口" }
-      ]
-    },
-    {
-      "id": "handoff",
-      "label": "安全接管与交还",
-      "parent": "verified",
-      "sublabel": "与常驻运行器协调，不强杀发送中任务",
-      "sources": [
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 317, "end_line": 345, "label": "接管" },
-        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 500, "end_line": 555, "label": "交还" }
-      ]
-    },
-    {
-      "id": "gui_target",
-      "label": "发送时定位绑定群",
-      "parent": "verified",
-      "sublabel": "核对窗口与目标；不是任意会话切换",
-      "sources": [
-        { "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py", "line": 365, "end_line": 392, "label": "定位配置群" },
-        { "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py", "line": 421, "end_line": 437, "label": "发送前聚焦目标群" }
-      ]
-    },
-    {
-      "id": "general",
-      "label": "目标：通用会话 CLI",
-      "parent": "cli",
-      "sublabel": "规划目标 · 尚未实现"
-    },
-    {
-      "id": "conversation_id",
-      "label": "任意会话选择",
-      "parent": "general",
-      "sublabel": "微信群或指定个人；稳定唯一 conversation_id"
-    },
-    {
-      "id": "history_api",
-      "label": "统一读取接口",
-      "parent": "general",
-      "sublabel": "历史、发送者、分页与增量游标"
-    },
-    {
-      "id": "agent_modes",
-      "label": "会话独立运行方式",
-      "parent": "general",
-      "sublabel": "仅 CLI / 当前 Agent / 常驻 Agent，逐会话选择"
-    },
-    {
-      "id": "reply_policy",
-      "label": "按需发送与回复",
-      "parent": "general",
-      "sublabel": "支持主动联系；读到消息不强制发言"
     },
     {
       "id": "session_state",
-      "label": "每会话独立状态",
-      "parent": "general",
-      "sublabel": "模式、上下文与读取游标分别保存"
+      "label": "会话状态彼此独立",
+      "parent": "generic_cli",
+      "sublabel": "每个 ID 有独立 channel；已有状态拒绝重绑",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 281,
+          "end_line": 325,
+          "label": "每会话状态与不可重绑校验"
+        },
+        {
+          "path": "docs/CONVERSATIONS_CLI.md",
+          "line": 47,
+          "end_line": 50,
+          "label": "注册与选择规则"
+        }
+      ]
     },
     {
-      "id": "shared_gui",
-      "label": "多会话 GUI 调度",
-      "parent": "general",
-      "sublabel": "共享桌面资源并按绑定定位和切换目标"
+      "id": "read_page",
+      "label": "只读读取与游标分页",
+      "parent": "generic_cli",
+      "sublabel": "发送者、方向、正文与增量 cursor；不确认消费",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 340,
+          "end_line": 376,
+          "label": "事件校验与分页"
+        },
+        {
+          "path": "docs/CONVERSATIONS_CLI.md",
+          "line": 51,
+          "end_line": 60,
+          "label": "只读分页行为"
+        }
+      ]
+    },
+    {
+      "id": "manual_ops",
+      "label": "手动 focus / send / reply",
+      "parent": "generic_cli",
+      "sublabel": "显式调用；读取不触发发言或模型",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 463,
+          "end_line": 501,
+          "label": "手动发送与回复"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 558,
+          "end_line": 568,
+          "label": "显式 focus"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 571,
+          "end_line": 595,
+          "label": "命令接口"
+        }
+      ]
+    },
+    {
+      "id": "controller_handoff",
+      "label": "导入旧 controller 并协调交接",
+      "parent": "generic_cli",
+      "sublabel": "操作前接管；结束后恢复原启停状态",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 181,
+          "end_line": 214,
+          "label": "核对既有 controller 绑定"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 281,
+          "end_line": 325,
+          "label": "选择时复用原状态"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 379,
+          "end_line": 419,
+          "label": "接管与 handback"
+        }
+      ]
+    },
+    {
+      "id": "identity_guard",
+      "label": "桌面目标身份防歧义",
+      "parent": "generic_cli",
+      "sublabel": "发送前按 ID 与种类复核；完整标题框/分类搜索双重校验",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 163,
+          "end_line": 178,
+          "label": "元数据唯一性复核"
+        },
+        {
+          "path": "native/macos/wechat-bridge/VisualParameters.swift",
+          "line": 63,
+          "end_line": 97,
+          "label": "标题完整边界和种类校验"
+        },
+        {
+          "path": "native/macos/wechat-bridge/parameter_tests.swift",
+          "line": 135,
+          "end_line": 160,
+          "label": "标题发送者误匹配回归"
+        }
+      ]
+    },
+    {
+      "id": "shared_ui_lock",
+      "label": "共享桌面发送锁",
+      "parent": "generic_cli",
+      "sublabel": "聚焦与发送共用 sender.lock，避免并行操作桌面",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 255,
+          "end_line": 278,
+          "label": "沿用同一 UI 目录配置"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 655,
+          "end_line": 684,
+          "label": "focus 共享桌面锁"
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 686,
+          "end_line": 705,
+          "label": "发送共享桌面锁"
+        }
+      ]
+    },
+    {
+      "id": "future",
+      "label": "尚未实现的扩展",
+      "parent": "cli",
+      "sublabel": "不影响当前手动 CLI 能力"
+    },
+    {
+      "id": "resident_agents",
+      "label": "多常驻 Agent 与调度",
+      "parent": "future",
+      "sublabel": "逐会话运行模式注册与共享桌面调度",
+      "sources": [
+        {
+          "path": "docs/CONVERSATIONS_CLI.md",
+          "line": 92,
+          "end_line": 94,
+          "label": "未实现范围"
+        }
+      ]
     },
     {
       "id": "mcp",
-      "label": "MCP 工具适配层",
-      "parent": "general",
-      "sublabel": "规划项；复用 CLI 能力与状态规则"
+      "label": "MCP 适配层",
+      "parent": "future",
+      "sublabel": "尚未实现",
+      "sources": [
+        {
+          "path": "docs/CONVERSATIONS_CLI.md",
+          "line": 92,
+          "end_line": 94,
+          "label": "未实现范围"
+        }
+      ]
+    },
+    {
+      "id": "field_checks",
+      "label": "实机状态：v5 导航/读取通过",
+      "parent": "cli",
+      "sublabel": "v5 未发送；v3 单条发送证据单独标注"
+    },
+    {
+      "id": "metadata_unique",
+      "label": "授权会话元数据唯一",
+      "parent": "field_checks",
+      "sublabel": "个人与测试群均通过；不公开名称或 ID"
+    },
+    {
+      "id": "read_field",
+      "label": "加密副本读取核验",
+      "parent": "field_checks",
+      "sublabel": "个人入站及群发送后事件读回通过；非 OCR"
+    },
+    {
+      "id": "v3_deployed",
+      "label": "v3 helper 与权限已确认",
+      "parent": "field_checks",
+      "sublabel": "固定路径部署；辅助功能、录屏、事件控制均启用"
+    },
+    {
+      "id": "group_send",
+      "label": "v3 测试群发送闭环通过",
+      "parent": "field_checks",
+      "sublabel": "一次发送获收件确认、事件读回；重复请求未重发"
+    },
+    {
+      "id": "old_receipts",
+      "label": "旧版 PRIVATE-OK 与群回复",
+      "parent": "field_checks",
+      "sublabel": "用户各确认收到一次；不是 v3 私人发送证据"
+    },
+    {
+      "id": "p3_wrong_target",
+      "label": "P3 错误目标事故保留边界",
+      "parent": "field_checks",
+      "sublabel": "旧发送落入测试群；禁止恢复/重放，不作为私聊成功",
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/VisualParameters.swift",
+          "line": 63,
+          "end_line": 97,
+          "label": "标题完整边界和会话种类匹配"
+        },
+        {
+          "path": "native/macos/wechat-bridge/parameter_tests.swift",
+          "line": 135,
+          "end_line": 160,
+          "label": "发送者区域误匹配回归"
+        }
+      ]
+    },
+    {
+      "id": "roundtrip_pending",
+      "label": "完整发送与回复闭环未验收",
+      "parent": "field_checks",
+      "sublabel": "v5 仅导航/读取；v3 旧单条发送已确认，不能外推当前版本"
+    },
+    {
+      "id": "legacy_live",
+      "label": "既有单群历史闭环",
+      "parent": "field_checks",
+      "sublabel": "历史 reply / skip / handback 证据独立保留",
+      "sources": [
+        {
+          "path": "docs/INTERACTIVE_VALIDATION_20261016.md",
+          "line": 33,
+          "end_line": 58,
+          "label": "既有单群现场记录"
+        }
+      ]
+    },
+    {
+      "id": "private_send",
+      "label": "v3 个人单条发送通过",
+      "parent": "field_checks",
+      "sublabel": "用户确认收到一次，副本读回一条；不重放旧意图"
+    },
+    {
+      "id": "return_popup",
+      "label": "返群短弹窗修复待复验",
+      "parent": "field_checks",
+      "sublabel": "v4 368×194 短弹窗门槛修复；v5 导航与读后 focus 通过",
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/VisualParameters.swift",
+          "line": 123,
+          "end_line": 132,
+          "label": "短搜索弹窗几何门槛"
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 718,
+          "end_line": 753,
+          "label": "搜索弹窗捕获与复核"
+        },
+        {
+          "path": "native/macos/wechat-bridge/parameter_tests.swift",
+          "line": 54,
+          "end_line": 76,
+          "label": "368×194 与边界回归"
+        }
+      ]
+    },
+    {
+      "id": "v5_nav_read",
+      "label": "v5 实机导航与读取通过",
+      "parent": "field_checks",
+      "sublabel": "三权限已确认；个人/群 focus、群读取、读后再 focus 均成功",
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 768,
+          "end_line": 817,
+          "label": "有界分类搜索与窗口校验"
+        },
+        {
+          "path": "native/macos/wechat-bridge/VisualParameters.swift",
+          "line": 48,
+          "end_line": 59,
+          "label": "六秒搜索预算与脱敏诊断"
+        }
+      ]
+    },
+    {
+      "id": "v4_send_refused",
+      "label": "v4 发送尝试输入前停止",
+      "parent": "field_checks",
+      "sublabel": "focus 未确认；无输入、无新发送、未重试"
+    },
+    {
+      "id": "send_current_unverified",
+      "label": "v5 发送与完整回复流程未测",
+      "parent": "field_checks",
+      "sublabel": "没有 v5 send；v3 单条收件确认不代表当前版本"
     }
   ],
   "cards": [
     {
       "dot": "emerald",
-      "title": "当前验证边界",
+      "title": "实机证据边界",
       "items": [
-        "已验证：单个已配置测试群、结构化读取（加密副本，非 OCR）、sender 与分页/增量、按需 reply/skip、防重复、takeover/handback，以及发送时定位该绑定群。",
-        "未实现：任意会话注册/切换、指定个人私聊、逐群模式注册表、多群 GUI 调度与 MCP。",
-        "可选路径仍有限：高层 CLI 沿用已初始化控制器，尚无独立的首次人工初始化命令；底层 channel 消息接口提供事件与游标操作，不调用模型。",
-        "图中能力规划不代表所有目标节点均已有源码实现。"
+        "v5 已验证导航/读取：三项 macOS 权限均为启用；授权个人 focus 2.789 秒、测试群 focus 3.553 秒；群读取 3 条事件、next cursor 43；读取后再次 focus 4.331 秒。界面搜索弹窗在 334/582/1408 ms 首次被观察到。",
+        "v3 历史单条发送：授权个人与测试群各发送一次，用户各确认收到一次；群副本读回一条，重复同一 request 返回已完成且未再次操作 GUI。它们不是 v5 发送证据。",
+        "P3 错误目标尝试不得恢复或重放。v4 末次发送 focus 在输入前失败，无新发送且未重试；v5 没有发送消息。当前版本 send、群 reply 与完整往返仍未验收。"
       ]
     },
     {
       "dot": "amber",
-      "title": "运行原则",
+      "title": "实现范围",
       "items": [
-        "每个会话由操作者明确选择 Agent 与运行模式；不对所有群默认自动回复。",
-        "读取不等于回复；每条消息可处理、延后或跳过。"
+        "稳定 conversation_id、群/个人 find/select/read/focus/send/reply 已实现；Agent 可选，读取不强制发言，发送与回复由调用方按需发起。",
+        "现场证据限于授权目标和已完成的有界操作。桌面 UI 仍受窗口状态、同名标题及并发手动切换影响，不宣称任意目标无条件可用或长期无人值守可靠。",
+        "多常驻 Agent、逐会话模式表、共享桌面多群调度与 MCP 尚未实现；公开图不含私有会话标识、消息正文、截图或运行路径。"
       ]
     }
   ]

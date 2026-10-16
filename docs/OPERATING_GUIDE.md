@@ -37,7 +37,7 @@ Python 包要求 Python 3.9+。原生图形助手当前面向 Apple Silicon 与 
 
 状态、配置、日志、快照及助手输出都可能包含账号标识或消息正文。放在当前用户拥有的私有目录中：目录权限 `0700`、配置/状态文件权限 `0600`。示例位置可用 `/ABS/private/wx-agent/`；不要把 `.local/`、真实群 ID、消息正文、截图、密钥或部署配置加入仓库。
 
-桌面发送另外需要本机的已校准原生助手，以及其私有 sender 配置中的准确绑定、助手可执行文件哈希、窗口与输入框参数。完整要求见[原生助手说明](../native/macos/wechat-bridge/README.md)。不要照抄文档中的示意窗口坐标；不要把私有 sender 配置或助手输出复制到仓库。重新构建助手可能改变签名并使现有系统授权失效。
+桌面发送另外需要本机的已校准原生助手，以及其私有 sender 配置中的准确绑定、助手可执行文件哈希、窗口与输入框参数。完整要求见[原生助手说明](../native/macos/wechat-bridge/README.md)。不要照抄示意窗口坐标，也不要把私有配置或助手输出复制到仓库。重建助手可能改变签名并使系统权限失效，因此不作例行副作用；升级后必须先检查 helper 身份和三项权限，再操作桌面。当前部署和现场验证状态集中记录在[通用会话验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
 ## 3. 绑定单群与首次低层只读
 
@@ -171,7 +171,20 @@ export WX_SENDER_CONFIG=/ABS/private/wx-agent/sender-config.json
 
 skip 会用原 consumer 的 CAS 确认游标并保存原因审计；不会创建 outbox 请求、调用模型或 GUI。重复调用须使用同一游标和相同原因。不要用 skip 隐藏发送失败或不明结果。
 
-`ui_observed` 只表示本机发现相符的出站证据，不代表对方收件确认。若返回或状态显示 `attempt_recorded`、`failed`、`indeterminate`、`send_uncertain`，停止；通过同一个 request ID 和 `status` 核对原请求，检查授权测试接收端。不要自动重试、换 request ID、换 GUI 手段或再次点击发送。只有独立收件证据才能记录为收件确认。
+`ui_observed` 只表示本机发现相符的出站证据，不代表对方收件确认。若返回或状态显示 `attempt_recorded`、`failed`、`indeterminate`、`send_uncertain`，停止；通过同一个 request ID 和 `status` 核对原请求，检查授权测试接收端。默认不自动重试、换 request ID、换 GUI 手段或再次点击发送。唯一恢复例外是操作者显式执行 `recover-unsent`，且只针对原 outbox attempt 精确匹配以下两种准备失败之一：`Cannot snapshot a clipboard item` 或 `Copied composer text does not exactly match expected draft`。恢复还必须通过 driver 能力握手、只读 preflight、完整且相互一致的私有 GUI 证据、无 submit 痕迹与无存活 helper 的检查；之后以同 request ID、同正文、同绑定 CAS 领取下一不可变 attempt，并由 driver 在 UI 锁内再次证明未提交，再最多尝试一次。任何证据缺失/矛盾或状态不匹配都停止，不回退普通发送。真实 submit、错误目标/P3、`ui_observed`、收件确认或任意未知结果都不可恢复、不可重放。只有独立收件证据才能记录为收件确认。完整条款见[恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
+
+当前源代码提供以下显式命令；操作前必须先确认实际运行 Mac 已装有新 Python 包，并检查当地 `--help` 要求 `--expected-attempt`。示例中的 request、cursor 和会话 ID 均为合成值：
+
+```sh
+/ABS/venv/bin/wx-agent chat --config /ABS/private/wx-agent/group-controller.json \
+  recover-unsent-reply --cursor 121 --expected-attempt 1
+
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json \
+  recover-unsent-send --id 0123456789abcdef0123456789abcdef \
+  --request-id synthetic-request-001 --expected-attempt 1
+```
+
+`chat` 只恢复与原 controller lease、cursor、request 和正文一致的 pending reply；`conversations` 必须指定稳定 conversation ID 并复用导入 controller 的原 lease。若实际包未包含命令、preflight 不能明确证明未提交，或恢复后仍失败/不明，保留所有原记录并停止；不要创建替代 ID 或连续尝试。本轮两条旧意图各自完成一次 `ui_observed` 并获收件端确认；重复原 `chat reply` / `conversations reply` cursor 命令返回 `already_completed`，没有再次恢复或发送。P3 误目标意图因 submit 证据被拒绝且永不重放。返回群 focus 的故障时点与根因未知：失败时无 popup PNG，失败后观察到 368×500 窗口。v4 权限和若干 focus 曾现场通过，但群发送 focus 随后再次失败且未进入 prepare/submit；原 request 保留且不得重试。v5 permissions、有限定向导航与分页读取已现场验证；v5 发送未测试，长期稳定性未证明。完整往返未闭环。实际状态见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
 ## 7. 交还与可选常驻运行器
 
@@ -196,7 +209,7 @@ skip 会用原 consumer 的 CAS 确认游标并保存原因审计；不会创建
 | `wx-cli` 说缺少账号 key | 停止读取并由授权维护流程确认本地 KeyStore 与账号目录映射；不要在命令行或对话中贴密钥。 |
 | `snapshot` 不稳定或拒绝读取 | 停止对该源的并发变化，确认微信数据路径及残留私有快照；不要直接打开在线数据库或删除可能仍被使用的快照。 |
 | `earlier_incoming` | 按 `read` 返回的游标顺序读完前面的入站文本，为每条选择回复或 skip，再处理目标消息。 |
-| `outbox_pending`、`send_uncertain` 或结果不明 | 保留原记录和 request ID，查看 `chat status` 与该请求 `outbox show`；核对收件端。不得重新发送。 |
+| `outbox_pending`、`send_uncertain` 或结果不明 | 默认停止，保留原记录和 request ID，查看 `chat status` 与该请求 `outbox show`；核对收件端。只有确认属于两种批准的准备错误且实际安装版本支持恢复命令时，才按本节的严格 proof 流程显式恢复一次；不满足即不得重发。 |
 | sender 校准/权限错误 | 在运行微信的 Mac 上查看原生助手说明，刷新窗口检查和校准并验证私有 `WX_SENDER_CONFIG`。不要为绕过校验重建助手或直接点击发送。 |
 | `manual_pending` 或 handback 失败 | 先按状态核实 pending 的原回复/skip、consumer 游标和 runner 状态；解决原操作后重试 handback。不要删 lease、outbox 或日志。 |
 | 状态显示运行器停止或健康异常 | 查看私有日志与 `status`，核对配置可执行文件路径、账号登录及桌面权限；日志包含私有数据，禁止复制到公开 issue。 |
@@ -240,9 +253,9 @@ skip 会用原 consumer 的 CAS 确认游标并保存原因审计；不会创建
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json read --limit 20
 ```
 
-显示名重合会保留全部候选，focus/send/reply 在 UI 名称不唯一时拒绝操作。需要桌面发送时再用 `focus` 核验目标；只读读取不启动模型，也不确认消费。通用手动 `send` 使用调用方稳定 request ID，`reply` 使用来源 cursor；两者都从私有文件标准输入取得正文。普通会话 reply 不 ack，导入旧单群 controller 的 reply 则继续使用原消费确认。未知发送结果沿用原 ID 核验，禁止自动重试。具体命令见[群/个人会话 CLI](CONVERSATIONS_CLI.md)。
+显示名重合会保留全部候选，focus/send/reply 在 UI 名称不唯一时拒绝操作。只读 metadata 与加密副本检查仍可按授权范围使用，不调用模型，也不确认消费。通用手动 `send` 使用调用方稳定 request ID，`reply` 使用来源 cursor；两者都从私有文件标准输入取得正文。普通会话 reply 不 ack，导入旧单群 controller 的 reply 则继续使用原消费确认。未知发送结果仍禁止自动重试。当前现场状态及继续桌面操作的条件见[会话验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
-`wx-agent conversations` 当前支持按需发现/选择群聊与个人会话、分别保存本地状态、分页读取及手动发送/回复；复用已配置群 controller 时自动协调该原 writer。它不提供 `skip` 或常驻模式。既有 `wx-agent chat` 的 skip、会话笔记和常驻运行仍限于旧单群控制器流程。新会话 CLI 的真实 Mac/微信读写验证仍待完成；离线工程检查不能替代现场验收。多常驻 Agent、逐会话模式表、共享桌面多群调度、MCP 或全天候无人值守尚未实现。
+`wx-agent conversations` 当前支持按需发现/选择群聊与个人会话、分别保存本地状态、分页读取及手动发送/回复；复用已配置群 controller 时自动协调该原 writer。它不提供 `skip` 或常驻模式。既有 `wx-agent chat` 的 skip、会话笔记和常驻运行仍限于旧单群控制器流程。v4 权限及私人返回群/私人/群 focus 曾通过有限现场验证，但群发送 focus 再次失败且未进入 prepare/submit；原 request 不重试。v5 的权限、有限导航和分页读取已通过；v5 发送未测试，完整往返与长期稳定性未闭环。当前权限、运行状态、收件确认和历史异常见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。多常驻 Agent、逐会话模式表、共享桌面多群调度、MCP 或全天候无人值守尚未实现。
 
 ## 参考
 
@@ -250,6 +263,7 @@ skip 会用原 consumer 的 CAS 确认游标并保存原因审计；不会创建
 - [单群 CLI](SINGLE_GROUP_CLI.md)
 - [交互 CLI](INTERACTIVE_CLI.md)
 - [群/个人会话 CLI](CONVERSATIONS_CLI.md)
+- [通用会话验证记录](CONVERSATIONS_VALIDATION_20261016.md)
 - [渠道、Agent 与发送契约](contracts.md)
 - [原生发送助手](../native/macos/wechat-bridge/README.md)
 - [交互现场验证](INTERACTIVE_VALIDATION_20261016.md)

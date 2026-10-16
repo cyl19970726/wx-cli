@@ -17,11 +17,13 @@ def main():
         folder = root / ".archify/architecture-agent-channel-20261016-123000"
         source = folder / "candidate.json"
         stem = "agent-channel"
+        default_receipt = folder / (stem + ".finalize-summary.json")
     else:
-        folder = root / ".archify/tree-conversation-capabilities-20261016-155423"
+        folder = root / ".archify/tree-conversation-capabilities-20261016-general"
         source = root / "docs/diagrams/conversation-capabilities.tree.json"
         stem = "conversation-capabilities"
-    receipt_path = args.receipt or folder / (stem + ".finalize-summary.json")
+        default_receipt = folder / "revision-3" / (stem + ".finalize-summary.json")
+    receipt_path = args.receipt or default_receipt
     receipt = json.loads(receipt_path.read_text())
     if receipt.get("status") != "pass":
         parser.error("Archify finalize must pass before publication")

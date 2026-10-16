@@ -2,6 +2,8 @@
 
 `wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。已配置的单群 controller 可以导入复用，涉及它时 CLI 会协调原 writer 并在完成后交还。当前不提供多常驻 Agent 调度或 MCP。
 
+**现场状态（2026-10-16）：v5 权限、私人/群定向导航和分页读取已通过有限探测；v5 发送和长期稳定性未验证。v4 原群请求在发送准备前失败，必须保留且不得重试。** 当前证据、历史异常与运行状态集中记录在[验证记录](CONVERSATIONS_VALIDATION_20261016.md)；每次桌面写操作前核对当前权限和验证门槛。
+
 ## 配置一次
 
 先按[操作指南](OPERATING_GUIDE.md)准备同一台已登录微信 Mac 上的授权账号、加密读取来源、已有 KeyStore key、Rust `wx-cli`、Python 虚拟环境以及已签名并校准的现有 sender helper。这里的 `source` 是含 `db_storage/` 的账号目录；工具读取受保护的临时副本。不要在命令行、对话或配置中放密钥，也不要改变 SIP 来满足本流程。
@@ -13,7 +15,7 @@ mkdir -p /ABS/private/wx-agent/conversations
 chmod 700 /ABS/private/wx-agent/conversations
 ```
 
-把现有、已校准的 sender 私有配置复制为 `sender-template.json`，保持 `0600`，不要使用公开模板或示意坐标。模板应包含现有 helper 要求的 `protocol_version`、`helper_app`、`helper_sha256`、固定 `ui_dir`、`expected_pid`、`window_size`、`composer_rect`、`button_point`、`conversation_list_rect` 和 `search_point`。窗口值以当前微信桌面检查和校准结果为准。会话 CLI 会为每个绑定生成私有 sender 配置，并通过 `target_name` 与 `conversation_kind` 让现有 driver/helper 定位该会话；它沿用 helper 的 `targetGroup` 兼容字段，不要求构建新的原生 helper。
+把现有、已校准的 sender 私有配置复制为 `sender-template.json`，保持 `0600`，不要使用公开模板或示意坐标。模板应包含现有 helper 要求的 `protocol_version`、`helper_app`、`helper_sha256`、固定 `ui_dir`、`expected_pid`、`window_size`、`composer_rect`、`button_point`、`conversation_list_rect` 和 `search_point`。窗口值以当前微信桌面检查和校准结果为准。会话 CLI 会为每个绑定生成私有 sender 配置，并通过 `target_name` 与 `conversation_kind` 让现有 driver/helper 定位该会话；它沿用 helper 的 `targetGroup` 兼容字段。通常复用现有 helper；只有发现具体缺陷并完成审查时才更新，更新与现场验证状态见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
 创建 `0600` 的会话配置，路径全部使用绝对路径，不要包含 `..`。`registry_dir` 必须预先创建，且和微信来源目录互不嵌套；`account` 必须等于 `source` 的目录末级名称。`controller_configs` 可省略；填入要导入并协调的既有单群 controller 配置路径：
 
@@ -61,7 +63,7 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 ## 可选桌面聚焦与发送
 
-只有任务已明确授权向该测试会话发送时才操作桌面。`focus` 仅核验并定位目标会话，不创建消息：
+只有任务已明确授权向该测试会话发送时才操作桌面。操作前 fresh inspect 当前 helper 的 Accessibility、Screen Recording、Post Events 权限，三项全部启用后才继续；按[验证记录](CONVERSATIONS_VALIDATION_20261016.md)确认当前 build 已允许现场测试。`focus` 只定位目标，不创建消息。出现窗口/标题保护错误时停止，不绕过或重复尝试：
 
 ```sh
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json focus
@@ -89,6 +91,20 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 普通读取和手动回复无需模型、常驻 Agent 或 takeover。对导入并正在运行的单群 controller，桌面写操作会自动协调这一个原 writer；不要再启动第二个回复 Agent。当前没有通用 `skip` 子命令：不需回复时仅阅读并结束即可，普通读取不会自动 ack。旧单群 `wx-agent chat skip` 仍只适用于其既有单群 controller 流程。
 
+## 只对证实未提交的原意图做显式恢复
+
+默认规则仍是 `attempt_recorded`、`failed`、`indeterminate` 或未知结果不得自动重试、换 request ID 或再次点击发送。显式 `recover-unsent-send` 是严格例外，只能使用相同的原 request ID、正文、绑定及 outbox attempt，并要求与现场证据完全匹配。原生 driver 只接受两种已知的准备失败（剪贴板项无法快照；复制的编辑框文字与预期草稿不完全一致），确认无 submit 痕迹、无存活 helper，完成能力握手和只读 preflight，并在共用 UI 锁内重新验证后才可能发送一次。缺少任一证据、状态不同或 preflight 未明确证明未提交时，停止；不存在普通 `send` fallback。错误目标/P3 发送有 submit 证据，不能恢复或重放。
+
+当前 Mac 已安装包含恢复协议的 Python 包，实际 CLI help 已核对。后续更新仍须先核对实际 help，命令形状为：
+
+```sh
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json \
+  recover-unsent-send --id 0123456789abcdef0123456789abcdef \
+  --request-id synthetic-request-001 --expected-attempt 1
+```
+
+`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。若该会话导入单群 controller，命令复用原 lease 与 reply pending；不会创建新的 channel/consumer。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态只以[验证记录](CONVERSATIONS_VALIDATION_20261016.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
+
 ## 现有单群入口与功能状态
 
-已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。此变更的离线测试与代码检查不等于真实桌面/手机验收；多会话实时切换、消息送达和 sender 校准仍需在明确授权的测试身份上验证。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。
+已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。当前部署状态见[现场验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
