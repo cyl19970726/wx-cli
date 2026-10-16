@@ -15,6 +15,7 @@ wx-cli/
 ├── packages/wx-agent/               Python 安装包
 │   └── src/wx_agent/
 │       ├── cli.py                  wx-agent 统一入口
+│       ├── interactive.py          选群、分页、接管与交还编排
 │       ├── channel_agent.py        入站 → 模型 → 发件箱 → 确认
 │       ├── wechat_agent_ctl.py      生命周期与进程身份校验
 │       ├── codex_reply_agent.py     已登录 Codex 的文本生成适配
@@ -43,6 +44,8 @@ wx-cli/
 读取事件不会自动确认消费。运行器仅处理绑定群的明确入站文本；自己的出站、更新事件及非文本不会触发自我对话。准备好的回复先落盘，再进入 outbox。达到本地 `ui_observed` 才确认事件；不明结果保留 pending 并停止，重启也不会换 ID 重发。
 
 控制器与执行器分开：`wx-agent start` 启动本机运行器，`status/pause/resume/stop` 控制它。暂停和停止在安全边界生效，不强杀正在提交的发送。Mac mini 可以同时运行读取、模型适配和发送，不依赖控制笔记本的 SSH 会话。
+
+交互 Agent 使用 `wx-agent chat`，直接读取结构化事件并撰写文案；它与常驻运行器共用同一 Rust outbox。接管通过等待后台退出、检查 pending、取得运行锁与持久占用标记完成。手动回复按源消息生成相同请求 ID，并比较原 consumer 游标后确认。交还恢复先前运行状态；新进程完成就绪握手后才解除占用。图中 Agent 运行器节点概括此编排层，交互命令细节见 [交互 CLI](INTERACTIVE_CLI.md)。
 
 ## 会话记忆
 

@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "diagram_type": "tree",
+  "meta": {
+    "title": "微信会话 CLI 能力规划",
+    "locale": "zh-CN",
+    "subtitle": "现有单群闭环已实测；通用多会话能力仍是规划目标。",
+    "output": ".archify/tree-conversation-capabilities-20261016-155423/conversation-capabilities.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/cyl19970726/wx-cli.git",
+      "provider": "github",
+      "revision": "9cefab34df807ff566dc0bf08aa72489ec241276"
+    },
+    "views": [
+      {
+        "id": "current",
+        "label": "当前单群",
+        "focus": ["verified", "selection", "incremental_read", "manual_reply", "handoff", "gui_target"],
+        "note": "仅代表一个已配置测试群的实测闭环"
+      },
+      {
+        "id": "target",
+        "label": "目标多会话",
+        "focus": ["general", "conversation_id", "agent_modes", "reply_policy", "session_state", "shared_gui", "mcp"],
+        "note": "规划能力，尚未实现"
+      }
+    ]
+  },
+  "layout": {
+    "direction": "right",
+    "gapX": 42,
+    "gapY": 32,
+    "nodeW": 184,
+    "nodeMaxW": 250
+  },
+  "nodes": [
+    {
+      "id": "cli",
+      "label": "微信会话 CLI",
+      "sublabel": "能力现状与目标"
+    },
+    {
+      "id": "verified",
+      "label": "当前：单群闭环",
+      "parent": "cli",
+      "sublabel": "已实测：一个已配置测试群",
+      "sources": [
+        { "path": "docs/INTERACTIVE_CLI.md", "line": 3, "end_line": 5, "label": "单群范围与入口" },
+        { "path": "docs/INTERACTIVE_CLI.md", "line": 38, "label": "高层初始化边界" },
+        { "path": "crates/wx-cli/src/cmd/channel.rs", "line": 22, "end_line": 72, "label": "底层通道命令范围" }
+      ]
+    },
+    {
+      "id": "selection",
+      "label": "查找并选定已绑定群",
+      "parent": "verified",
+      "sublabel": "精确名称查找；拒绝切换其他 ID",
+      "sources": [
+        { "path": "crates/wx-cli/src/cmd/groups.rs", "line": 14, "end_line": 28, "label": "群查找参数" },
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 268, "end_line": 297, "label": "查找与绑定校验" }
+      ]
+    },
+    {
+      "id": "incremental_read",
+      "label": "加密副本读取与增量分页",
+      "parent": "verified",
+      "sublabel": "事件游标、发送者、方向；历史有界",
+      "sources": [
+        { "path": "crates/wx-cli/src/cmd/groups.rs", "line": 1, "end_line": 1, "label": "私有副本元数据查询" },
+        { "path": "crates/wx-cli/src/cmd/channel_snapshot.rs", "line": 115, "end_line": 157, "label": "快照文件范围" },
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 300, "end_line": 315, "label": "游标分页读取" }
+      ]
+    },
+    {
+      "id": "manual_reply",
+      "label": "按需回复或跳过",
+      "parent": "verified",
+      "sublabel": "操作者决定是否回复；同来源防重复",
+      "sources": [
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 348, "end_line": 426, "label": "显式回复与重试核验" },
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 429, "end_line": 497, "label": "skip 审计与游标确认" },
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 593, "end_line": 618, "label": "reply 与 skip 命令入口" }
+      ]
+    },
+    {
+      "id": "handoff",
+      "label": "安全接管与交还",
+      "parent": "verified",
+      "sublabel": "与常驻运行器协调，不强杀发送中任务",
+      "sources": [
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 317, "end_line": 345, "label": "接管" },
+        { "path": "packages/wx-agent/src/wx_agent/interactive.py", "line": 500, "end_line": 555, "label": "交还" }
+      ]
+    },
+    {
+      "id": "gui_target",
+      "label": "发送时定位绑定群",
+      "parent": "verified",
+      "sublabel": "核对窗口与目标；不是任意会话切换",
+      "sources": [
+        { "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py", "line": 365, "end_line": 392, "label": "定位配置群" },
+        { "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py", "line": 421, "end_line": 437, "label": "发送前聚焦目标群" }
+      ]
+    },
+    {
+      "id": "general",
+      "label": "目标：通用会话 CLI",
+      "parent": "cli",
+      "sublabel": "规划目标 · 尚未实现"
+    },
+    {
+      "id": "conversation_id",
+      "label": "任意会话选择",
+      "parent": "general",
+      "sublabel": "微信群或指定个人；稳定唯一 conversation_id"
+    },
+    {
+      "id": "history_api",
+      "label": "统一读取接口",
+      "parent": "general",
+      "sublabel": "历史、发送者、分页与增量游标"
+    },
+    {
+      "id": "agent_modes",
+      "label": "会话独立运行方式",
+      "parent": "general",
+      "sublabel": "仅 CLI / 当前 Agent / 常驻 Agent，逐会话选择"
+    },
+    {
+      "id": "reply_policy",
+      "label": "按需发送与回复",
+      "parent": "general",
+      "sublabel": "支持主动联系；读到消息不强制发言"
+    },
+    {
+      "id": "session_state",
+      "label": "每会话独立状态",
+      "parent": "general",
+      "sublabel": "模式、上下文与读取游标分别保存"
+    },
+    {
+      "id": "shared_gui",
+      "label": "多会话 GUI 调度",
+      "parent": "general",
+      "sublabel": "共享桌面资源并按绑定定位和切换目标"
+    },
+    {
+      "id": "mcp",
+      "label": "MCP 工具适配层",
+      "parent": "general",
+      "sublabel": "规划项；复用 CLI 能力与状态规则"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "当前验证边界",
+      "items": [
+        "已验证：单个已配置测试群、结构化读取（加密副本，非 OCR）、sender 与分页/增量、按需 reply/skip、防重复、takeover/handback，以及发送时定位该绑定群。",
+        "未实现：任意会话注册/切换、指定个人私聊、逐群模式注册表、多群 GUI 调度与 MCP。",
+        "可选路径仍有限：高层 CLI 沿用已初始化控制器，尚无独立的首次人工初始化命令；底层 channel 消息接口提供事件与游标操作，不调用模型。",
+        "图中能力规划不代表所有目标节点均已有源码实现。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "运行原则",
+      "items": [
+        "每个会话由操作者明确选择 Agent 与运行模式；不对所有群默认自动回复。",
+        "读取不等于回复；每条消息可处理、延后或跳过。"
+      ]
+    }
+  ]
+}

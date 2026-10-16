@@ -9,25 +9,35 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--diagram", choices=("architecture", "capabilities"), default="architecture")
+    parser.add_argument("--receipt", type=Path, help="passing finalize summary from a named review directory")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    folder = root / ".archify/architecture-agent-channel-20261016-123000"
-    receipt = json.loads((folder / "agent-channel.finalize-summary.json").read_text())
+    if args.diagram == "architecture":
+        folder = root / ".archify/architecture-agent-channel-20261016-123000"
+        source = folder / "candidate.json"
+        stem = "agent-channel"
+    else:
+        folder = root / ".archify/tree-conversation-capabilities-20261016-155423"
+        source = root / "docs/diagrams/conversation-capabilities.tree.json"
+        stem = "conversation-capabilities"
+    receipt_path = args.receipt or folder / (stem + ".finalize-summary.json")
+    receipt = json.loads(receipt_path.read_text())
     if receipt.get("status") != "pass":
         parser.error("Archify finalize must pass before publication")
-    for name, key in [("candidate.json", "specification"), ("agent-channel.html", "artifact")]:
-        content = (folder / name).read_bytes()
+    for path, key in [(source, "specification"), (folder / (stem + ".html"), "artifact")]:
+        content = path.read_bytes()
         if hashlib.sha256(content).hexdigest() != receipt[key]["sha256"]:
             parser.error("Archify source/artifact differs from its passing receipt")
     normalized = b"\n".join(b"" if not line.strip() else line for line in content.split(b"\n"))
-    public = root / "docs/diagrams/agent-channel.html"
+    public = root / "docs/diagrams" / (stem + ".html")
     if args.check:
         if not public.exists() or public.read_bytes() != normalized:
             parser.error("Public diagram differs from the normalized Archify artifact")
     else:
         public.parent.mkdir(parents=True, exist_ok=True)
         public.write_bytes(normalized)
-    print("Public architecture diagram matches the validated source artifact.")
+    print("Public diagram matches the validated source artifact.")
 
 
 if __name__ == "__main__":

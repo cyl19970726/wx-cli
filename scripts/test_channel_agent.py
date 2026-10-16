@@ -172,6 +172,14 @@ class RunnerTests(unittest.TestCase):
         self.run_agent()
         self.assertNotIn("session_memory", self.data["last_request"])
 
+    def test_interactive_lease_blocks_direct_runner(self):
+        channel_agent.save(self.state / channel_agent.INTERACTIVE_NAME,
+                           {"version": 1, "phase": "active"})
+        self.save()
+        self.run_agent(okay=False)
+        self.assertEqual(self.data["agent_calls"], 0)
+        self.assertEqual(self.data["acked"], 0)
+
     def run_agent(self, *extra, start="0", okay=True):
         argv = [sys.executable,str(RUNNER),"--wx-cli",str(self.cli),"--state-dir",str(self.state),
                 "--consumer","test-agent","--agent-command-json",json.dumps([str(self.agent)]),

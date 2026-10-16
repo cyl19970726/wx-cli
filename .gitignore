@@ -20,3 +20,6 @@ packages/wx-agent/dist/
 .archify/*/visual-check/
 .archify/*/review-*/
 .archify/*/rebuild-review/
+# This diagram's published input lives beside its HTML in docs/diagrams.
+.archify/tree-conversation-capabilities-*/
+docs/diagrams/*.delivery.json

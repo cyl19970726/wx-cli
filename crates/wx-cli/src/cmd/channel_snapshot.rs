@@ -30,6 +30,10 @@ fn owned_dir(path: &Path) -> Result<(), Box<dyn Error>> {
 /// Reject symlinks in the supplied path, including parents. Ownership is checked
 /// for the account subtree separately; system ancestors may belong to root.
 pub(super) fn validate_account_path(account: &Path) -> Result<(), Box<dyn Error>> {
+    validate_account_path_for(account, Scope::Full)
+}
+
+fn validate_account_path_for(account: &Path, scope: Scope) -> Result<(), Box<dyn Error>> {
     let absolute = if account.is_absolute() {
         account.to_path_buf()
     } else {
@@ -54,7 +58,11 @@ pub(super) fn validate_account_path(account: &Path) -> Result<(), Box<dyn Error>
     }
     owned_dir(account)?;
     owned_dir(&account.join("db_storage"))?;
-    for dir in ["contact", "session", "message"] {
+    let dirs: &[&str] = match scope {
+        Scope::Full => &["contact", "session", "message"],
+        Scope::Metadata => &["contact", "session"],
+    };
+    for dir in dirs {
         owned_dir(&account.join("db_storage").join(dir))?;
     }
     Ok(())
@@ -93,12 +101,27 @@ fn source_file(path: &Path) -> Result<File, Box<dyn Error>> {
     Ok(file)
 }
 
+#[derive(Clone, Copy)]
+enum Scope {
+    Full,
+    Metadata,
+}
+
+#[cfg(test)]
 fn inventory(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    inventory_for(root, Scope::Full)
+}
+
+fn inventory_for(root: &Path, scope: Scope) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let mut files = vec![
         PathBuf::from("contact/contact.db"),
         PathBuf::from("session/session.db"),
     ];
-    for dir in ["contact", "session", "message"] {
+    let dirs: &[&str] = match scope {
+        Scope::Full => &["contact", "session", "message"],
+        Scope::Metadata => &["contact", "session"],
+    };
+    for dir in dirs {
         for entry in fs::read_dir(root.join(dir))? {
             let entry = entry?;
             let name = entry.file_name();
@@ -112,12 +135,12 @@ fn inventory(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
             if fs::symlink_metadata(&path)?.file_type().is_symlink() {
                 return Err(invalid("symlink in snapshot source directory"));
             }
-            if dir == "message" && numbered_db(name) {
+            if *dir == "message" && numbered_db(name) {
                 files.push(PathBuf::from(dir).join(name));
             }
         }
     }
-    if files.len() == 2 {
+    if matches!(scope, Scope::Full) && files.len() == 2 {
         return Err(invalid("no numeric message shard found"));
     }
     let dbs = files.clone();
@@ -208,7 +231,11 @@ impl Drop for Snapshot {
     }
 }
 
-fn new_snapshot(state_dir: &Path, account_name: &str) -> Result<Snapshot, Box<dyn Error>> {
+fn new_snapshot(
+    state_dir: &Path,
+    account_name: &str,
+    scope: Scope,
+) -> Result<Snapshot, Box<dyn Error>> {
     let mut retained = 0;
     for entry in fs::read_dir(state_dir)? {
         let entry = entry?;
@@ -250,12 +277,16 @@ fn new_snapshot(state_dir: &Path, account_name: &str) -> Result<Snapshot, Box<dy
         ino: meta.ino(),
     };
     fs::DirBuilder::new().mode(0o700).create(&account)?;
-    for dir in [
-        "db_storage",
-        "db_storage/contact",
-        "db_storage/session",
-        "db_storage/message",
-    ] {
+    let dirs: &[&str] = match scope {
+        Scope::Full => &[
+            "db_storage",
+            "db_storage/contact",
+            "db_storage/session",
+            "db_storage/message",
+        ],
+        Scope::Metadata => &["db_storage", "db_storage/contact", "db_storage/session"],
+    };
+    for dir in dirs {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(account.join(dir))?;
@@ -284,24 +315,25 @@ fn copy_files(root: &Path, files: &[Fingerprint], target: &Path) -> Result<(), B
 fn capture_once<F>(
     state_dir: &Path,
     account: &Path,
+    scope: Scope,
     after_copy: &mut F,
 ) -> Result<Snapshot, Box<dyn Error>>
 where
     F: FnMut(),
 {
-    validate_account_path(account)?;
+    validate_account_path_for(account, scope)?;
     let source_root = account.join("db_storage");
-    let files = inventory(&source_root)?;
+    let files = inventory_for(&source_root, scope)?;
     let before = measure(&source_root, &files)?;
     let name = account
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| invalid("invalid account basename"))?;
-    let snapshot = new_snapshot(state_dir, name)?;
+    let snapshot = new_snapshot(state_dir, name, scope)?;
     let target = snapshot.account_dir().join("db_storage");
     copy_files(&source_root, &before, &target)?;
     after_copy();
-    if inventory(&source_root)? != files
+    if inventory_for(&source_root, scope)? != files
         || measure(&source_root, &files)? != before
         || measure(&target, &files)?
             .iter()
@@ -318,9 +350,17 @@ where
 }
 
 pub(super) fn capture(state_dir: &Path, account: &Path) -> Result<Snapshot, Box<dyn Error>> {
-    capture_with_hook(state_dir, account, &mut || {})
+    capture_with_hook_for(state_dir, account, Scope::Full, &mut || {})
 }
 
+pub(super) fn capture_metadata(
+    state_dir: &Path,
+    account: &Path,
+) -> Result<Snapshot, Box<dyn Error>> {
+    capture_with_hook_for(state_dir, account, Scope::Metadata, &mut || {})
+}
+
+#[cfg(test)]
 fn capture_with_hook<F>(
     state_dir: &Path,
     account: &Path,
@@ -329,9 +369,21 @@ fn capture_with_hook<F>(
 where
     F: FnMut(),
 {
+    capture_with_hook_for(state_dir, account, Scope::Full, after_copy)
+}
+
+fn capture_with_hook_for<F>(
+    state_dir: &Path,
+    account: &Path,
+    scope: Scope,
+    after_copy: &mut F,
+) -> Result<Snapshot, Box<dyn Error>>
+where
+    F: FnMut(),
+{
     let mut last = None;
     for _ in 0..ATTEMPTS {
-        match capture_once(state_dir, account, after_copy) {
+        match capture_once(state_dir, account, scope, after_copy) {
             Ok(snapshot) => return Ok(snapshot),
             Err(error) => last = Some(error),
         }
@@ -389,6 +441,42 @@ mod tests {
         let path = snapshot.account_dir().to_path_buf();
         drop(snapshot);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn metadata_capture_does_not_inspect_or_copy_message_directory() {
+        let (state, account, _source) = fixture();
+        let root = account.join("db_storage");
+        fs::remove_dir_all(root.join("message")).unwrap();
+        // A missing message directory is acceptable to metadata discovery.
+        let snapshot = capture_metadata(state.path(), &account).unwrap();
+        let copied = snapshot.account_dir().join("db_storage");
+        assert_eq!(
+            fs::read(copied.join("contact/contact.db")).unwrap(),
+            b"contact"
+        );
+        assert_eq!(
+            fs::read(copied.join("session/session.db")).unwrap(),
+            b"session"
+        );
+        assert!(!copied.join("message").exists());
+        let path = snapshot.account_dir().to_path_buf();
+        drop(snapshot);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn metadata_capture_rejects_core_symlink_and_hardlink() {
+        let (state, account, _source) = fixture();
+        let root = account.join("db_storage");
+        let contact = root.join("contact/contact.db");
+        let link = root.join("contact/duplicate");
+        fs::hard_link(&contact, &link).unwrap();
+        assert!(capture_metadata(state.path(), &account).is_err());
+        fs::remove_file(link).unwrap();
+        fs::remove_file(&contact).unwrap();
+        symlink(root.join("session/session.db"), &contact).unwrap();
+        assert!(capture_metadata(state.path(), &account).is_err());
     }
 
     #[test]

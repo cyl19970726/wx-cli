@@ -15,8 +15,7 @@ use wx_db::{
     ChatRoomQuery, MessageQuery, MessageQueryResult, SortOrder, WechatDb, MAX_QUERY_LIMIT,
 };
 
-#[path = "channel_snapshot.rs"]
-mod snapshot;
+use super::channel_snapshot as snapshot;
 
 const DB_NAME: &str = "channel.sqlite3";
 
@@ -37,7 +36,11 @@ pub enum ChannelAction {
         encrypted_snapshot: bool,
     },
     /// Show the binding and local journal position.
-    Status,
+    Status {
+        /// Include this consumer's durable cursor in the status response.
+        #[arg(long)]
+        consumer: Option<String>,
+    },
     /// Rescan the bounded, decrypted local database and append changes.
     Sync,
     /// Read journal events without acknowledging them.
@@ -53,6 +56,9 @@ pub enum ChannelAction {
         consumer: String,
         #[arg(long)]
         cursor: i64,
+        /// Refuse the update unless the consumer is still at this cursor.
+        #[arg(long)]
+        expected_cursor: Option<i64>,
     },
     /// Poll and print NDJSON. Output alone never acknowledges an event.
     Subscribe {
@@ -606,7 +612,12 @@ fn drain_events<W: Write>(
     Ok(emitted)
 }
 
-fn ack(conn: &mut Connection, consumer: &str, cursor: i64) -> Result<(), Box<dyn Error>> {
+fn ack(
+    conn: &mut Connection,
+    consumer: &str,
+    cursor: i64,
+    expected_cursor: Option<i64>,
+) -> Result<(), Box<dyn Error>> {
     if consumer.trim().is_empty() || cursor < 0 {
         return Err(invalid("consumer and nonnegative cursor required"));
     }
@@ -619,6 +630,9 @@ fn ack(conn: &mut Connection, consumer: &str, cursor: i64) -> Result<(), Box<dyn
         )
         .optional()?
         .unwrap_or(0);
+    if expected_cursor.is_some_and(|expected| expected != previous) {
+        return Err(invalid("consumer cursor changed; expected cursor mismatch"));
+    }
     let latest: i64 = tx.query_row(
         "SELECT COALESCE(MAX(cursor),0) FROM channel_events",
         [],
@@ -665,7 +679,7 @@ pub fn run(state_dir: &Path, action: ChannelAction) -> Result<(), Box<dyn Error>
             )?;
             println!("{}", serde_json::to_string(&view)?);
         }
-        ChannelAction::Status => {
+        ChannelAction::Status { consumer } => {
             let conn = open_state(state_dir, false)?;
             let binding = read_binding(&conn)?;
             let latest: i64 = conn.query_row(
@@ -673,10 +687,14 @@ pub fn run(state_dir: &Path, action: ChannelAction) -> Result<(), Box<dyn Error>
                 [],
                 |r| r.get(0),
             )?;
-            println!(
-                "{}",
-                serde_json::json!({"binding":binding,"latest_cursor":latest,"coverage":"bounded_local_database","history_complete":false})
-            );
+            let mut result = serde_json::json!({"binding":binding,"latest_cursor":latest,"coverage":"bounded_local_database","history_complete":false});
+            if let Some(consumer) = consumer {
+                if consumer.trim().is_empty() {
+                    return Err(invalid("consumer required"));
+                }
+                result["consumer_cursor"] = serde_json::json!(consumer_cursor(&conn, &consumer)?);
+            }
+            println!("{result}");
         }
         ChannelAction::Sync => {
             let count = sync(state_dir)?;
@@ -689,10 +707,14 @@ pub fn run(state_dir: &Path, action: ChannelAction) -> Result<(), Box<dyn Error>
             let conn = open_state(state_dir, false)?;
             print_lines(event_lines(&conn, &read_binding(&conn)?, after, limit)?)?;
         }
-        ChannelAction::Ack { consumer, cursor } => {
+        ChannelAction::Ack {
+            consumer,
+            cursor,
+            expected_cursor,
+        } => {
             let binding = load_binding(state_dir)?;
             let mut conn = open_state(state_dir, true)?;
-            ack(&mut conn, &consumer, cursor)?;
+            ack(&mut conn, &consumer, cursor, expected_cursor)?;
             println!(
                 "{}",
                 serde_json::json!({"channel_id":binding.channel_id,"session_id":binding.session_id,"consumer":consumer,"cursor":cursor})
@@ -1031,10 +1053,14 @@ mod tests {
         drop(conn);
         let mut conn = open_state(state.path(), true).unwrap();
         assert_eq!(event_lines(&conn, &binding, 0, 10).unwrap().len(), 2);
-        ack(&mut conn, "worker", 1).unwrap();
+        ack(&mut conn, "worker", 1, Some(0)).unwrap();
         assert_eq!(event_lines(&conn, &binding, 1, 10).unwrap().len(), 1);
-        assert!(ack(&mut conn, "worker", 0).is_err());
-        assert!(ack(&mut conn, "worker", 3).is_err());
+        assert!(ack(&mut conn, "worker", 0, None).is_err());
+        assert!(ack(&mut conn, "worker", 3, None).is_err());
+        assert!(ack(&mut conn, "worker", 2, Some(0)).is_err());
+        assert_eq!(consumer_cursor(&conn, "worker").unwrap(), 1);
+        ack(&mut conn, "worker", 2, Some(1)).unwrap();
+        assert_eq!(consumer_cursor(&conn, "worker").unwrap(), 2);
         assert_eq!(
             conn.query_row(
                 "SELECT cursor FROM channel_consumers WHERE consumer='worker'",
@@ -1042,7 +1068,7 @@ mod tests {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            1
+            2
         );
     }
 

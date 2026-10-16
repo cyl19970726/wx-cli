@@ -13,7 +13,7 @@ from wx_agent import channel_agent, wechat_agent_ctl
 
 
 FAKE_CLI = '''#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 state = Path(args[args.index('--state-dir') + 1])
@@ -22,9 +22,16 @@ if args[0:1] == ['outbox'] and 'list' in args:
 elif args[0:1] != ['channel']:
     sys.exit(2)
 elif 'status' in args:
-    print(json.dumps({'binding': {'channel_id': 'synthetic', 'session_id': 's1',
+    if '--consumer' not in args and (state / 'fail-start').exists():
+        sys.exit(7)
+    output = {'binding': {'channel_id': 'synthetic', 'session_id': 's1',
         'account': 'test-account', 'talker': 'test@chatroom',
-        'source': '/synthetic', 'encrypted_snapshot': True}, 'latest_cursor': 1}))
+        'source': '/synthetic', 'encrypted_snapshot': True}, 'latest_cursor': 1}
+    if '--consumer' in args:
+        output['consumer_cursor'] = int((state / 'acked').read_text()) if (state / 'acked').exists() else 0
+    print(json.dumps(output))
+elif 'sync' in args:
+    print('{"events_appended":0}')
 elif 'ack' in args:
     cursor = int(args[args.index('--cursor') + 1])
     (state / 'acked').write_text(str(cursor))
@@ -83,7 +90,8 @@ print('{"skip":true}')
             agent.chmod(0o700)
             settings = {"wx_cli": str(cli), "state_dir": str(state), "consumer": "test",
                         "agent_command": [str(agent)], "sender_driver": "/synthetic/driver",
-                        "poll_seconds": 1, "start_after": 0}
+                        "poll_seconds": 1, "start_after": 0,
+                        "read_retries": 1, "retry_base_seconds": 0.01}
             config = root / "config.json"
             config.write_text(json.dumps(settings), encoding="utf-8")
             config.chmod(0o600)
@@ -99,6 +107,11 @@ print('{"skip":true}')
             def run(command):
                 env = dict(os.environ, FAKE_AGENT_REQUEST=str(request_path))
                 return subprocess.run([str(entrypoint), command, "--config", str(config)],
+                                      cwd=root, env=env, capture_output=True, text=True, timeout=8)
+
+            def chat(command, *args):
+                env = dict(os.environ, FAKE_AGENT_REQUEST=str(request_path))
+                return subprocess.run([str(entrypoint), "chat", "--config", str(config), command, *args],
                                       cwd=root, env=env, capture_output=True, text=True, timeout=8)
 
             started = run("start")
@@ -120,7 +133,7 @@ print('{"skip":true}')
                                       wechat_agent_ctl.process_stamp(pid),
                                       (state / "channel-agent.log").read_text(encoding="utf-8"))))
                 self.assertIn(str(wechat_agent_ctl.RUNNER), wechat_agent_ctl.process_stamp(pid)[1])
-                for _ in range(30):
+                for _ in range(100):
                     if request_path.exists() and (state / "acked").read_text() == "1":
                         break
                     time.sleep(0.05)
@@ -131,10 +144,27 @@ print('{"skip":true}')
                 }))
                 self.assertEqual(json.loads(request_path.read_text())["session_memory"]["summary"],
                                  "Earlier synthetic lesson preference")
+                selected = chat("select", "--talker", "test@chatroom")
+                self.assertEqual(selected.returncode, 0, selected.stderr)
+                taken = chat("takeover")
+                self.assertEqual(taken.returncode, 0, taken.stderr)
+                self.assertTrue(json.loads(taken.stdout)["previously_alive"])
+                self.assertFalse(json.loads(run("status").stdout)["alive"])
+                (state / "fail-start").touch()
+                failed = chat("handback")
+                self.assertNotEqual(failed.returncode, 0, failed.stdout)
+                self.assertEqual(json.loads((state / "channel-agent-interactive.json").read_text())["phase"], "handback")
+                self.assertFalse((state / channel_agent.HANDOFF_READY_NAME).exists())
+                (state / "fail-start").unlink()
+                returned = chat("handback")
+                self.assertEqual(returned.returncode, 0, returned.stderr)
+                self.assertTrue(json.loads(returned.stdout)["alive"])
+                self.assertFalse((state / "channel-agent-interactive.json").exists())
             finally:
-                stopped = run("stop")
-                self.assertEqual(stopped.returncode, 0, stopped.stderr)
-                self.assertFalse(json.loads(stopped.stdout)["alive"])
+                if json.loads(run("status").stdout)["alive"]:
+                    stopped = run("stop")
+                    self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                    self.assertFalse(json.loads(stopped.stdout)["alive"])
 
 
 if __name__ == "__main__":

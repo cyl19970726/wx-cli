@@ -89,6 +89,36 @@ class ControllerTests(unittest.TestCase):
         finally:
             os.close(fd)
 
+    def test_interactive_lease_blocks_start_and_resume(self):
+        settings = ctl.config(self.config_path)
+        ctl.atomic_json(self.state / ctl.INTERACTIVE_NAME, {"version": 1, "phase": "active"})
+        with self.assertRaisesRegex(ctl.ControlError, "interactive lease"):
+            ctl.start(settings)
+        with self.assertRaisesRegex(ctl.ControlError, "interactive lease"):
+            ctl.action(settings, "resume", 0)
+        self.assertFalse((self.state / ctl.CONTROL_NAME).exists())
+
+    def test_handback_pid_registration_failure_cleans_unreleased_child(self):
+        settings = ctl.config(self.config_path)
+        ctl.atomic_json(self.state / ctl.INTERACTIVE_NAME,
+                        {"version": 1, "phase": "handback", "handoff_token": "test-token"})
+        spawned = []
+        original_popen = ctl.subprocess.Popen
+
+        def capture(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        with mock.patch.object(ctl.subprocess, "Popen", side_effect=capture), \
+             mock.patch.object(ctl, "process_stamp", return_value=None):
+            with self.assertRaisesRegex(ctl.ControlError, "startup"):
+                ctl.start(settings, handoff_token="test-token")
+        self.assertEqual(len(spawned), 1)
+        self.assertIsNotNone(spawned[0].poll(), "unreleased child retained runner lock")
+        self.assertFalse((self.state / ctl.PID_NAME).exists())
+        self.assertTrue((self.state / ctl.INTERACTIVE_NAME).exists())
+
     def test_start_duplicate_pause_resume_stop_without_kill(self):
         settings = ctl.config(self.config_path)
         first = ctl.start(settings)
