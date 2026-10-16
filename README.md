@@ -4,7 +4,7 @@
 
 本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。群/个人会话 CLI 支持按需选择、读取与手动发送；v3 私人及群消息各有一条经用户确认收到。v5 有限导航与分页读取已通过现场探测；v5 写入、完整往返和长期稳定性未验证，运行器当前停止。单群历史测试不代表客户环境、媒体发送、多常驻 Agent 或全天无人值守已获验证。详见[会话验证记录](docs/CONVERSATIONS_VALIDATION_20261016.md)。
 
-[完整操作指南](docs/OPERATING_GUIDE.md) · [群/个人会话 CLI](docs/CONVERSATIONS_CLI.md) · [会话验证状态](docs/CONVERSATIONS_VALIDATION_20261016.md) · [单群开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [会话能力图](docs/diagrams/conversation-capabilities.html) · [消息契约](docs/contracts.md) · [既有验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
+[远端开发与本地验收](docs/REMOTE_DEVELOPMENT.md) · [完整操作指南](docs/OPERATING_GUIDE.md) · [群/个人会话 CLI](docs/CONVERSATIONS_CLI.md) · [会话验证状态](docs/CONVERSATIONS_VALIDATION_20261016.md) · [单群开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [会话能力图](docs/diagrams/conversation-capabilities.html) · [消息契约](docs/contracts.md) · [既有验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
 
 ## 一个仓库，三个执行层
 

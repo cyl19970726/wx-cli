@@ -4,27 +4,35 @@ Keep changes within the ownership boundaries in [architecture](docs/architecture
 
 ## Checks
 
-From the repository root on macOS:
+`.github/workflows/ci.yml` is the source of truth for required CI. It runs on macOS and covers:
+
+- Rust formatting, all-target Clippy with warnings denied, tests and build; a synthetic channel CLI integration and sender contract check on Python 3.12.
+- Repository scripts and wheel build/install/package tests on both Python 3.9 and 3.12.
+- Swift native bridge parameter tests.
+
+Before acceptance, run the relevant CI checks locally and run the full matrix for cross-layer, protocol, packaging, or native changes. The commands are maintained in the workflow; report which checks ran, exact interpreter/tool versions, pass/fail counts, pre-existing ignored tests and anything not run. Do not describe ignored tests as passed. Public-source and diff checks are also expected before handoff:
 
 ```sh
-cargo fmt --check
-cargo clippy --locked -- -D warnings
-cargo test --locked
-cargo build --locked
-python3 scripts/test_local_channel.py --binary target/debug/wx-cli
-PYTHONPATH=packages/wx-agent/src python3 -W error::ResourceWarning -m unittest discover -s scripts -p 'test_*.py'
-python3 -m pip wheel --no-deps --wheel-dir .local/wheels ./packages/wx-agent
-python3 scripts/check_package.py .local/wheels/wx_agent-0.2.0-py3-none-any.whl --tests packages/wx-agent/tests
-native/macos/wechat-bridge/test-parameters.sh
 python3 scripts/check_public_source.py
 git diff --check
 ```
 
-Use Python 3.9 or newer; CI exercises the supported floor and a newer version. `check_package.py` installs the wheel in an isolated environment and runs the entire package test suite outside the checkout, including console entrypoints. Those tests require an installed package; a source-only `PYTHONPATH` does not provide the entrypoints. Native parameter tests do not operate WeChat or prove desktop delivery. Check the workflow for the exact current matrix.
+For local wheel work, use a project virtual environment and a current pip rather than macOS's system Python/pip. For example:
+
+```sh
+python3.12 -m venv .local/wheel-venv
+.local/wheel-venv/bin/python -m pip install --upgrade pip
+mkdir -p .local
+wheel_dir="$(mktemp -d .local/wheel-check.XXXXXX)"
+.local/wheel-venv/bin/python -m pip wheel --no-deps --wheel-dir "$wheel_dir" ./packages/wx-agent
+.local/wheel-venv/bin/python scripts/check_package.py "$wheel_dir"/*.whl --tests packages/wx-agent/tests
+```
+
+If an old system pip creates a malformed wheel (for example, with missing project metadata), discard that artifact and rebuild in the virtual environment; do not weaken package checks. `check_package.py` installs the wheel in an isolated environment and runs package tests outside the checkout, including console entrypoints. A source-only `PYTHONPATH` does not verify installed entrypoints. Native parameter tests do not operate WeChat or prove desktop delivery.
 
 ## Changes and reviews
 
-Use a focused `codex/` branch for agent-authored work. Include the triggering problem, resulting behavior, actual checks and remaining limits. Protocol or state changes need compatibility and restart tests. Preserve private binding, cursors, pending replies and outbox; never delete them to make a migration pass. UI driver changes need evidence at their actual layer, not just process exit codes.
+Use a focused `codex/` branch for agent-authored work. Include the triggering problem, resulting behavior, actual checks and remaining limits. Protocol or state changes need compatibility and restart tests. Preserve private binding, cursors, pending replies and outbox; never delete them to make a migration pass. UI driver changes need evidence at their actual layer, not just process exit codes. For remote development, handoff and independent local acceptance, follow [REMOTE_DEVELOPMENT.md](docs/REMOTE_DEVELOPMENT.md).
 
 `packages/wx-agent` is an independently installable Python distribution in the same repository. Rust modules, Python orchestration and Swift helper must not duplicate each other's authoritative stores. Keep old source launchers thin. Public package metadata and fixture-only tests must survive wheel installation outside the source tree.
 
