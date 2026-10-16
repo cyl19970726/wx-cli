@@ -1210,16 +1210,12 @@ mod tests {
                 count.display()
             ),
         );
+        // This fixture checks the recorded refusal, not deadline enforcement;
+        // parallel CI may delay the two probe subprocesses past two seconds.
+        let fixture_timeout = Duration::from_secs(10);
         assert_eq!(
-            recover_unsent_with_timeout(
-                &state,
-                &binding,
-                "refused",
-                1,
-                &driver,
-                Duration::from_secs(2)
-            )
-            .unwrap(),
+            recover_unsent_with_timeout(&state, &binding, "refused", 1, &driver, fixture_timeout)
+                .unwrap(),
             AttemptResult::Failed
         );
         assert!(
