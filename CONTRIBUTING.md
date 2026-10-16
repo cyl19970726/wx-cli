@@ -12,11 +12,11 @@ cargo clippy --locked -- -D warnings
 cargo test --locked
 cargo build --locked
 python3 scripts/test_local_channel.py --binary target/debug/wx-cli
-python3 -W error::ResourceWarning -m unittest discover -s scripts -p 'test_*.py'
+PYTHONPATH=packages/wx-agent/src python3 -W error::ResourceWarning -m unittest discover -s scripts -p 'test_*.py'
 PYTHONPATH=packages/wx-agent/src python3 -W error::ResourceWarning -m unittest discover -s packages/wx-agent/tests -p 'test_*.py'
 python3 -m pip wheel --no-deps --wheel-dir .local/wheels ./packages/wx-agent
-python3 scripts/check_package.py .local/wheels/wx_agent-0.1.0-py3-none-any.whl --tests packages/wx-agent/tests
-bash native/macos/wechat-bridge/test-parameters.sh
+python3 scripts/check_package.py .local/wheels/wx_agent-0.2.0-py3-none-any.whl --tests packages/wx-agent/tests
+native/macos/wechat-bridge/test-parameters.sh
 python3 scripts/check_public_source.py
 git diff --check
 ```

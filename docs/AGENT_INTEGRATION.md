@@ -2,6 +2,8 @@
 
 采用 **项目内 skill + CLI**。技能说明群绑定、需求沟通、来源核对和人工接管；CLI 执行读写与状态变更；常驻运行器负责监听。不要同时启动常驻自动回复和另一个主动发言 Agent。
 
+交互入口使用 [`wx-agent chat`](INTERACTIVE_CLI.md)：groups → select → takeover → read / reply → handback。接管等待原运行器安全退出，交还恢复原启停状态；一次读取不推进消费位置。使用当前交互 Agent 生成回复，CLI 不另起回复模型。选择范围是配置中既有绑定，不自动注册任意其他群。
+
 - [wechat-group-agent skill](../.agents/skills/wechat-group-agent/SKILL.md)：已作为仓库文件提供，不安装全局。
 - [wx-agent](../packages/wx-agent/pyproject.toml)：Python 安装包，生命周期、Codex 适配、会话笔记。
 - [单群 CLI](SINGLE_GROUP_CLI.md)：绑定、订阅、发件箱和状态控制。

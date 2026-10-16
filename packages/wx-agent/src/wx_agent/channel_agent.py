@@ -22,9 +22,17 @@ LOCK_NAME = "channel-agent.lock"
 HEALTH_NAME = "channel-agent-health.json"
 EVENTS_NAME = "channel-agent-events.jsonl"
 CONTROL_NAME = "channel-agent-control.json"
+INTERACTIVE_NAME = "channel-agent-interactive.json"
+HANDOFF_READY_NAME = "channel-agent-handback-ready.json"
 MAX_HEALTH_EVENTS = 1024 * 1024
 MAX_OUTPUT = 16 * 1024 * 1024
 MAX_REPLY = 64 * 1024
+
+
+def reply_request_id(channel_id, server_id):
+    if not isinstance(channel_id, str) or type(server_id) is not int or server_id <= 0:
+        raise RunnerError("stable positive server ID required")
+    return "reply-" + hashlib.sha256(f"{channel_id}:{server_id}".encode()).hexdigest()
 
 
 class RunnerError(Exception):
@@ -409,7 +417,7 @@ class Runner:
         server_id = event["server_id"]
         if not isinstance(server_id, int) or server_id <= 0:
             raise RunnerError("stable positive server ID required")
-        request_id = "reply-" + hashlib.sha256(f"{binding['channel_id']}:{server_id}".encode()).hexdigest()
+        request_id = reply_request_id(binding["channel_id"], server_id)
         prior = [item for item in self.outbox_list() if item.get("request_id") == request_id]
         if prior:
             if len(prior) != 1 or prior[0].get("status") not in ("ui_observed", "recipient_confirmed"):
@@ -460,11 +468,11 @@ class Runner:
         save(self.state_path, state)
         self.process_pending(state)
 
-    def run(self):
+    def run(self, initialized_state=None):
         self.deadline = time.monotonic() + self.args.max_seconds if self.args.max_seconds else None
         self.health("reading")
         try:
-            state = self.initialize()
+            state = initialized_state if initialized_state is not None else self.initialize()
             self.process_pending(state)
             processed = 0
             while True:
@@ -528,6 +536,7 @@ def main():
     parser.add_argument("--read-retries", type=int, default=3,
                         help="transient safe-read retries; 0 means unlimited with bounded backoff")
     parser.add_argument("--retry-base-seconds", type=float, default=1.0)
+    parser.add_argument("--handoff-token", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         args.agent_command = json.loads(args.agent_command_json)
@@ -553,7 +562,26 @@ def main():
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise RunnerError("runner lock held") from exc
-            Runner(args).run()
+            lease_path = args.state_dir / INTERACTIVE_NAME
+            active_runner = Runner(args)
+            initialized_state = None
+            if lease_path.exists() or lease_path.is_symlink():
+                lease = load(lease_path)
+                if not args.handoff_token or lease.get("phase") != "handback" or lease.get("handoff_token") != args.handoff_token:
+                    raise RunnerError("interactive lease holds the runner")
+                existing_state = load(args.state_dir / STATE_NAME)
+                if existing_state.get("started") is not True or existing_state.get("pending") is not None:
+                    raise RunnerError("interactive handback requires a settled runner state")
+                initialized_state = active_runner.initialize()
+                save(args.state_dir / HANDOFF_READY_NAME,
+                     {"version": 1, "pid": os.getpid(), "handoff_token": args.handoff_token})
+                for _ in range(300):
+                    if not lease_path.exists() and not lease_path.is_symlink():
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RunnerError("interactive handback was not completed")
+            active_runner.run(initialized_state)
         finally:
             os.close(fd)
     except (RunnerError, OSError, ValueError, UnicodeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:

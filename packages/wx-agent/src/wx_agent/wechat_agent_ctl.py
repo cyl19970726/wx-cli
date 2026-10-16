@@ -17,6 +17,7 @@ LOCK_NAME = "channel-agent-controller.lock"
 CONTROL_NAME = "channel-agent-control.json"
 HEALTH_NAME = "channel-agent-health.json"
 LOG_NAME = "channel-agent.log"
+INTERACTIVE_NAME = "channel-agent-interactive.json"
 STARTED = []
 
 
@@ -137,13 +138,15 @@ def health_for(state_dir):
     return {key: value.get(key) for key in ("stage", "retry_count", "last_processed_cursor", "failure_category", "terminal_reason", "exit_code", "updated_at")}
 
 
-def runner_argv(settings):
+def runner_argv(settings, handoff_token=None):
     argv = [sys.executable, str(RUNNER), "--wx-cli", settings["wx_cli"], "--state-dir", settings["state_dir"],
             "--consumer", settings["consumer"], "--agent-command-json", json.dumps(settings["agent_command"]),
             "--sender-driver", settings["sender_driver"], "--read-retries", str(settings.get("read_retries", 0))]
     for field, option in (("poll_seconds", "--poll-seconds"), ("retry_base_seconds", "--retry-base-seconds"), ("start_after", "--start-after")):
         if field in settings:
             argv += [option, str(settings[field])]
+    if handoff_token is not None:
+        argv += ["--handoff-token", handoff_token]
     return argv
 
 
@@ -162,8 +165,30 @@ def open_log(state_dir):
         raise
 
 
-def start(settings):
+def _stop_unreleased_child(process):
+    """Bounded cleanup for a handback child that has not been released to run."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=2)
+
+
+def start(settings, handoff_token=None):
     state_dir = Path(settings["state_dir"])
+    if (state_dir / INTERACTIVE_NAME).exists() or (state_dir / INTERACTIVE_NAME).is_symlink():
+        lease = read_json(state_dir / INTERACTIVE_NAME)
+        if handoff_token is None or lease.get("phase") != "handback" or lease.get("handoff_token") != handoff_token:
+            raise ControlError("interactive lease holds the runner")
     existing = metadata_for(state_dir)
     if existing and alive(existing, state_dir):
         raise ControlError("runner already active")
@@ -179,20 +204,25 @@ def start(settings):
         os.close(lock_fd)
     write_control(state_dir, "run")
     with open_log(state_dir) as log:
-        process = subprocess.Popen(runner_argv(settings), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        process = subprocess.Popen(runner_argv(settings, handoff_token), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                    cwd=str(state_dir), start_new_session=True, close_fds=True)
-    stamp = None
-    for _ in range(20):
-        identity = process_stamp(process.pid)
-        if identity and str(RUNNER) in identity[1]:
-            stamp = identity[0]
-            break
-        if process.poll() is not None:
-            break
-        time.sleep(0.05)
-    if not stamp:
-        raise ControlError("runner exited during startup; inspect private log")
-    atomic_json(state_dir / PID_NAME, {"version": 1, "pid": process.pid, "start_stamp": stamp})
+    try:
+        stamp = None
+        for _ in range(20):
+            identity = process_stamp(process.pid)
+            if identity and str(RUNNER) in identity[1]:
+                stamp = identity[0]
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        if not stamp:
+            raise ControlError("runner exited during startup; inspect private log")
+        atomic_json(state_dir / PID_NAME, {"version": 1, "pid": process.pid, "start_stamp": stamp})
+    except (ControlError, OSError, subprocess.SubprocessError):
+        if handoff_token is not None:
+            _stop_unreleased_child(process)
+        raise
     STARTED.append(process)
     return {"started": True, "pid": process.pid}
 
@@ -210,6 +240,9 @@ def status(settings):
 
 def action(settings, verb, wait_seconds):
     state_dir = Path(settings["state_dir"])
+    if verb == "resume" and ((state_dir / INTERACTIVE_NAME).exists() or (state_dir / INTERACTIVE_NAME).is_symlink()):
+        read_json(state_dir / INTERACTIVE_NAME)
+        raise ControlError("interactive lease holds the runner")
     metadata = metadata_for(state_dir)
     if not metadata or not alive(metadata, state_dir):
         raise ControlError("no verified active runner")

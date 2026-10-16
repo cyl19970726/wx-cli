@@ -16,6 +16,8 @@
 
 项目内 [wechat-group-agent skill](.agents/skills/wechat-group-agent/SKILL.md) 教 Agent 如何操作上述 CLI。skill 不自带后台监听器；MCP 尚未实现，后续会复用同一套状态和协议。
 
+当前 Agent 也可以通过 [`wx-agent chat`](docs/INTERACTIVE_CLI.md) 查找并选择配置中的群、分页读取、接管回复和交还后台，共用原有消费进度与发件箱。它不需要启动另一个回复模型。
+
 ## 已经具备的能力
 
 - **消息识别**：正文来自本地加密数据库副本，带发送者、群身份、方向、消息 ID 和游标；不靠 OCR 拼接聊天正文。

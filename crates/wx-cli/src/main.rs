@@ -370,6 +370,11 @@ enum Commands {
         #[command(subcommand)]
         action: cmd::channel::ChannelAction,
     },
+    /// Discover chatroom IDs from encrypted contact metadata.
+    Groups {
+        #[command(subcommand)]
+        action: cmd::groups::GroupsAction,
+    },
     /// Queue reply intents; actual WeChat sending requires a separate driver
     Outbox {
         #[arg(long)]
@@ -585,6 +590,7 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Channel { state_dir, action } => cmd::channel::run(&state_dir, action),
+        Commands::Groups { action } => cmd::groups::run(action),
         Commands::Outbox { state_dir, action } => cmd::outgoing::run(&state_dir, action),
         Commands::Key { action } => match action {
             KeyAction::Extract { timeout: t } => cmd::key::cmd_key_extract(t).await,

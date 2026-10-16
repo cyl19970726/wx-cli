@@ -12,6 +12,10 @@
 
 `channel status` 返回 binding、latest_cursor 和覆盖范围。`events`/`subscribe` 返回 NDJSON，包含上述身份、`account`、`talker`、direction、message；coverage 为 `bounded_local_database`，history_complete 为 false。不将“本机没有”解释为“微信从未存在”。
 
+`channel status --consumer NAME` 额外返回该 consumer 的持久 `consumer_cursor`。`ack --expected-cursor N` 在同一事务内比较原位置，不匹配时拒绝推进；无此参数的旧接口保持兼容。交互入口必须使用比较式确认，不能跳过更早未处理的入站文本。
+
+`wx-agent chat` 的选择记录、交互占用和手动 pending 是私有编排状态；事件与发送的权威记录仍由 Rust 管理。接管不换 consumer；未知发送保留原请求。交还只恢复接管前的启停状态，不把已经停止的运行器自动开启。命令与错误处理见 [交互 CLI](INTERACTIVE_CLI.md)。
+
 ## Agent 请求
 
 运行器向明确指定的命令 stdin 发送单个 JSON：
