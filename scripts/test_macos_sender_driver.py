@@ -2,6 +2,8 @@
 import contextlib
 import io
 import json
+import fcntl
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +41,61 @@ class SenderTests(unittest.TestCase):
         for text in ("", " \n", "bad\x00text", "x" * 2001):
             with self.subTest(text=repr(text)[:15]), self.assertRaises(driver.Refused):
                 driver.request_ok(dict(self.request, text=text), self.config)
+
+    def test_generic_transaction_is_scoped_to_conversation(self):
+        first = dict(self.config, target_name="Contact A")
+        request = dict(self.request)
+        one = driver.request_ok(request, first)
+        other_binding = dict(self.binding, channel_id="channel-two", talker="private-contact")
+        other = dict(self.config, binding=other_binding, target_name="Contact B")
+        request.update(channel_id="channel-two", talker="private-contact")
+        self.assertNotEqual(one, driver.request_ok(request, other))
+        self.assertEqual(one, driver.request_ok(dict(self.request), first))
+
+    def test_private_title_requires_unique_fresh_metadata_identity(self):
+        config = dict(self.config, binding=dict(self.binding, talker="private-contact"),
+                      wx_cli="/private/wx-cli", channel_state_dir="/private/state",
+                      target_name="Contact", conversation_kind="private")
+        candidate = {"talker": "private-contact", "name": "Contact", "kind": "private"}
+        with mock.patch.object(driver, "call", return_value=json.dumps({
+                "match_kind": "exact", "matches": [candidate]})) as call:
+            driver.verify_target(config, driver.time.monotonic() + 3)
+        self.assertIn("--all-matches", call.call_args[0][0])
+        self.assertEqual(call.call_args[0][0][-2:], ["--kind", "all"])
+        for matches in ([], [candidate, dict(candidate, talker="other@chatroom", kind="group")],
+                        [candidate, dict(candidate, name="Contact (2)", talker="other")],
+                        [candidate, dict(candidate, name="Contact（２）", talker="other")],
+                        [dict(candidate, talker="different")], [dict(candidate, name="Renamed")]):
+            with mock.patch.object(driver, "call", return_value=json.dumps({
+                    "match_kind": "exact", "matches": matches})), self.assertRaises(driver.Refused):
+                driver.verify_target(config, driver.time.monotonic() + 3)
+
+    def test_numeric_title_suffix_collision_is_symmetric(self):
+        for left, right in (("Alex", "Alex (2)"), ("Alex（３）", "Alex"),
+                            ("Alex", "alex (12)")):
+            self.assertTrue(driver.titles_overlap(left, right))
+            self.assertTrue(driver.titles_overlap(right, left))
+        self.assertFalse(driver.titles_overlap("Alex", "Alex Team"))
+        self.assertEqual(driver.title_query("Alex (2)（３）"), "Alex")
+
+    def test_shared_desktop_lock_refuses_other_conversation_before_ui(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            fd = os.open(ui / "sender.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                config = dict(self.config, ui_dir=ui, channel_state_dir=ui / "other-channel")
+                with mock.patch.object(driver, "bridge") as bridge, \
+                     mock.patch.object(driver, "status", return_value=0):
+                    with self.assertRaisesRegex(driver.Refused, "sender busy"):
+                        driver.focus_only(config)
+                    with self.assertRaisesRegex(driver.Refused, "sender busy"):
+                        driver.run(self.request, config)
+                bridge.assert_not_called()
+                self.assertFalse(list(ui.glob("*.client-result.json")))
+            finally:
+                os.close(fd)
 
     def test_inspect_requires_one_calibrated_window_and_permissions(self):
         config = {"expected_pid": 42, "window_size": {"width": 900, "height": 650}}
@@ -169,6 +226,7 @@ class SenderTests(unittest.TestCase):
                 actions.append(action)
                 return result[action]
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
+                 mock.patch.object(driver, "verify_target"), \
                  mock.patch.object(driver, "status", return_value=0), \
                  mock.patch.object(driver, "channel", return_value="{}"), \
                  mock.patch.object(driver, "call", return_value=""), \
@@ -203,6 +261,7 @@ class SenderTests(unittest.TestCase):
                     return {"focused": True, "alreadySelected": False, "source": "search"}
                 self.fail("focus-only called a sending action")
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
+                 mock.patch.object(driver, "verify_target"), \
                  mock.patch.object(driver, "status", return_value=0) as check_status, \
                  mock.patch.object(driver, "call", return_value=""):
                 result = driver.focus_only(config)
@@ -224,6 +283,7 @@ class SenderTests(unittest.TestCase):
                 actions.append(action)
                 return inspect
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
+                 mock.patch.object(driver, "verify_target"), \
                  mock.patch.object(driver, "status", return_value=0), \
                  mock.patch.object(driver, "call", return_value="") as activate:
                 with self.assertRaisesRegex(driver.Refused, "permissions"):

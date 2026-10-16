@@ -309,6 +309,14 @@ mod tests {
     }
 
     #[test]
+    fn private_colon_newline_is_body_text_not_sender_prefix() {
+        let body = "a label:\nbody".to_string();
+        let (sender, content) = parse_group_sender(false, body.clone(), "wxid_peer".to_string());
+        assert_eq!(sender, "wxid_peer");
+        assert_eq!(content, body);
+    }
+
+    #[test]
     fn group_with_sender_prefix() {
         let (sender, content) = parse_group_sender(
             true,

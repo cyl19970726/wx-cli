@@ -89,6 +89,7 @@ class ProbeTests(unittest.TestCase):
                 if action == "prepare-visual": return {"prepared": True}
                 self.fail("read failure allowed submit or another UI action")
             with mock.patch.object(sender, "status", return_value=0), \
+                 mock.patch.object(sender, "verify_target"), \
                  mock.patch.object(sender, "bridge", side_effect=bridge), \
                  mock.patch.object(sender, "call", return_value=""), \
                  mock.patch.object(sender, "channel", side_effect=sender.Refused("fixture read failed")):

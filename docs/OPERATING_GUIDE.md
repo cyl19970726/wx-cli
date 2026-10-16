@@ -1,6 +1,6 @@
-# 单群渠道操作指南
+# 微信会话操作指南
 
-本文说明如何安装 `wx-cli` 与 `wx-agent`、配置已有的单群运行环境，并通过 skill 与 CLI 完成只读阅读、选择性回复、跳过无需回复的消息和交还运行器。以下 `/ABS/...` 都是需要替换成本机绝对路径的占位符；群名和 ID 只用合成示例。操作仅限当前任务明确授权的测试账号和已绑定群。
+本文说明如何安装 `wx-cli` 与 `wx-agent`、配置私有运行环境，并按需读取及处理已授权的群聊或个人会话。既有 `wx-agent chat` 单群流程与新的 [`wx-agent conversations`](CONVERSATIONS_CLI.md) 多会话手动流程并存；后者不需要模型或常驻 Agent。以下 `/ABS/...` 都是需要替换成本机绝对路径的占位符；群名和 ID 只用合成示例。操作仅限当前任务明确授权的测试会话。
 
 ## 1. 安装
 
@@ -68,6 +68,8 @@ Python 包要求 Python 3.9+。原生图形助手当前面向 Apple Silicon 与 
 
 ## 4. 配置 Python 控制器与发送助手
 
+本节配置旧 `wx-agent chat` 单群入口的自动运行器与 sender；新的按需群聊/个人会话入口见第 10 节，不需要启动 runner。
+
 首次使用高层 `chat` 前，需要有与上述 channel 绑定一致的 controller 配置和私有状态目录。只读 `groups`、`select`、`read`、`status` 不要求 runner 正在运行。`takeover`、`reply`、`skip` 和 `handback` 依赖已初始化的 runner 状态；如尚未初始化，先按本节末尾准备并核对一次 runner 生命周期。将[合成配置](../examples/agent-config.example.json)复制到私有目录并按本机路径填写：
 
 ```json
@@ -108,7 +110,7 @@ export WX_SENDER_CONFIG=/ABS/private/wx-agent/sender-config.json
 
 ## 5. 用 skill 按需读取与处理
 
-使用项目内 [wechat-group-agent skill](../.agents/skills/wechat-group-agent/SKILL.md)，并把本操作指南与[交互 CLI 参考](INTERACTIVE_CLI.md)作为命令细节。skill 是当前 Agent 的操作约束，不会自行启动额外模型或监听器。处理前应核对用户授权、私有配置来源和绑定身份。
+使用项目内 [wechat-group-agent skill](../.agents/skills/wechat-group-agent/SKILL.md)，并把本操作指南与[交互 CLI 参考](INTERACTIVE_CLI.md)作为旧单群命令细节。通用群聊/个人会话命令见[会话 CLI](CONVERSATIONS_CLI.md)。skill 是当前 Agent 的操作约束，不会自行启动额外模型或监听器。处理前应核对用户授权、私有配置来源和绑定身份。
 
 先按准确群名搜索并检查全部候选，再选择其完整 ID。搜索只读取联系人和会话元数据，不读消息分片；多条同名结果不能擅自取第一条。当前只能选已有绑定的群：
 
@@ -210,13 +212,44 @@ skip 会用原 consumer 的 CAS 确认游标并保存原因审计；不会创建
 - 交付仅报告实际观测到的内容：`ui_observed` 不写作“已送达”，没有收件证据就说明未确认；
 - 没有把消息、真实账号/群标识、密钥、配置、日志或截图复制到仓库或公开渠道。
 
-当前实现面向一个已经绑定的单群。不能据此声称支持个人私聊选择、任意群注册、逐群运行模式注册表、多群调度、MCP 或全天候无人值守。工程检查或合成测试通过也不等于原平台对照验收或生产就绪。
+## 10. 按需选择群聊或个人会话
+
+无需启动或初始化 runner。沿用已登录授权账号的 KeyStore 和原始数据来源，单独预建私有会话注册目录（`0700`），把现有已校准 sender 配置复制为 `0600` 模板，再创建 `0600` 会话 CLI 配置：
+
+```json
+{
+  "version": 1,
+  "wx_cli": "/ABS/bin/wx-cli",
+  "registry_dir": "/ABS/private/wx-agent/conversations",
+  "account": "synthetic_account_001",
+  "source": "/ABS/wechat/synthetic_account_001",
+  "sender_template": "/ABS/private/wx-agent/sender-template.json",
+  "sender_executable": "/ABS/venv/bin/wx-agent-sender",
+  "controller_configs": ["/ABS/private/wx-agent/group-controller.json"]
+}
+```
+
+`account` 必须等于授权 source 目录名，registry 与 source 不得嵌套。`controller_configs` 可省略；只填入需要复用和协调的既有单群 controller。完整模板要求与配置说明见[会话 CLI 文档](CONVERSATIONS_CLI.md)。
+
+先读元数据候选，用稳定 ID 选择，再确认绑定状态并分页读取：
+
+```sh
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json find --name 'Synthetic Contact' --exact --kind all
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json select --id 0123456789abcdef0123456789abcdef
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json status
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json read --limit 20
+```
+
+显示名重合会保留全部候选，focus/send/reply 在 UI 名称不唯一时拒绝操作。需要桌面发送时再用 `focus` 核验目标；只读读取不启动模型，也不确认消费。通用手动 `send` 使用调用方稳定 request ID，`reply` 使用来源 cursor；两者都从私有文件标准输入取得正文。普通会话 reply 不 ack，导入旧单群 controller 的 reply 则继续使用原消费确认。未知发送结果沿用原 ID 核验，禁止自动重试。具体命令见[群/个人会话 CLI](CONVERSATIONS_CLI.md)。
+
+`wx-agent conversations` 当前支持按需发现/选择群聊与个人会话、分别保存本地状态、分页读取及手动发送/回复；复用已配置群 controller 时自动协调该原 writer。它不提供 `skip` 或常驻模式。既有 `wx-agent chat` 的 skip、会话笔记和常驻运行仍限于旧单群控制器流程。新会话 CLI 的真实 Mac/微信读写验证仍待完成；离线工程检查不能替代现场验收。多常驻 Agent、逐会话模式表、共享桌面多群调度、MCP 或全天候无人值守尚未实现。
 
 ## 参考
 
 - [快速开始](quickstart.md)
 - [单群 CLI](SINGLE_GROUP_CLI.md)
 - [交互 CLI](INTERACTIVE_CLI.md)
+- [群/个人会话 CLI](CONVERSATIONS_CLI.md)
 - [渠道、Agent 与发送契约](contracts.md)
 - [原生发送助手](../native/macos/wechat-bridge/README.md)
 - [交互现场验证](INTERACTIVE_VALIDATION_20261016.md)

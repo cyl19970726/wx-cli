@@ -45,7 +45,7 @@ fn invalid(message: &str) -> Box<dyn Error> {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into()
 }
 
-fn validate_inputs(
+pub(crate) fn validate_inputs(
     state_dir: &Path,
     account: &str,
     source: &Path,
@@ -102,7 +102,7 @@ fn validate_inputs(
     Ok(())
 }
 
-fn verify_complete_contacts(db: &WechatDb) -> Result<(), Box<dyn Error>> {
+pub(crate) fn verify_complete_contacts(db: &WechatDb) -> Result<(), Box<dyn Error>> {
     let mut offset = 0;
     loop {
         let page = db.query_contacts(&ContactQuery::new().limit(MAX_QUERY_LIMIT).offset(offset))?;

@@ -112,11 +112,23 @@ def safe_config(config):
     for key in ("channel_id", "session_id", "account", "talker", "source"):
         if not isinstance(binding.get(key), str) or not binding[key]:
             raise Refused("incomplete sender binding")
-    if not binding["talker"].endswith("@chatroom"):
-        raise Refused("sender requires group binding")
-    title = config.get("target_group")
+    kind = "group" if binding["talker"].endswith("@chatroom") else "private"
+    if "target_name" in config:
+        if config.get("conversation_kind") != kind:
+            raise Refused("conversation kind differs from binding")
+        if "target_group" in config and config["target_group"] != config["target_name"]:
+            raise Refused("conflicting target names")
+        title = config["target_name"]
+    else:
+        # Preserve the deployed group configuration and transaction identifiers.
+        if kind != "group":
+            raise Refused("private conversation requires explicit target_name and kind")
+        title = config.get("target_group")
     if not isinstance(title, str) or not title or len(title) > 100 or any(ord(c) < 32 for c in title):
-        raise Refused("invalid target group")
+        raise Refused("invalid conversation name")
+    # The existing signed helper calls this field targetGroup, but accepts a
+    # supplied chat title for either kind. Do not rebuild it for this alias.
+    config["target_group"] = title
     config["wx_cli"] = executable(config.get("wx_cli"))
     config["channel_state_dir"] = abs_path(config.get("channel_state_dir"))
     private(config["channel_state_dir"], True)
@@ -231,7 +243,52 @@ def request_ok(request, config):
         if request.get(key) != config["binding"][key]:
             raise Refused("request binding mismatch")
     validate_text(request.get("text"))
-    return "send-" + hashlib.sha256(rid.encode("ascii")).hexdigest()[:48]
+    identity = (request["channel_id"] + "\0" + rid) if "target_name" in config else rid
+    return "send-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:48]
+
+
+def title_matches(observed, target):
+    # Match the signed helper's optional member-count suffix conservatively.
+    # A private contact can itself be named "Alex (2)"; that must not be
+    # mistaken for the group/member-count presentation of "Alex".
+    return isinstance(observed, str) and re.fullmatch(
+        re.escape(target) + r"(?:\s*\([0-9０-９]+\)|\s*（[0-9０-９]+）)?",
+        observed.strip(), flags=re.IGNORECASE) is not None
+
+
+def title_query(target):
+    base = target.strip()
+    while True:
+        stripped = re.sub(r"\s*(?:\([0-9０-９]+\)|（[0-9０-９]+）)$", "", base).strip()
+        if not stripped or stripped == base:
+            return base
+        base = stripped
+
+
+def titles_overlap(left, right):
+    return isinstance(left, str) and (title_matches(left, right) or title_matches(right, left))
+
+
+def verify_target(config, deadline):
+    """Title-based navigation is allowed only for one fresh metadata identity."""
+    binding = config["binding"]
+    name = config.get("target_name", config.get("target_group"))
+    kind = config.get("conversation_kind", "group")
+    raw = call([config["wx_cli"], "conversations", "find", "--state-dir",
+                config["channel_state_dir"], "--account", binding["account"],
+                "--source", binding["source"], "--name", title_query(name),
+                "--all-matches", "--kind", "all"], deadline)
+    result = json.loads(raw)
+    matches = result.get("matches")
+    if not isinstance(matches, list) or not all(isinstance(item, dict) for item in matches):
+        raise Refused("invalid conversation metadata")
+    matches = [item for item in matches if titles_overlap(item.get("name"), name)]
+    if (result.get("match_kind") not in ("exact", "partial")
+            or len(matches) != 1
+            or matches[0].get("talker") != binding["talker"]
+            or matches[0].get("kind") != kind
+            or matches[0].get("name") != name):
+        raise Refused("conversation title is ambiguous, renamed, or differs from binding")
 
 
 def helper_reason(result):
@@ -375,6 +432,7 @@ def focus_only(config):
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
         status(config, deadline)
+        verify_target(config, deadline)
         tid = "focus-" + uuid.uuid4().hex
         inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
         window_id, frame = inspect_ok(inspected, config)
@@ -414,6 +472,7 @@ def run(request, config):
         except FileExistsError as exc:
             raise Uncertain("request already attempted") from exc
         try:
+            verify_target(config, deadline)
             inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
             window_id, frame = inspect_ok(inspected, config)
             report["stage"] = "inspected"

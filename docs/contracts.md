@@ -4,7 +4,8 @@
 
 ## 身份与进度
 
-- `channel_id`：本地固定频道身份。一个状态目录只绑定一个账号与群。
+- `channel_id`：本地固定频道身份。一个状态目录只绑定一个账号与群或个人会话。
+- `conversation_id`：通用目录身份，由账号与原始 talker 派生，与显示名无关；每个注册项引用独立的 channel 状态，不能通过切换选择重绑旧目录。
 - `session_id`：调用者明确指定的 Agent 会话标签。不是微信会话 token。
 - `consumer`：独立读取方的确认位置。多个读者可以独立消费；当前运维只允许一个自动发言者。
 - `cursor`：本地事件日志位置，不能当作微信消息时间或官方消息 ID。
@@ -15,6 +16,8 @@
 `channel status --consumer NAME` 额外返回该 consumer 的持久 `consumer_cursor`。`ack --expected-cursor N` 在同一事务内比较原位置，不匹配时拒绝推进；无此参数的旧接口保持兼容。交互入口必须使用比较式确认，不能跳过更早未处理的入站文本。
 
 `wx-agent chat` 的选择记录、交互占用和手动 pending 是私有编排状态；事件与发送的权威记录仍由 Rust 管理。接管不换 consumer；未知发送保留原请求。交还只恢复接管前的启停状态，不把已经停止的运行器自动开启。命令与错误处理见 [交互 CLI](INTERACTIVE_CLI.md)。
+
+`wx-agent conversations` 的私有注册表保存会话选择与原 controller 路径，消息和 outbox 仍仅由 Rust 持久化。`read` 返回调用方可保存的 next_cursor，不自动 ack；新手动会话 `reply` 使用来源消息的固定请求 ID 防重，也不自动 ack。导入 controller 的回复复用原顺序和 CAS 确认。`send` 的请求 ID 在各会话 outbox 内有效；通用 sender 的原生事务 ID 同时包含 channel_id，避免跨会话同名请求冲突。所有 GUI 操作会检查全候选中的标题混淆、原状态绑定和共用 UI 锁。
 
 ## Agent 请求
 
