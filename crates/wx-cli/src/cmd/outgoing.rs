@@ -18,6 +18,7 @@ use crate::cmd::channel::{load_binding, BindingView};
 const DB_NAME: &str = "outgoing.sqlite3";
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_DRIVER_OUTPUT_BYTES: u64 = 16 * 1024;
+const MAX_CAPABILITY_OUTPUT_BYTES: u64 = 4096;
 const MAX_EVIDENCE_BYTES: usize = 4096;
 const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -46,6 +47,15 @@ pub enum OutgoingAction {
     Send {
         #[arg(long)]
         request_id: String,
+        #[arg(long)]
+        driver: std::path::PathBuf,
+    },
+    /// Explicitly claim a new attempt after an operator has established the previous send did not submit.
+    RecoverUnsent {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
         #[arg(long)]
         driver: std::path::PathBuf,
     },
@@ -112,6 +122,25 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             println!(
                 "{}",
                 json!({"request_id": request_id, "status": result.as_str()})
+            );
+        }
+        OutgoingAction::RecoverUnsent {
+            request_id,
+            expected_attempt,
+            driver,
+        } => {
+            drop(conn);
+            let result = recover_unsent_with_timeout(
+                state_dir,
+                &binding,
+                &request_id,
+                expected_attempt,
+                &driver,
+                DRIVER_TIMEOUT,
+            )?;
+            println!(
+                "{}",
+                json!({"request_id": request_id, "attempt_number": expected_attempt + 1, "status": result.as_str()})
             );
         }
     }
@@ -186,24 +215,209 @@ fn send_with_timeout(
     // Do not consume the intent if the executable is obviously unusable.
     validate_driver(driver)?;
     let attempt = claim_attempt(state_dir, request_id)?;
-    let input = json!({
+    invoke_claimed_attempt(state_dir, binding, attempt, None, driver, timeout)
+}
+
+fn recover_unsent_with_timeout(
+    state_dir: &Path,
+    binding: &BindingView,
+    request_id: &str,
+    expected_attempt: i64,
+    driver: &Path,
+    timeout: Duration,
+) -> Result<AttemptResult, Box<dyn Error>> {
+    check_request_id(request_id)?;
+    if !(1..i64::MAX).contains(&expected_attempt) {
+        return Err(invalid("expected attempt must be positive and below i64::MAX").into());
+    }
+    validate_driver(driver)?;
+    check_recovery_capabilities(driver, timeout)?;
+    let candidate = load_recovery_candidate(state_dir, binding, request_id, expected_attempt)?;
+    let payload = driver_input(binding, &candidate, Some(expected_attempt))?;
+    check_recovery_preflight(driver, &payload, timeout)?;
+    let attempt = claim_recovery(state_dir, request_id, expected_attempt)?;
+    invoke_claimed_attempt(
+        state_dir,
+        binding,
+        attempt,
+        Some(expected_attempt),
+        driver,
+        timeout,
+    )
+}
+
+/// This read does not reserve the request. claim_recovery repeats the exact state
+/// check in an immediate transaction after the driver finishes preflight.
+fn load_recovery_candidate(
+    state_dir: &Path,
+    binding: &BindingView,
+    request_id: &str,
+    expected_attempt: i64,
+) -> Result<Attempt, Box<dyn Error>> {
+    let conn = open_journal(state_dir)?;
+    let text: String = conn.query_row(
+        "SELECT text FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND attempt_number=?4 AND status IN ('failed','indeterminate')",
+        params![request_id, binding.channel_id, binding.session_id, expected_attempt],
+        |r| r.get(0),
+    ).optional()?.ok_or_else(|| invalid("recovery requires the current failed or indeterminate attempt and its exact number"))?;
+    Ok(Attempt {
+        request_id: request_id.to_owned(),
+        attempt_number: expected_attempt + 1,
+        text,
+    })
+}
+
+/// Probe before claiming: an older driver that ignores recovery fields must never
+/// receive the original message as a recovery attempt. This is a driver contract;
+/// Rust cannot inspect the desktop or independently prove the driver's UI checks.
+fn check_recovery_capabilities(driver: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(driver, "--recovery-capabilities", None, timeout)?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("recovery_protocol_version") == Some(&json!(1))
+            && object.get("pre_submit_proof_required") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver lacks required recovery capability").into());
+    }
+    Ok(())
+}
+
+fn check_recovery_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(driver, "--recovery-preflight", Some(payload), timeout)?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("recovery_protocol_version") == Some(&json!(1))
+            && object.get("unsent_proven") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver did not prove the previous attempt unsent").into());
+    }
+    Ok(())
+}
+
+fn invoke_recovery_probe(
+    driver: &Path,
+    flag: &str,
+    payload: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let mut child = Command::new(driver)
+        .arg(flag)
+        .stdin(if payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()?;
+    let writer = payload.map(|payload| {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let bytes = payload.to_vec();
+        std::thread::spawn(move || {
+            let result = stdin.write_all(&bytes);
+            drop(stdin);
+            result
+        })
+    });
+    let stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(MAX_CAPABILITY_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take(MAX_CAPABILITY_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes.len())
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(_) => {
+                unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    // A driver may exit while a descendant still owns an output pipe.
+    unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+    let wrote = writer.is_none_or(|writer| writer.join().is_ok_and(|result| result.is_ok()));
+    let output = reader.join().ok().and_then(Result::ok);
+    let _ = stderr_reader.join();
+    let Some(status) = status else {
+        return Err(invalid("recovery probe timed out").into());
+    };
+    if !status.success() || !wrote {
+        return Err(invalid("driver rejected recovery probe or input").into());
+    }
+    let Some(bytes) = output else {
+        return Err(invalid("recovery probe output could not be read").into());
+    };
+    if bytes.len() as u64 > MAX_CAPABILITY_OUTPUT_BYTES {
+        return Err(invalid("recovery probe output exceeded limit").into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| invalid("driver returned invalid recovery probe JSON"))?;
+    Ok(value)
+}
+
+fn invoke_claimed_attempt(
+    state_dir: &Path,
+    binding: &BindingView,
+    attempt: Attempt,
+    recovery_from_attempt: Option<i64>,
+    driver: &Path,
+    timeout: Duration,
+) -> Result<AttemptResult, Box<dyn Error>> {
+    let input = driver_input(binding, &attempt, recovery_from_attempt)?;
+    let (result, evidence) = invoke_driver(driver, &input, timeout);
+    record_result(
+        state_dir,
+        &attempt.request_id,
+        attempt.attempt_number,
+        result,
+        &evidence,
+    )?;
+    Ok(result)
+}
+
+fn driver_input(
+    binding: &BindingView,
+    attempt: &Attempt,
+    recovery_from_attempt: Option<i64>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut input = json!({
         "protocol_version": 1,
         "request_id": attempt.request_id,
+        "attempt_number": attempt.attempt_number,
         "channel_id": binding.channel_id,
         "session_id": binding.session_id,
         "account": binding.account,
         "talker": binding.talker,
         "text": attempt.text,
     });
-    let (result, evidence) = invoke_driver(driver, &serde_json::to_vec(&input)?, timeout);
-    record_result(
-        state_dir,
-        request_id,
-        attempt.attempt_number,
-        result,
-        &evidence,
-    )?;
-    Ok(result)
+    if let Some(previous) = recovery_from_attempt {
+        input["recovery_from_attempt"] = json!(previous);
+    }
+    Ok(serde_json::to_vec(&input)?)
 }
 
 fn invoke_driver(driver: &Path, input: &[u8], timeout: Duration) -> (AttemptResult, String) {
@@ -344,7 +558,25 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
             receipt_evidence TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
-        );"
+        );
+        CREATE TABLE IF NOT EXISTS outgoing_attempt (
+            request_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+            status TEXT NOT NULL CHECK(status IN ('attempt_recorded','ui_observed','failed','indeterminate')),
+            result_evidence TEXT,
+            recovery_from_attempt INTEGER,
+            recovery_prior_status TEXT,
+            claimed_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            PRIMARY KEY (request_id, attempt_number)
+        );
+        INSERT OR IGNORE INTO outgoing_attempt
+            (request_id,attempt_number,status,result_evidence,claimed_at,finished_at)
+        SELECT request_id,attempt_number,
+            CASE WHEN status='recipient_confirmed' THEN 'ui_observed' ELSE status END,
+            result_evidence,created_at,
+            CASE WHEN status='attempt_recorded' THEN NULL ELSE updated_at END
+        FROM outgoing_intent WHERE attempt_number > 0;"
     )?;
     Ok(conn)
 }
@@ -406,7 +638,24 @@ fn show_intent(
         params![request_id, binding.channel_id, binding.session_id],
         |r| Ok(json!({"request_id":request_id,"text":r.get::<_, String>(0)?,"status":r.get::<_, String>(1)?,"attempt_number":r.get::<_, i64>(2)?,"result_evidence":r.get::<_, Option<String>>(3)?,"receipt_evidence":r.get::<_, Option<String>>(4)?,"created_at":r.get::<_, i64>(5)?,"updated_at":r.get::<_, i64>(6)?})),
     ).optional()?;
-    item.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "outgoing request not found").into())
+    let mut item =
+        item.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "outgoing request not found"))?;
+    let mut stmt = conn.prepare(
+        "SELECT attempt_number,status,result_evidence,recovery_from_attempt,recovery_prior_status,claimed_at,finished_at FROM outgoing_attempt WHERE request_id=?1 ORDER BY attempt_number",
+    )?;
+    let attempts = stmt.query_map([request_id], |r| {
+        Ok(json!({
+            "attempt_number": r.get::<_, i64>(0)?,
+            "status": r.get::<_, String>(1)?,
+            "result_evidence": r.get::<_, Option<String>>(2)?,
+            "recovery_from_attempt": r.get::<_, Option<i64>>(3)?,
+            "recovery_prior_status": r.get::<_, Option<String>>(4)?,
+            "claimed_at": r.get::<_, i64>(5)?,
+            "finished_at": r.get::<_, Option<i64>>(6)?,
+        }))
+    })?;
+    item["attempts"] = json!(attempts.collect::<rusqlite::Result<Vec<_>>>()?);
+    Ok(item)
 }
 
 /// Persist a single attempt before any sender touches the UI. Repeated calls fail closed.
@@ -421,8 +670,56 @@ pub(crate) fn claim_attempt(state_dir: &Path, request_id: &str) -> Result<Attemp
         params![request_id, binding.channel_id, binding.session_id], |r| r.get(0),
     ).optional()?.ok_or_else(|| invalid("request is absent, mismatched, or already attempted"))?;
     let attempt_number = 1;
+    let timestamp = now()?;
     tx.execute("UPDATE outgoing_intent SET status='attempt_recorded',attempt_number=?2,updated_at=?3 WHERE request_id=?1",
-        params![request_id, attempt_number, now()?])?;
+        params![request_id, attempt_number, timestamp])?;
+    tx.execute("INSERT INTO outgoing_attempt (request_id,attempt_number,status,claimed_at) VALUES (?1,?2,'attempt_recorded',?3)",
+        params![request_id, attempt_number, timestamp])?;
+    tx.commit()?;
+    Ok(Attempt {
+        request_id: request_id.to_owned(),
+        attempt_number,
+        text,
+    })
+}
+
+/// One operator recovery claim is a single CAS transaction. The previous attempt is
+/// retained; the next attempt is already claimed when the driver starts.
+fn claim_recovery(
+    state_dir: &Path,
+    request_id: &str,
+    expected_attempt: i64,
+) -> Result<Attempt, Box<dyn Error>> {
+    check_request_id(request_id)?;
+    if !(1..i64::MAX).contains(&expected_attempt) {
+        return Err(invalid("expected attempt must be positive and below i64::MAX").into());
+    }
+    let binding = load_binding(state_dir)?;
+    let mut conn = open_journal(state_dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let previous: Option<(String, String)> = tx.query_row(
+        "SELECT text,status FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND attempt_number=?4 AND status IN ('failed','indeterminate')",
+        params![request_id, binding.channel_id, binding.session_id, expected_attempt],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    let (text, prior_status) = previous.ok_or_else(|| {
+        invalid(
+            "recovery requires the current failed or indeterminate attempt and its exact number",
+        )
+    })?;
+    let attempt_number = expected_attempt + 1;
+    let timestamp = now()?;
+    let changed = tx.execute(
+        "UPDATE outgoing_intent SET status='attempt_recorded',attempt_number=?1,result_evidence=NULL,receipt_evidence=NULL,updated_at=?2 WHERE request_id=?3 AND channel_id=?4 AND session_id=?5 AND attempt_number=?6 AND status=?7",
+        params![attempt_number, timestamp, request_id, binding.channel_id, binding.session_id, expected_attempt, prior_status],
+    )?;
+    if changed != 1 {
+        return Err(invalid("stale outgoing recovery claim").into());
+    }
+    tx.execute(
+        "INSERT INTO outgoing_attempt (request_id,attempt_number,status,recovery_from_attempt,recovery_prior_status,claimed_at) VALUES (?1,?2,'attempt_recorded',?3,?4,?5)",
+        params![request_id, attempt_number, expected_attempt, prior_status, timestamp],
+    )?;
     tx.commit()?;
     Ok(Attempt {
         request_id: request_id.to_owned(),
@@ -453,6 +750,13 @@ pub(crate) fn record_result(
     )?;
     if changed != 1 {
         return Err(invalid("invalid or stale outgoing attempt transition").into());
+    }
+    let changed = tx.execute(
+        "UPDATE outgoing_attempt SET status=?1,result_evidence=?2,finished_at=?3 WHERE request_id=?4 AND attempt_number=?5 AND status='attempt_recorded'",
+        params![result.as_str(), evidence, now()?, request_id, attempt_number],
+    )?;
+    if changed != 1 {
+        return Err(invalid("missing or stale outgoing attempt audit").into());
     }
     tx.commit()?;
     Ok(())
@@ -487,6 +791,7 @@ pub(crate) fn confirm_recipient(
 mod tests {
     use super::*;
     use crate::cmd::channel::{self, ChannelAction};
+    use clap::Parser;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -517,6 +822,48 @@ mod tests {
         path
     }
 
+    fn fake_recovery_driver(temp: &TempDir, name: &str, body: &str) -> PathBuf {
+        fake_driver(
+            temp,
+            name,
+            &format!(
+                "if [ \"$1\" = '--recovery-capabilities' ]; then\n  printf '%s\\n' '{{\"protocol_version\":1,\"recovery_protocol_version\":1,\"pre_submit_proof_required\":true}}'\n  exit 0\nfi\nif [ \"$1\" = '--recovery-preflight' ]; then\n  cat >/dev/null\n  printf '%s\\n' '{{\"protocol_version\":1,\"recovery_protocol_version\":1,\"unsent_proven\":true}}'\n  exit 0\nfi\n{body}"
+            ),
+        )
+    }
+
+    #[test]
+    fn recovery_cli_accepts_exact_operator_arguments() {
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            action: OutgoingAction,
+        }
+        let parsed = Cli::try_parse_from([
+            "outbox",
+            "recover-unsent",
+            "--request-id",
+            "request_1",
+            "--expected-attempt",
+            "2",
+            "--driver",
+            "/tmp/recovery-driver",
+        ])
+        .unwrap();
+        match parsed.action {
+            OutgoingAction::RecoverUnsent {
+                request_id,
+                expected_attempt,
+                driver,
+            } => {
+                assert_eq!(request_id, "request_1");
+                assert_eq!(expected_attempt, 2);
+                assert_eq!(driver, PathBuf::from("/tmp/recovery-driver"));
+            }
+            _ => panic!("wrong outbox action"),
+        }
+    }
+
     #[test]
     fn driver_receives_bound_request_and_is_invoked_only_once() {
         let (temp, state, binding) = setup();
@@ -539,6 +886,8 @@ mod tests {
         let input: serde_json::Value =
             serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
         assert_eq!(input["protocol_version"], 1);
+        assert_eq!(input["attempt_number"], 1);
+        assert!(input.get("recovery_from_attempt").is_none());
         assert_eq!(input["request_id"], "send_1");
         assert_eq!(input["channel_id"], binding.channel_id);
         assert_eq!(input["session_id"], binding.session_id);
@@ -724,6 +1073,383 @@ mod tests {
         assert_eq!(
             fs::symlink_metadata(&state).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+    }
+
+    #[test]
+    fn operator_recovery_preserves_attempts_and_uses_original_text() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "recover_1", "original text").unwrap();
+        drop(conn);
+        claim_attempt(&state, "recover_1").unwrap();
+        record_result(
+            &state,
+            "recover_1",
+            1,
+            AttemptResult::Indeterminate,
+            "clipboard snapshot unavailable before Send",
+        )
+        .unwrap();
+        let captured = temp.path().join("recovery-input.json");
+        let driver = fake_recovery_driver(
+            &temp,
+            "recovery-driver",
+            &format!(
+                "cat > '{}'\nprintf '%s\\n' '{{\"status\":\"ui_observed\",\"evidence\":\"verified empty draft under UI lock; local outgoing row observed\"}}'",
+                captured.display()
+            ),
+        );
+        assert_eq!(
+            recover_unsent_with_timeout(
+                &state,
+                &binding,
+                "recover_1",
+                1,
+                &driver,
+                Duration::from_secs(2)
+            )
+            .unwrap(),
+            AttemptResult::UiObserved
+        );
+        let input: serde_json::Value =
+            serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
+        assert_eq!(input["request_id"], "recover_1");
+        assert_eq!(input["text"], "original text");
+        assert_eq!(input["attempt_number"], 2);
+        assert_eq!(input["recovery_from_attempt"], 1);
+        assert_eq!(input["channel_id"], binding.channel_id);
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "recover_1").unwrap();
+        assert_eq!(shown["attempt_number"], 2);
+        assert_eq!(shown["attempts"][0]["status"], "indeterminate");
+        assert_eq!(
+            shown["attempts"][0]["result_evidence"],
+            "clipboard snapshot unavailable before Send"
+        );
+        assert_eq!(shown["attempts"][1]["recovery_from_attempt"], 1);
+        assert_eq!(
+            shown["attempts"][1]["recovery_prior_status"],
+            "indeterminate"
+        );
+        assert_eq!(shown["attempts"][1]["status"], "ui_observed");
+        assert!(claim_attempt(&state, "recover_1").is_err());
+    }
+
+    #[test]
+    fn recovery_claim_is_atomic_and_crash_state_cannot_be_reclaimed() {
+        let (_temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "race", "same text").unwrap();
+        drop(conn);
+        claim_attempt(&state, "race").unwrap();
+        record_result(&state, "race", 1, AttemptResult::Failed, "pre-submit stop").unwrap();
+        let state_a = state.clone();
+        let state_b = state.clone();
+        let a = std::thread::spawn(move || claim_recovery(&state_a, "race", 1).is_ok());
+        let b = std::thread::spawn(move || claim_recovery(&state_b, "race", 1).is_ok());
+        assert_ne!(a.join().unwrap(), b.join().unwrap());
+        assert!(claim_recovery(&state, "race", 1).is_err());
+        assert!(claim_recovery(&state, "race", 2).is_err());
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "race").unwrap();
+        assert_eq!(shown["status"], "attempt_recorded");
+        assert_eq!(shown["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(shown["attempts"][0]["result_evidence"], "pre-submit stop");
+        assert_eq!(shown["attempts"][1]["recovery_prior_status"], "failed");
+    }
+
+    #[test]
+    fn recovery_rejects_queued_observed_and_stale_attempts() {
+        let (_temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "queued", "first").unwrap();
+        queue_intent(&mut conn, &binding, "observed", "second").unwrap();
+        queue_intent(&mut conn, &binding, "stale", "third").unwrap();
+        drop(conn);
+        assert!(claim_recovery(&state, "queued", 1).is_err());
+        claim_attempt(&state, "observed").unwrap();
+        record_result(
+            &state,
+            "observed",
+            1,
+            AttemptResult::UiObserved,
+            "P3 UI observed",
+        )
+        .unwrap();
+        assert!(claim_recovery(&state, "observed", 1).is_err());
+        claim_attempt(&state, "stale").unwrap();
+        record_result(&state, "stale", 1, AttemptResult::Failed, "pre-submit stop").unwrap();
+        assert!(claim_recovery(&state, "stale", 2).is_err());
+        assert!(claim_recovery(&state, "stale", 0).is_err());
+        assert!(claim_recovery(&state, "stale", i64::MAX).is_err());
+        assert!(claim_attempt(&state, "stale").is_err());
+    }
+
+    #[test]
+    fn recovery_driver_refusal_records_new_failed_attempt_without_retry() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "refused", "same body").unwrap();
+        drop(conn);
+        claim_attempt(&state, "refused").unwrap();
+        record_result(
+            &state,
+            "refused",
+            1,
+            AttemptResult::Failed,
+            "prepare stopped",
+        )
+        .unwrap();
+        let count = temp.path().join("refusal-invocations");
+        let driver = fake_recovery_driver(
+            &temp,
+            "refusing-driver",
+            &format!(
+                "cat >/dev/null\necho call >> '{}'\nprintf '%s\\n' '{{\"status\":\"failed\",\"evidence\":\"positive pre-submit proof unavailable under UI lock\"}}'",
+                count.display()
+            ),
+        );
+        // This fixture checks the recorded refusal, not deadline enforcement;
+        // parallel CI may delay the two probe subprocesses past two seconds.
+        let fixture_timeout = Duration::from_secs(10);
+        assert_eq!(
+            recover_unsent_with_timeout(&state, &binding, "refused", 1, &driver, fixture_timeout)
+                .unwrap(),
+            AttemptResult::Failed
+        );
+        assert!(
+            send_with_timeout(&state, &binding, "refused", &driver, Duration::from_secs(2))
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "refused").unwrap();
+        assert_eq!(shown["status"], "failed");
+        assert_eq!(shown["attempts"][0]["result_evidence"], "prepare stopped");
+        assert_eq!(
+            shown["attempts"][1]["result_evidence"],
+            "positive pre-submit proof unavailable under UI lock"
+        );
+    }
+
+    #[test]
+    fn legacy_driver_cannot_claim_recovery_or_receive_message() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "legacy_driver", "secret original body").unwrap();
+        drop(conn);
+        claim_attempt(&state, "legacy_driver").unwrap();
+        record_result(
+            &state,
+            "legacy_driver",
+            1,
+            AttemptResult::Failed,
+            "pre-submit failure",
+        )
+        .unwrap();
+        let captured = temp.path().join("legacy-driver-input");
+        let driver = fake_driver(
+            &temp,
+            "legacy-recovery-driver",
+            &format!(
+                "cat > '{}'\nprintf '%s\\n' '{{\"status\":\"ui_observed\",\"evidence\":\"legacy success\"}}'",
+                captured.display()
+            ),
+        );
+        assert!(recover_unsent_with_timeout(
+            &state,
+            &binding,
+            "legacy_driver",
+            1,
+            &driver,
+            Duration::from_secs(2)
+        )
+        .is_err());
+        assert_eq!(fs::read(&captured).unwrap(), b"");
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "legacy_driver").unwrap();
+        assert_eq!(shown["status"], "failed");
+        assert_eq!(shown["attempt_number"], 1);
+        assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_or_unavailable_recovery_capability_does_not_claim() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "bad_capability", "body").unwrap();
+        drop(conn);
+        claim_attempt(&state, "bad_capability").unwrap();
+        record_result(
+            &state,
+            "bad_capability",
+            1,
+            AttemptResult::Indeterminate,
+            "pre-submit uncertainty",
+        )
+        .unwrap();
+        let invalid = fake_driver(
+            &temp,
+            "wrong-capability",
+            "printf '%s\\n' '{\"protocol_version\":1,\"recovery_protocol_version\":1,\"pre_submit_proof_required\":false}'",
+        );
+        let nonzero = fake_driver(&temp, "nonzero-capability", "exit 2");
+        let timeout = fake_driver(&temp, "timeout-capability", "sleep 2");
+        for (driver, limit) in [
+            (&invalid, Duration::from_secs(2)),
+            (&nonzero, Duration::from_secs(2)),
+            (&timeout, Duration::from_millis(30)),
+        ] {
+            assert!(recover_unsent_with_timeout(
+                &state,
+                &binding,
+                "bad_capability",
+                1,
+                driver,
+                limit
+            )
+            .is_err());
+            let conn = open_journal(&state).unwrap();
+            assert_eq!(
+                show_intent(&conn, &binding, "bad_capability").unwrap()["attempt_number"],
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn failed_read_only_preflight_preserves_previous_attempt() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "preflight_refusal", "original body").unwrap();
+        drop(conn);
+        claim_attempt(&state, "preflight_refusal").unwrap();
+        record_result(
+            &state,
+            "preflight_refusal",
+            1,
+            AttemptResult::Failed,
+            "clipboard unavailable before Send",
+        )
+        .unwrap();
+        let captured = temp.path().join("preflight-input");
+        let normal = temp.path().join("normal-invoked");
+        let driver = fake_driver(
+            &temp,
+            "preflight-refusal-driver",
+            &format!(
+                "if [ \"$1\" = '--recovery-capabilities' ]; then\n  printf '%s\\n' '{{\"protocol_version\":1,\"recovery_protocol_version\":1,\"pre_submit_proof_required\":true}}'\n  exit 0\nfi\nif [ \"$1\" = '--recovery-preflight' ]; then\n  cat > '{}'\n  printf '%s\\n' '{{\"protocol_version\":1,\"recovery_protocol_version\":1,\"unsent_proven\":false}}'\n  exit 0\nfi\necho normal >> '{}'",
+                captured.display(),
+                normal.display()
+            ),
+        );
+        assert!(recover_unsent_with_timeout(
+            &state,
+            &binding,
+            "preflight_refusal",
+            1,
+            &driver,
+            Duration::from_secs(2)
+        )
+        .is_err());
+        let input: serde_json::Value =
+            serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
+        assert_eq!(input["text"], "original body");
+        assert_eq!(input["attempt_number"], 2);
+        assert_eq!(input["recovery_from_attempt"], 1);
+        assert!(!normal.exists());
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "preflight_refusal").unwrap();
+        assert_eq!(shown["status"], "failed");
+        assert_eq!(shown["attempt_number"], 1);
+        assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn race_after_preflight_is_rejected_by_claim_cas() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "preflight_race", "body").unwrap();
+        drop(conn);
+        claim_attempt(&state, "preflight_race").unwrap();
+        record_result(
+            &state,
+            "preflight_race",
+            1,
+            AttemptResult::Failed,
+            "old failure",
+        )
+        .unwrap();
+        let ready = temp.path().join("preflight-ready");
+        let release = temp.path().join("preflight-release");
+        let normal = temp.path().join("normal-invoked");
+        let driver = fake_driver(
+            &temp,
+            "race-driver",
+            &format!(
+                "if [ \"$1\" = '--recovery-capabilities' ]; then\n  printf '%s\\n' '{{\"protocol_version\":1,\"recovery_protocol_version\":1,\"pre_submit_proof_required\":true}}'\n  exit 0\nfi\nif [ \"$1\" = '--recovery-preflight' ]; then\n  cat >/dev/null\n  touch '{}'\n  while [ ! -e '{}' ]; do sleep 0.01; done\n  printf '%s\\n' '{{\"protocol_version\":1,\"recovery_protocol_version\":1,\"unsent_proven\":true}}'\n  exit 0\nfi\necho normal >> '{}'",
+                ready.display(),
+                release.display(),
+                normal.display()
+            ),
+        );
+        let state_for_thread = state.clone();
+        let binding_for_thread = binding.clone();
+        let worker = std::thread::spawn(move || {
+            recover_unsent_with_timeout(
+                &state_for_thread,
+                &binding_for_thread,
+                "preflight_race",
+                1,
+                &driver,
+                Duration::from_secs(3),
+            )
+            .is_err()
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists());
+        claim_recovery(&state, "preflight_race", 1).unwrap();
+        fs::write(&release, "go").unwrap();
+        assert!(worker.join().unwrap());
+        assert!(!normal.exists());
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "preflight_race").unwrap();
+        assert_eq!(shown["status"], "attempt_recorded");
+        assert_eq!(shown["attempt_number"], 2);
+        assert_eq!(shown["attempts"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn opening_legacy_journal_backfills_existing_attempt_once() {
+        let (_temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        queue_intent(&mut conn, &binding, "legacy", "old body").unwrap();
+        conn.execute(
+            "UPDATE outgoing_intent SET status='failed',attempt_number=1,result_evidence='old pre-submit failure' WHERE request_id='legacy'",
+            [],
+        )
+        .unwrap();
+        conn.execute("DROP TABLE outgoing_attempt", []).unwrap();
+        drop(conn);
+        let conn = open_journal(&state).unwrap();
+        let shown = show_intent(&conn, &binding, "legacy").unwrap();
+        assert_eq!(
+            shown["attempts"][0]["result_evidence"],
+            "old pre-submit failure"
+        );
+        assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
+        drop(conn);
+        let conn = open_journal(&state).unwrap();
+        assert_eq!(
+            show_intent(&conn, &binding, "legacy").unwrap()["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
     }
 

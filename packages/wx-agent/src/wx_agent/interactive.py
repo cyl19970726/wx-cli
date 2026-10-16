@@ -426,6 +426,47 @@ def reply(settings, cursor, text):
         return _finish_pending(settings, binding, lease, item)
 
 
+def recover_unsent_reply(settings, cursor, expected_attempt=None):
+    """Explicitly recover the same pending reply after the operator verifies it was unsent."""
+    _check(type(cursor) is int and cursor > 0, "cursor", "positive cursor required")
+    state_dir = Path(settings["state_dir"])
+    with _lock(state_dir, ctl.LOCK_NAME), _lock(state_dir, runner.LOCK_NAME, blocking=False):
+        status = _status(settings)
+        binding = status["binding"]
+        _selection(settings, binding)
+        lease = _lease(settings, binding)
+        _check(not ctl.status(settings)["alive"], "runner_active", "automatic runner is still active")
+        _, state, state_cursor = _runner_state(settings, binding)
+        _check(state.get("pending") is None, "runner_pending", "runner has a pending reply")
+        pending = lease.get("pending")
+        _check(isinstance(pending, dict) and pending.get("kind") in (None, "reply")
+               and pending.get("cursor") == cursor,
+               "pending_conflict", "no retained reply matches this cursor")
+        _check(isinstance(pending.get("request_id"), str) and isinstance(pending.get("text"), str),
+               "lease_invalid", "retained reply identity is invalid")
+        previous = pending.get("previous_cursor")
+        _check(type(previous) is int and previous >= 0, "lease_invalid", "retained reply cursor is invalid")
+        _check(state_cursor in (pending.get("previous_cursor"), cursor)
+               and status["consumer_cursor"] in (pending.get("previous_cursor"), cursor),
+               "cursor_drift", "manual reply cursor changed")
+        source = _target_event(settings, binding, previous, cursor)
+        _check(pending["request_id"] == _request_id(binding, source.get("server_id")),
+               "outbox_drift", "retained reply request does not match its source cursor")
+        item = _json(settings, "outbox", "show", "--request-id", pending["request_id"])
+        _check(item.get("request_id") == pending["request_id"], "outbox_drift", "outbox request ID differs")
+        _text_match(item, pending["text"])
+        _check(item.get("status") in ("failed", "indeterminate"),
+               "send_uncertain", "only a failed or indeterminate reply can be recovered")
+        attempt = item.get("attempt_number")
+        _check(type(attempt) is int and attempt > 0, "outbox_drift", "outbox attempt number is invalid")
+        _check(expected_attempt is None or type(expected_attempt) is int and attempt == expected_attempt,
+               "attempt_drift", "outbox attempt differs from the requested recovery")
+        _json(settings, "outbox", "recover-unsent", "--request-id", pending["request_id"],
+              "--expected-attempt", str(attempt), "--driver", settings["sender_driver"])
+        recovered = _json(settings, "outbox", "show", "--request-id", pending["request_id"])
+        return _finish_pending(settings, binding, lease, recovered)
+
+
 def skip(settings, cursor, reason):
     _check(isinstance(reason, str) and reason.strip() and "\x00" not in reason
            and len(reason.encode("utf-8")) <= 1000,
@@ -593,6 +634,9 @@ def main(argv=None):
     send = commands.add_parser("reply")
     send.add_argument("--cursor", type=int, required=True)
     send.add_argument("--text-stdin", action="store_true", required=True)
+    recover = commands.add_parser("recover-unsent-reply")
+    recover.add_argument("--cursor", type=int, required=True)
+    recover.add_argument("--expected-attempt", type=int, required=True)
     dismiss = commands.add_parser("skip")
     dismiss.add_argument("--cursor", type=int, required=True)
     dismiss.add_argument("--reason", required=True)
@@ -600,7 +644,8 @@ def main(argv=None):
     commands.add_parser("status")
     args = parser.parse_args(argv)
     try:
-        settings = ctl.config(args.config, require_executables=args.command in ("takeover", "reply", "handback"))
+        settings = ctl.config(args.config, require_executables=args.command in
+                              ("takeover", "reply", "recover-unsent-reply", "handback"))
         if args.command == "groups":
             result = groups(settings, args.name, args.exact)
         elif args.command == "select":
@@ -614,6 +659,8 @@ def main(argv=None):
             raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
             _check(len(raw) <= runner.MAX_REPLY, "text", "reply text is too large")
             result = reply(settings, args.cursor, raw.decode("utf-8"))
+        elif args.command == "recover-unsent-reply":
+            result = recover_unsent_reply(settings, args.cursor, args.expected_attempt)
         elif args.command == "skip":
             result = skip(settings, args.cursor, args.reason)
         elif args.command == "handback":

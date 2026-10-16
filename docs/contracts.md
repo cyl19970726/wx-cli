@@ -4,7 +4,8 @@
 
 ## 身份与进度
 
-- `channel_id`：本地固定频道身份。一个状态目录只绑定一个账号与群。
+- `channel_id`：本地固定频道身份。一个状态目录只绑定一个账号与群或个人会话。
+- `conversation_id`：通用目录身份，由账号与原始 talker 派生，与显示名无关；每个注册项引用独立的 channel 状态，不能通过切换选择重绑旧目录。
 - `session_id`：调用者明确指定的 Agent 会话标签。不是微信会话 token。
 - `consumer`：独立读取方的确认位置。多个读者可以独立消费；当前运维只允许一个自动发言者。
 - `cursor`：本地事件日志位置，不能当作微信消息时间或官方消息 ID。
@@ -15,6 +16,10 @@
 `channel status --consumer NAME` 额外返回该 consumer 的持久 `consumer_cursor`。`ack --expected-cursor N` 在同一事务内比较原位置，不匹配时拒绝推进；无此参数的旧接口保持兼容。交互入口必须使用比较式确认，不能跳过更早未处理的入站文本。
 
 `wx-agent chat` 的选择记录、交互占用和手动 pending 是私有编排状态；事件与发送的权威记录仍由 Rust 管理。接管不换 consumer；未知发送保留原请求。交还只恢复接管前的启停状态，不把已经停止的运行器自动开启。命令与错误处理见 [交互 CLI](INTERACTIVE_CLI.md)。
+
+`wx-agent conversations` 的私有注册表保存会话选择与原 controller 路径，消息和 outbox 仍仅由 Rust 持久化。`read` 返回调用方可保存的 next_cursor，不自动 ack；新手动会话 `reply` 使用来源消息的固定请求 ID 防重，也不自动 ack。导入 controller 的回复复用原顺序和 CAS 确认。`send` 的请求 ID 在各会话 outbox 内有效；通用 sender 的原生事务 ID 同时包含 channel_id，避免跨会话同名请求冲突。所有 GUI 操作会检查全候选中的标题混淆、原状态绑定和共用 UI 锁。
+
+桌面 UI 自动化不能读取微信原生“当前会话 ID”。导航通过 Contacts、Group Chats、Most used 分类搜索，并以 120 秒内的新鲜搜索证据绑定 focus；视觉阶段须核对标题、会话类型及群成员数。操作要求专用桌面，操作期间不得手动切换会话；相同渲染标题仍有 TOCTOU 风险，不能描述为官方身份校验或绝对保证。v5 有限导航和分页读取已现场验证；当前写入与长期稳定性状态见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
 ## Agent 请求
 
@@ -41,6 +46,14 @@ Codex 适配器匿名化成员标签，并只把笔记文案加入提示，不�
 | failed / indeterminate | 失败或不明 | 停止；核对原请求 |
 
 驱动协议 `protocol_version:1`，stdin 包含 request_id、channel_id、session_id、account、talker、text。stdout 返回 status 与非空 evidence。退出码 0 不是送达证明，调用者必须检查 status。运行器不会用替换 ID 绕过不明状态。
+
+### 显式恢复已证实未提交的尝试
+
+常规 `failed`、`indeterminate` 或未知结果仍必须停止，不能自动重试、换 request ID 或重新创建相同意图。只有操作者确认原尝试未提交，且受保护的原生证据能证明这一点时，才允许显式 `recover-unsent`。当前允许的原生准备错误仅有 `Cannot snapshot a clipboard item` 和 `Copied composer text does not exactly match expected draft`；其他错误、模糊状态或仅凭人工猜测都不能恢复。已提交、出现任何 submit 阶段证据、`ui_observed`、收件确认或 P3 错误目标发送均不能走此恢复路径，也不能重放。
+
+恢复保留原 request ID、正文、绑定和不可变历史尝试，并要求调用者指定与 outbox 当前状态完全匹配的 `expected_attempt`。驱动必须先报告受支持的 recovery capability；只读 preflight 在不领取新 attempt 的情况下核对原 request/channel/session/account/talker/text、指定 attempt、完整的 inspect/focus/prepare 作业与结果、原准备阶段错误、已记录的权限、无提交痕迹及无存活 helper。任何证据缺失、重复、悬空或不匹配，或发现 submit 证据/存活 helper，均拒绝恢复。Rust 只有在 preflight 明确证明未提交后，才以事务比较领取下一 attempt；驱动随后在共用 UI 锁内重新核验证据并保存恢复证明，然后最多执行一次发送尝试。缺少能力握手或 positive proof 时失败关闭，不自动退回普通 `send`。
+
+单群 `chat recover-unsent-reply` 只接受与现有 lease、来源游标和 outbox 意图一致的待回复；通用 `conversations recover-unsent-send` 必须指定稳定 conversation ID、原 request ID 与 expected attempt，导入 controller 时复用其保留 lease。命令失败或结果再次不明时保留全部证据，停止并人工检查；不可连续重试来“试通”。该协议是显式人工恢复的窄例外，不改变未知发送禁止自动重试的总则。
 
 ## 会话笔记
 

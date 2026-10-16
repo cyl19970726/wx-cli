@@ -112,11 +112,24 @@ def safe_config(config):
     for key in ("channel_id", "session_id", "account", "talker", "source"):
         if not isinstance(binding.get(key), str) or not binding[key]:
             raise Refused("incomplete sender binding")
-    if not binding["talker"].endswith("@chatroom"):
-        raise Refused("sender requires group binding")
-    title = config.get("target_group")
+    kind = "group" if binding["talker"].endswith("@chatroom") else "private"
+    if "target_name" in config:
+        if config.get("conversation_kind") != kind:
+            raise Refused("conversation kind differs from binding")
+        if "target_group" in config and config["target_group"] != config["target_name"]:
+            raise Refused("conflicting target names")
+        title = config["target_name"]
+    else:
+        # Preserve the deployed group configuration and transaction identifiers.
+        if kind != "group":
+            raise Refused("private conversation requires explicit target_name and kind")
+        title = config.get("target_group")
     if not isinstance(title, str) or not title or len(title) > 100 or any(ord(c) < 32 for c in title):
-        raise Refused("invalid target group")
+        raise Refused("invalid conversation name")
+    config["conversation_kind"] = kind
+    # The existing signed helper calls this field targetGroup, but accepts a
+    # supplied chat title for either kind. Do not rebuild it for this alias.
+    config["target_group"] = title
     config["wx_cli"] = executable(config.get("wx_cli"))
     config["channel_state_dir"] = abs_path(config.get("channel_state_dir"))
     private(config["channel_state_dir"], True)
@@ -221,9 +234,17 @@ def status(config, deadline):
     return cursor
 
 
-def request_ok(request, config):
+def request_ok(request, config, attempt_number=None):
     if not isinstance(request, dict) or request.get("protocol_version") != 1:
         raise Refused("unsupported outbox protocol")
+    if attempt_number is None:
+        attempt_number = request.get("attempt_number", 1)
+    if type(attempt_number) is not int or attempt_number < 1:
+        raise Refused("invalid attempt number")
+    recovery_from = request.get("recovery_from_attempt")
+    if recovery_from is not None and (type(recovery_from) is not int or recovery_from < 1
+                                      or attempt_number != recovery_from + 1):
+        raise Refused("invalid recovery attempt binding")
     rid = request.get("request_id")
     if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", rid):
         raise Refused("invalid request ID")
@@ -231,7 +252,276 @@ def request_ok(request, config):
         if request.get(key) != config["binding"][key]:
             raise Refused("request binding mismatch")
     validate_text(request.get("text"))
-    return "send-" + hashlib.sha256(rid.encode("ascii")).hexdigest()[:48]
+    identity = (request["channel_id"] + "\0" + rid) if "target_name" in config else rid
+    tid = "send-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:48]
+    return tid if attempt_number == 1 else tid + "-a" + str(attempt_number)
+
+
+PRE_SUBMIT_ERRORS = {
+    "Cannot snapshot a clipboard item",
+    "Copied composer text does not exactly match expected draft",
+}
+
+CATEGORIES = {"contacts", "group-chats", "most-used"}
+
+
+def category_matches_kind(category, kind):
+    return (category in CATEGORIES and kind in ("group", "private")
+            and (category == "most-used" or
+                 (category == "contacts" and kind == "private") or
+                 (category == "group-chats" and kind == "group")))
+
+
+def _exists(path):
+    return path.exists() or path.is_symlink()
+
+
+def _read_artifact(path):
+    try:
+        value = private_read(path)
+    except (OSError, ValueError, UnicodeError, Refused) as exc:
+        raise Refused("prior attempt evidence is unavailable") from exc
+    if not isinstance(value, dict):
+        raise Refused("prior attempt evidence is invalid")
+    return value
+
+
+def _prepare_command(request, config, window_id=None, frame=None, focus_id=None):
+    return {"targetGroup": config["target_group"], "expectedDraft": config.get("expected_draft", ""),
+            "targetKind": config.get("conversation_kind", "group"),
+            "focusEvidenceID": focus_id,
+            "text": request["text"], "expectedPID": config["expected_pid"],
+            "expectedWindowID": window_id if window_id is not None else config.get("expected_window_id"),
+            "expectedFrame": frame if frame is not None else config.get("expected_frame"),
+            "composerRect": config["composer_rect"], "buttonPoint": config["button_point"]}
+
+
+def focus_result_ok(result, config, focus_id, window_id, frame):
+    kind = config.get("conversation_kind", "group")
+    category = result.get("category")
+    if (result.get("focused") is not True or result.get("alreadySelected") is not False
+            or result.get("source") != "search" or result.get("targetKind") != kind
+            or result.get("focusEvidenceID") != focus_id
+            or not category_matches_kind(category, kind)):
+        raise Uncertain("kind-aware conversation focus not confirmed")
+    evidence = _read_artifact(config["ui_dir"] / (focus_id + ".focus-evidence.json"))
+    if (evidence.get("id") != focus_id or evidence.get("targetGroup") != config["target_group"]
+            or evidence.get("targetKind") != kind or evidence.get("expectedPID") != config["expected_pid"]
+            or evidence.get("expectedWindowID") != window_id or evidence.get("expectedFrame") != frame
+            or evidence.get("source") != "search" or evidence.get("category") != category
+            or not category_matches_kind(evidence.get("category"), kind)
+            or type(evidence.get("selectedAt")) not in (int, float)):
+        raise Refused("native focus evidence differs from the requested conversation")
+    return {"targetKind": kind, "focusEvidenceID": focus_id,
+            "source": "search", "category": category}
+
+
+def prove_unsent(request, config, attempt_number, deadline, persist=True):
+    """Require old native prepare failure and a durable, complete no-submit trace."""
+    if type(attempt_number) is not int or attempt_number < 2:
+        raise Refused("recovery requires a later attempt")
+    recovery_from = request.get("recovery_from_attempt")
+    if type(recovery_from) is not int or recovery_from != attempt_number - 1:
+        raise Refused("recovery attempt binding mismatch")
+    prior_request = dict(request, attempt_number=recovery_from)
+    prior_request.pop("recovery_from_attempt", None)
+    old_tid = request_ok(prior_request, config, recovery_from)
+    ui = config["ui_dir"]
+    report_path = ui / (old_tid + ".client-result.json")
+    prep_job_path = ui / (old_tid + ".prepare-visual.job.json")
+    prep_result_path = ui / (old_tid + ".prepare-visual.result.json")
+    state_path = ui / (old_tid + ".visual-state.json")
+    submit_paths = (ui / (old_tid + ".submit-attempted.json"),
+                    ui / (old_tid + ".submit-visual.job.json"),
+                    ui / (old_tid + ".submit-visual.result.json"))
+    if any(_exists(path) for path in submit_paths):
+        raise Refused("prior attempt has submit evidence")
+
+    report = _read_artifact(report_path)
+    job = _read_artifact(prep_job_path)
+    result = _read_artifact(prep_result_path)
+    state = _read_artifact(state_path)
+    if (report.get("id") != old_tid or report.get("stage") != "group_focused"
+            or report.get("status") not in ("failed", "indeterminate")):
+        raise Refused("prior attempt report does not prove pre-submit stop")
+    if (result.get("id") != old_tid or result.get("ok") is not False
+            or result.get("error") not in PRE_SUBMIT_ERRORS):
+        raise Refused("prior prepare result is not an approved failure")
+    permissions = result.get("permissions")
+    if not isinstance(permissions, dict) or any(permissions.get(key) is not True
+                                                for key in ("accessibility", "screenRecording", "postEvents")):
+        raise Refused("prior prepare permissions evidence is incomplete")
+    if report.get("error") != helper_reason(result):
+        raise Refused("prior attempt report and prepare result differ")
+    if (job.get("id") != old_tid or job.get("action") != "prepare-visual"
+            or state.get("id") != old_tid or state.get("stage") != "prepare-attempted"):
+        raise Refused("prior prepare evidence is inconsistent")
+    expected_base = {"targetGroup": config["target_group"],
+                     "expectedDraft": config.get("expected_draft", ""),
+                     "text": request.get("text"), "expectedPID": config["expected_pid"],
+                     "composerRect": config["composer_rect"],
+                     "buttonPoint": config["button_point"]}
+    for evidence in (job, state):
+        if any(evidence.get(key) != value for key, value in expected_base.items()):
+            raise Refused("prior attempt text or binding differs")
+    if any(state.get(key) != job.get(key) for key in
+           ("id", "text", "targetGroup", "expectedDraft", "expectedPID", "expectedWindowID",
+            "expectedFrame", "composerRect", "buttonPoint")):
+        raise Refused("prior prepare state differs from its job")
+    # Inspect and focus must be complete, and every launched job must have a terminal result.
+    expected_jobs = {old_tid + ".prepare-visual.job.json",
+                     old_tid + "-inspect.inspect.job.json",
+                     old_tid + "-focus.focus-group.job.json"}
+    actual_jobs = {path.name for path in ui.glob(old_tid + "*.job.json")}
+    if actual_jobs != expected_jobs:
+        raise Refused("prior attempt has an unexpected or dangling helper job")
+    prior_stages = {}
+    for suffix, action in (("-inspect", "inspect"), ("-focus", "focus-group")):
+        prefix = old_tid + suffix
+        launched = list(ui.glob(prefix + "*.job.json"))
+        if len(launched) != 1:
+            raise Refused("prior attempt has a dangling helper job")
+        prior_job = _read_artifact(launched[0])
+        result_path = ui / (prefix + ".result.json")
+        prior_result = _read_artifact(result_path)
+        if (prior_job.get("id") != prefix or prior_job.get("action") != action
+                or prior_result.get("id") != prefix or prior_result.get("ok") is not True):
+            raise Refused("prior attempt helper stages are inconsistent")
+        prior_stages[action] = (prior_job, prior_result)
+    focus_id = old_tid + "-focus"
+    focus_job, focus_result = prior_stages["focus-group"]
+    focus_evidence_path = ui / (focus_id + ".focus-evidence.json")
+    category_fields_present = any(key in item for item in (job, state, focus_job, focus_result)
+                                  for key in ("targetKind", "focusEvidenceID", "category"))
+    if category_fields_present:
+        if (job.get("targetKind") != config.get("conversation_kind", "group")
+                or job.get("focusEvidenceID") != focus_id
+                or state.get("targetKind") != config.get("conversation_kind", "group")
+                or state.get("focusEvidenceID") != focus_id
+                or focus_job.get("targetKind") != config.get("conversation_kind", "group")
+                or focus_result.get("targetKind") != config.get("conversation_kind", "group")
+                or focus_result.get("focusEvidenceID") != focus_id
+                or focus_result.get("source") != "search"
+                or focus_result.get("alreadySelected") is not False
+                or not category_matches_kind(focus_result.get("category"),
+                                             config.get("conversation_kind", "group"))):
+            raise Refused("prior kind-aware focus evidence is inconsistent")
+        evidence = _read_artifact(focus_evidence_path)
+        if (evidence.get("id") != focus_id
+                or evidence.get("targetGroup") != config["target_group"]
+                or evidence.get("targetKind") != config.get("conversation_kind", "group")
+                or evidence.get("expectedPID") != config["expected_pid"]
+                or evidence.get("expectedWindowID") != job.get("expectedWindowID")
+                or evidence.get("expectedFrame") != job.get("expectedFrame")
+                or evidence.get("source") != "search"
+                or evidence.get("category") != focus_result.get("category")
+                or not category_matches_kind(evidence.get("category"),
+                                             config.get("conversation_kind", "group"))
+                or type(evidence.get("selectedAt")) not in (int, float)):
+            raise Refused("prior native focus evidence differs from the prepared conversation")
+        if (focus_job.get("targetGroup") != config["target_group"]
+                or focus_job.get("expectedPID") != config["expected_pid"]
+                or focus_job.get("expectedWindowID") != job.get("expectedWindowID")
+                or focus_job.get("expectedFrame") != job.get("expectedFrame")):
+            raise Refused("prior focus request differs from visual transaction")
+        prior_focus_mode = "kind-aware"
+    else:
+        if _exists(focus_evidence_path):
+            raise Refused("prior focus evidence has an unsupported partial format")
+        if (focus_result.get("focused") is not True
+                or focus_result.get("alreadySelected") is not False
+                or focus_result.get("source") not in ("visible-list", "search")):
+            raise Refused("legacy focus result is not a completed navigation")
+        prior_focus_mode = "legacy"
+    if _helper_is_live(old_tid, deadline):
+        raise Refused("prior helper process is still live")
+    if not persist:
+        return {"request_id": request["request_id"], "from_attempt": recovery_from,
+                "attempt_number": attempt_number, "transaction_id": old_tid,
+                "result_error": result["error"], "report_stage": report["stage"],
+                "report_status": report["status"], "prior_focus_mode": prior_focus_mode}
+    claim_path = ui / (old_tid + ".recovery-proof-to-" + str(attempt_number) + ".json")
+    proof = {"request_id": request["request_id"], "from_attempt": recovery_from,
+             "attempt_number": attempt_number, "transaction_id": old_tid,
+             "result_error": result["error"], "report_stage": report["stage"],
+             "report_status": report["status"], "prior_focus_mode": prior_focus_mode,
+             "proof_saved_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        private_create(claim_path, proof)
+    except FileExistsError as exc:
+        raise Refused("recovery proof already exists") from exc
+    return str(claim_path)
+
+
+def _helper_is_live(tid, deadline):
+    try:
+        listing = call(["/bin/ps", "-axo", "pid=,command="], deadline)
+    except (Refused, Uncertain, OSError):
+        return True
+    return any("WeChatTestBridge" in line for line in listing.splitlines())
+
+
+def recovery_preflight(request, config):
+    """Read-only positive proof before Rust claims the next durable attempt."""
+    attempt_number = request.get("attempt_number", 1) if isinstance(request, dict) else 1
+    request_ok(request, config, attempt_number)
+    ui = config["ui_dir"]
+    lock_path = ui / "sender.lock"
+    fd = os.open(str(lock_path), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r+") as lock:
+        private(lock_path)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refused("sender busy") from exc
+        deadline = time.monotonic() + BUDGET
+        status(config, deadline)
+        prove_unsent(request, config, attempt_number, deadline, persist=False)
+    return {"protocol_version": 1, "recovery_protocol_version": 1, "unsent_proven": True}
+
+
+def title_matches(observed, target):
+    # Match the signed helper's optional member-count suffix conservatively.
+    # A private contact can itself be named "Alex (2)"; that must not be
+    # mistaken for the group/member-count presentation of "Alex".
+    return isinstance(observed, str) and re.fullmatch(
+        re.escape(target) + r"(?:\s*\([0-9０-９]+\)|\s*（[0-9０-９]+）)?",
+        observed.strip(), flags=re.IGNORECASE) is not None
+
+
+def title_query(target):
+    base = target.strip()
+    while True:
+        stripped = re.sub(r"\s*(?:\([0-9０-９]+\)|（[0-9０-９]+）)$", "", base).strip()
+        if not stripped or stripped == base:
+            return base
+        base = stripped
+
+
+def titles_overlap(left, right):
+    return isinstance(left, str) and (title_matches(left, right) or title_matches(right, left))
+
+
+def verify_target(config, deadline):
+    """Title-based navigation is allowed only for one fresh metadata identity."""
+    binding = config["binding"]
+    name = config.get("target_name", config.get("target_group"))
+    kind = config.get("conversation_kind", "group")
+    raw = call([config["wx_cli"], "conversations", "find", "--state-dir",
+                config["channel_state_dir"], "--account", binding["account"],
+                "--source", binding["source"], "--name", title_query(name),
+                "--all-matches", "--kind", "all"], deadline)
+    result = json.loads(raw)
+    matches = result.get("matches")
+    if not isinstance(matches, list) or not all(isinstance(item, dict) for item in matches):
+        raise Refused("invalid conversation metadata")
+    matches = [item for item in matches if titles_overlap(item.get("name"), name)]
+    if (result.get("match_kind") not in ("exact", "partial")
+            or len(matches) != 1
+            or matches[0].get("talker") != binding["talker"]
+            or matches[0].get("kind") != kind
+            or matches[0].get("name") != name):
+        raise Refused("conversation title is ambiguous, renamed, or differs from binding")
 
 
 def helper_reason(result):
@@ -375,27 +665,29 @@ def focus_only(config):
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
         status(config, deadline)
+        verify_target(config, deadline)
         tid = "focus-" + uuid.uuid4().hex
         inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
         window_id, frame = inspect_ok(inspected, config)
         call(["/usr/bin/open", "-a", "/Applications/WeChat.app"], deadline, limit=65536)
-        command = {"targetGroup": config["target_group"], "expectedPID": config["expected_pid"],
+        command = {"targetGroup": config["target_group"],
+                   "targetKind": config.get("conversation_kind", "group"),
+                   "expectedPID": config["expected_pid"],
                    "expectedWindowID": window_id, "expectedFrame": frame,
                    "conversationListRect": config["conversation_list_rect"],
                    "searchPoint": config["search_point"]}
         result = bridge(config, tid, "focus-group", command, deadline, 8.0)
-        if result.get("focused") is not True or type(result.get("alreadySelected")) is not bool:
-            raise Uncertain("target group focus not confirmed")
-        source = result.get("source", "current" if result["alreadySelected"] else None)
-        if source not in ("current", "visible-list", "search"):
-            raise Uncertain("target group focus source invalid")
-        return {"focused": True, "already_selected": result["alreadySelected"], "source": source}
+        focus_proof = focus_result_ok(result, config, tid, window_id, frame)
+        return {"focused": True, "already_selected": False, "source": "search",
+                "target_kind": config.get("conversation_kind", "group"), "focus_evidence_id": tid,
+                "category": focus_proof["category"]}
 
 
 def run(request, config):
     started = time.monotonic()
     deadline = started + BUDGET
-    tid = request_ok(request, config)
+    attempt_number = request.get("attempt_number", 1) if isinstance(request, dict) else 1
+    tid = request_ok(request, config, attempt_number)
     status(config, deadline)
     ui = config["ui_dir"]
     lock_path = ui / "sender.lock"
@@ -407,29 +699,38 @@ def run(request, config):
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
         report_path = ui / (tid + ".client-result.json")
-        report = {"id": tid, "stage": "started", "status": "indeterminate",
+        report = {"id": tid, "attempt_number": attempt_number,
+                  "request_id": request["request_id"], "stage": "started", "status": "indeterminate",
                   "started_at": datetime.now(timezone.utc).isoformat()}
+        if request.get("recovery_from_attempt") is not None:
+            report["recovery_from_attempt"] = request["recovery_from_attempt"]
         try:
             private_create(report_path, report)
         except FileExistsError as exc:
             raise Uncertain("request already attempted") from exc
         try:
+            if request.get("recovery_from_attempt") is not None:
+                report["recovery_proof"] = prove_unsent(request, config, attempt_number, deadline)
+                private_update(report_path, report)
+            verify_target(config, deadline)
             inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
             window_id, frame = inspect_ok(inspected, config)
             report["stage"] = "inspected"
             private_update(report_path, report)
             call(["/usr/bin/open", "-a", "/Applications/WeChat.app"], deadline, limit=65536)
-            command = {"targetGroup": config["target_group"], "expectedDraft": config.get("expected_draft", ""),
-                       "text": request["text"], "expectedPID": config["expected_pid"],
-                       "expectedWindowID": window_id, "expectedFrame": frame,
-                       "composerRect": config["composer_rect"], "buttonPoint": config["button_point"]}
-            focus_command = {"targetGroup": config["target_group"], "expectedPID": config["expected_pid"],
+            focus_id = tid + "-focus"
+            focus_command = {"targetGroup": config["target_group"],
+                             "targetKind": config.get("conversation_kind", "group"),
+                             "expectedPID": config["expected_pid"],
                              "expectedWindowID": window_id, "expectedFrame": frame,
                              "conversationListRect": config["conversation_list_rect"],
                              "searchPoint": config["search_point"]}
-            focused = bridge(config, tid + "-focus", "focus-group", focus_command, deadline, 8.0)
-            if focused.get("focused") is not True:
-                raise Uncertain("target group focus not confirmed")
+            focused = bridge(config, focus_id, "focus-group", focus_command, deadline, 8.0)
+            focus_proof = focus_result_ok(focused, config, focus_id, window_id, frame)
+            command = _prepare_command(request, config, window_id, frame, focus_id)
+            report["target_kind"] = config.get("conversation_kind", "group")
+            report["focus_evidence_id"] = focus_id
+            report["focus_category"] = focus_proof["category"]
             report["stage"] = "group_focused"
             private_update(report_path, report)
             prepared = bridge(config, tid, "prepare-visual", command, deadline, 18.0)
@@ -471,8 +772,13 @@ def run(request, config):
 def main(argv=None):
     os.umask(0o077)
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--recovery-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "recovery_protocol_version": 1,
+                          "pre_submit_proof_required": True}, separators=(",", ":")))
+        return 0
+    recovery_preflight_mode = argv == ["--recovery-preflight"]
     focus_mode = argv == ["--focus-only"]
-    if argv and not focus_mode:
+    if argv and not (focus_mode or recovery_preflight_mode):
         print(json.dumps({"focused": False, "reason": "unsupported command"}))
         return 2
     if focus_mode:
@@ -489,6 +795,23 @@ def main(argv=None):
             code = 1
         print(json.dumps(result, separators=(",", ":")))
         return code
+    if recovery_preflight_mode:
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            request = json.loads(raw)
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            config = safe_config(private_read(abs_path(cfg)))
+            result = recovery_preflight(request, config)
+            print(json.dumps(result, separators=(",", ":")))
+            return 0
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError) as exc:
+            reason = str(exc) if isinstance(exc, (Refused, Uncertain)) else type(exc).__name__
+            print(json.dumps({"preflight": False, "reason": reason}, separators=(",", ":")), file=sys.stderr)
+            return 1
     try:
         raw = sys.stdin.buffer.read(MAX_INPUT + 1)
         if len(raw) > MAX_INPUT:

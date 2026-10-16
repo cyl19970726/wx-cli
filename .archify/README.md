@@ -17,18 +17,18 @@ python3 scripts/publish_architecture.py
 
 ## 会话能力规划
 
-[打开会话 CLI 能力图](../docs/diagrams/conversation-capabilities.html)。该图明确区分当前已验证单群能力与通用会话 CLI 的未来目标；以图中的源码 revision 为证据基线。
+[打开会话 CLI 能力图](../docs/diagrams/conversation-capabilities.html)。图以源码 revision `fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b` 为基线，区分已实现的通用会话 CLI、v5 授权目标的导航/读取实测、v3 单条发送的历史收件确认，以及当前版本发送/回复闭环尚未完成的边界。现场证据不代表任意目标均可无条件操作。
 
 ```sh
 node "$ARCHIFY_ROOT/bin/archify.mjs" finalize tree \
   docs/diagrams/conversation-capabilities.tree.json \
-  .archify/tree-conversation-capabilities-20261016-155423/conversation-capabilities.html \
+  .archify/tree-conversation-capabilities-20261016-general/conversation-capabilities.html \
   --repo-root . --quality showcase --json \
-  --out-dir .archify/tree-conversation-capabilities-20261016-155423/rebuild-review
+  --out-dir .archify/tree-conversation-capabilities-20261016-general/rebuild-review-YYYYMMDD-HHMMSS
 python3 scripts/publish_architecture.py --diagram capabilities \
-  --receipt .archify/tree-conversation-capabilities-20261016-155423/rebuild-review/conversation-capabilities.finalize-summary.json
+  --receipt .archify/tree-conversation-capabilities-20261016-general/rebuild-review-YYYYMMDD-HHMMSS/conversation-capabilities.finalize-summary.json
 python3 scripts/publish_architecture.py --diagram capabilities --check \
-  --receipt .archify/tree-conversation-capabilities-20261016-155423/rebuild-review/conversation-capabilities.finalize-summary.json
+  --receipt .archify/tree-conversation-capabilities-20261016-general/rebuild-review-YYYYMMDD-HHMMSS/conversation-capabilities.finalize-summary.json
 ```
 
-规范化规则与上图相同，原始校验回执和本机路径不进入公开源。每次重复生成需要使用新的 `--out-dir`；发布脚本不会替代 Archify 的校验。
+发布脚本默认使用已通过的 `.archify/tree-conversation-capabilities-20261016-general/revision-3/conversation-capabilities.finalize-summary.json`；`--check` 核对公开 HTML 是否等于该 raw HTML 的空白行规范化副本。重建时必须为 `--receipt` 传入本次新 finalize 产生的 summary。`.archify` raw HTML 与回执留在本机，不进入公开源。每次重复生成需要替换为新的 `--out-dir`；发布脚本不会替代 Archify 的校验。旧的、忽略的 `docs/diagrams/conversation-capabilities.delivery.json` 回执已归档到 `.local/conversations-navigation-20261016/`，不会参与当前检查。

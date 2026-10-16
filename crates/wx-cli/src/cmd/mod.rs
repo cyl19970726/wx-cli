@@ -25,5 +25,6 @@ mod thin_client_tests;
 pub mod channel;
 #[path = "channel_snapshot.rs"]
 pub(crate) mod channel_snapshot;
+pub mod conversations;
 pub mod groups;
 pub mod outgoing;

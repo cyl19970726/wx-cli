@@ -68,6 +68,14 @@ class FakeCommands:
                 self.sends += 1
                 self.outbox[rid]["status"] = self.send_status
                 return json.dumps({"request_id": rid, "status": self.send_status})
+            if action == "recover-unsent":
+                expected = int(parts[parts.index("--expected-attempt") + 1])
+                if self.outbox[rid].get("attempt_number") != expected:
+                    raise chat.ChatError("command_failed", "stale attempt")
+                self.outbox[rid]["attempt_number"] = expected + 1
+                self.outbox[rid]["status"] = self.send_status
+                return json.dumps({"request_id": rid, "attempt_number": expected + 1,
+                                   "status": self.send_status})
         raise AssertionError((section, parts))
 
 
@@ -184,6 +192,64 @@ class InteractiveTests(unittest.TestCase):
             chat.reply(self.settings, 1, "different")
         self.assertEqual(conflict.exception.details,
                          {"request_id": done["request_id"], "status": "ui_observed"})
+
+    def test_recover_unsent_reply_uses_retained_intent_and_acks_only_terminal_result(self):
+        self.taken()
+        request_id = chat._request_id(self.fake.binding, 101)
+        lease_path = self.state / chat.LEASE_NAME
+        lease = runner.load(lease_path)
+        lease["pending"] = {"cursor": 1, "previous_cursor": 0, "request_id": request_id,
+                            "text": "same original reply", "phase": "queued"}
+        runner.save(lease_path, lease)
+        self.fake.outbox[request_id] = {"request_id": request_id, "text": "same original reply",
+                                        "status": "indeterminate", "attempt_number": 1}
+        self.fake.send_status = "ui_observed"
+        result = chat.recover_unsent_reply(self.settings, 1, expected_attempt=1)
+        self.assertEqual(result["status"], "ui_observed")
+        self.assertEqual(result["request_id"], request_id)
+        self.assertEqual(self.fake.acks, [(0, 1)])
+        self.assertEqual(self.fake.sends, 0)
+        self.assertEqual(self.fake.outbox[request_id]["attempt_number"], 2)
+        self.assertIsNone(runner.load(lease_path)["pending"])
+
+    def test_recover_unsent_reply_rejects_stale_attempt_and_nonterminal_result(self):
+        self.taken()
+        request_id = chat._request_id(self.fake.binding, 101)
+        lease_path = self.state / chat.LEASE_NAME
+        lease = runner.load(lease_path)
+        lease["pending"] = {"cursor": 1, "previous_cursor": 0, "request_id": request_id,
+                            "text": "same original reply", "phase": "queued"}
+        runner.save(lease_path, lease)
+        self.fake.outbox[request_id] = {"request_id": request_id, "text": "same original reply",
+                                        "status": "failed", "attempt_number": 2}
+        with self.assertRaisesRegex(chat.ChatError, "differs from the requested recovery"):
+            chat.recover_unsent_reply(self.settings, 1, expected_attempt=1)
+        self.assertEqual(self.fake.outbox[request_id]["attempt_number"], 2)
+        self.assertEqual(self.fake.sends, 0)
+        self.fake.outbox[request_id]["attempt_number"] = 1
+        self.fake.send_status = "indeterminate"
+        with self.assertRaisesRegex(chat.ChatError, "not terminal"):
+            chat.recover_unsent_reply(self.settings, 1)
+        pending = runner.load(lease_path)["pending"]
+        self.assertEqual(pending["request_id"], request_id)
+        self.assertEqual(self.fake.acks, [])
+
+    def test_recovery_cli_requires_and_forwards_expected_attempt(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as missing:
+            chat.main(["--config", "/synthetic/config.json", "recover-unsent-reply",
+                       "--cursor", "1"])
+        self.assertEqual(missing.exception.code, 2)
+        self.assertIn("--expected-attempt", errors.getvalue())
+
+        output = io.StringIO()
+        with mock.patch.object(chat.ctl, "config", return_value=self.settings), \
+             mock.patch.object(chat, "recover_unsent_reply", return_value={"status": "ui_observed"}) as recover, \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(chat.main(["--config", "/synthetic/config.json", "recover-unsent-reply",
+                                        "--cursor", "1", "--expected-attempt", "4"]), 0)
+        recover.assert_called_once_with(self.settings, 1, 4)
+        self.assertEqual(json.loads(output.getvalue()), {"status": "ui_observed"})
 
     def test_prior_automatic_terminal_reply_is_reported_without_new_send(self):
         self.taken()

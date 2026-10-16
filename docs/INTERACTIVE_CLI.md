@@ -50,6 +50,21 @@ wx-agent chat --config "$CONFIG" status
 
 `ui_observed` 仍只代表本地出站证据。需要证明送达时应另行取得收件端确认。历史上与当前待处理消息无关的失败/不明记录只报告计数，不修改、不重发；与本次来源相关的不明请求会阻止交接。
 
+### 操作者恢复已证实未提交的回复
+
+一般的 `failed`、`indeterminate` 或未知结果仍然停止处理。只有已核实原次发送未提交，且原生私有证据完整匹配、没有 submit 记录且没有存活 helper 时，才允许显式调用窄范围恢复命令。当前只接受两种准备失败：`Cannot snapshot a clipboard item` 和 `Copied composer text does not exactly match expected draft`。其他错误、身份/正文/游标不一致、证据缺失或任何 submit 痕迹都必须停止；错误目标发送（P3）永远不能重放。
+
+对仍保留在原 lease 的回复，先从该请求的 outbox 状态取得当前 attempt number，再由操作者明确指定原 cursor 和相同的 attempt：
+
+```sh
+wx-agent chat --config /ABS/private/wx-agent/group-controller.json \
+  recover-unsent-reply --cursor 121 --expected-attempt 1
+```
+
+命令复用 lease 中原 request ID 与正文。底层先完成 driver capability 握手和只读 preflight，再以 CAS 领取下一不可变 attempt；driver 随后在共用 UI 锁内重新证明原尝试未提交、保存 proof 并最多进行一次发送尝试。任一步缺少证据都失败关闭，不自动退回普通发送。恢复后再次失败或结果不明时保留新旧记录并停止；禁止自动重试、换 ID 或连续尝试。恢复完成不代表收件确认。
+
+该命令仅在包含恢复协议的 Python 包版本中可用。部署到实际 Mac 后先核对该机 `wx-agent chat recover-unsent-reply --help` 显示必需的 `--expected-attempt`；当前源代码/离线测试通过不等于远程运行时已升级。协议细节见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
+
 ## 已处理但无需回复
 
 ```sh

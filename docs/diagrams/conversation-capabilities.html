@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="archify 3.1.0">
   <meta name="archify-reader-contract" content="declared-wide-v1">
-  <title>微信会话 CLI 能力规划</title>
+  <title>微信会话 CLI：实现与实机验证</title>
   <script>
     // Resolve the theme before first paint so light-preference users don't
     // see a dark flash. The toolbar script below re-applies with UI state.
@@ -5150,19 +5150,19 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
            data-preset-badge-blueprint="蓝图 / 修订 01"
            data-preset-badge-editorial="编辑风格 / 现场笔记">
         <div class="pulse-dot"></div>
-        <h1>微信会话 CLI 能力规划</h1>
+        <h1>微信会话 CLI：实现与实机验证</h1>
       </div>
-      <p class="subtitle">现有单群闭环已实测；通用多会话能力仍是规划目标。</p>
+      <p class="subtitle">通用会话 CLI 已实现；v3 授权目标有界实测通过，个人新发与完整往返仍未验收。</p>
     </div>
 
-    <script id="archify-source-evidence-data" type="application/json">{"schemaVersion":1,"verified":true,"repository":{"url":"https://github.com/cyl19970726/wx-cli","revision":"9cefab34df807ff566dc0bf08aa72489ec241276","shortRevision":"9cefab3","label":"cyl19970726/wx-cli","href":"https://github.com/cyl19970726/wx-cli/tree/9cefab34df807ff566dc0bf08aa72489ec241276"},"referenceCount":15,"nodes":{"verified":[{"path":"docs/INTERACTIVE_CLI.md","line":3,"endLine":5,"label":"单群范围与入口","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/docs/INTERACTIVE_CLI.md#L3-L5"},{"path":"docs/INTERACTIVE_CLI.md","line":38,"label":"高层初始化边界","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/docs/INTERACTIVE_CLI.md#L38"},{"path":"crates/wx-cli/src/cmd/channel.rs","line":22,"endLine":72,"label":"底层通道命令范围","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/crates/wx-cli/src/cmd/channel.rs#L22-L72"}],"selection":[{"path":"crates/wx-cli/src/cmd/groups.rs","line":14,"endLine":28,"label":"群查找参数","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/crates/wx-cli/src/cmd/groups.rs#L14-L28"},{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":268,"endLine":297,"label":"查找与绑定校验","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L268-L297"}],"incremental_read":[{"path":"crates/wx-cli/src/cmd/groups.rs","line":1,"endLine":1,"label":"私有副本元数据查询","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/crates/wx-cli/src/cmd/groups.rs#L1"},{"path":"crates/wx-cli/src/cmd/channel_snapshot.rs","line":115,"endLine":157,"label":"快照文件范围","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/crates/wx-cli/src/cmd/channel_snapshot.rs#L115-L157"},{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":300,"endLine":315,"label":"游标分页读取","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L300-L315"}],"manual_reply":[{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":348,"endLine":426,"label":"显式回复与重试核验","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L348-L426"},{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":429,"endLine":497,"label":"skip 审计与游标确认","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L429-L497"},{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":593,"endLine":618,"label":"reply 与 skip 命令入口","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L593-L618"}],"handoff":[{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":317,"endLine":345,"label":"接管","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L317-L345"},{"path":"packages/wx-agent/src/wx_agent/interactive.py","line":500,"endLine":555,"label":"交还","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/interactive.py#L500-L555"}],"gui_target":[{"path":"packages/wx-agent/src/wx_agent/macos_sender_driver.py","line":365,"endLine":392,"label":"定位配置群","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/macos_sender_driver.py#L365-L392"},{"path":"packages/wx-agent/src/wx_agent/macos_sender_driver.py","line":421,"endLine":437,"label":"发送前聚焦目标群","href":"https://github.com/cyl19970726/wx-cli/blob/9cefab34df807ff566dc0bf08aa72489ec241276/packages/wx-agent/src/wx_agent/macos_sender_driver.py#L421-L437"}]}}</script>
+    <script id="archify-source-evidence-data" type="application/json">{"schemaVersion":1,"verified":true,"repository":{"url":"https://github.com/cyl19970726/wx-cli","revision":"fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b","shortRevision":"fa3187b","label":"cyl19970726/wx-cli","href":"https://github.com/cyl19970726/wx-cli/tree/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b"},"referenceCount":31,"nodes":{"generic_cli":[{"path":"docs/CONVERSATIONS_CLI.md","line":1,"endLine":3,"label":"功能范围","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/docs/CONVERSATIONS_CLI.md#L1-L3"},{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":571,"endLine":639,"label":"CLI 命令入口","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L571-L639"}],"find_select":[{"path":"crates/wx-cli/src/cmd/conversations.rs","line":63,"endLine":69,"label":"稳定 ID 派生","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/crates/wx-cli/src/cmd/conversations.rs#L63-L69"},{"path":"crates/wx-cli/src/cmd/conversations.rs","line":127,"endLine":178,"label":"群与个人元数据发现","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/crates/wx-cli/src/cmd/conversations.rs#L127-L178"},{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":134,"endLine":160,"label":"ID 或名称查询","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L134-L160"}],"session_state":[{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":281,"endLine":325,"label":"每会话状态与不可重绑校验","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L281-L325"},{"path":"docs/CONVERSATIONS_CLI.md","line":47,"endLine":50,"label":"注册与选择规则","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/docs/CONVERSATIONS_CLI.md#L47-L50"}],"read_page":[{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":340,"endLine":376,"label":"事件校验与分页","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L340-L376"},{"path":"docs/CONVERSATIONS_CLI.md","line":51,"endLine":60,"label":"只读分页行为","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/docs/CONVERSATIONS_CLI.md#L51-L60"}],"manual_ops":[{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":463,"endLine":501,"label":"手动发送与回复","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L463-L501"},{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":558,"endLine":568,"label":"显式 focus","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L558-L568"},{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":571,"endLine":595,"label":"命令接口","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L571-L595"}],"controller_handoff":[{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":181,"endLine":214,"label":"核对既有 controller 绑定","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L181-L214"},{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":281,"endLine":325,"label":"选择时复用原状态","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L281-L325"},{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":379,"endLine":419,"label":"接管与 handback","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L379-L419"}],"identity_guard":[{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":163,"endLine":178,"label":"元数据唯一性复核","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L163-L178"},{"path":"native/macos/wechat-bridge/VisualParameters.swift","line":63,"endLine":97,"label":"标题完整边界和种类校验","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/VisualParameters.swift#L63-L97"},{"path":"native/macos/wechat-bridge/parameter_tests.swift","line":135,"endLine":160,"label":"标题发送者误匹配回归","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/parameter_tests.swift#L135-L160"}],"shared_ui_lock":[{"path":"packages/wx-agent/src/wx_agent/conversations.py","line":255,"endLine":278,"label":"沿用同一 UI 目录配置","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/conversations.py#L255-L278"},{"path":"packages/wx-agent/src/wx_agent/macos_sender_driver.py","line":655,"endLine":684,"label":"focus 共享桌面锁","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/macos_sender_driver.py#L655-L684"},{"path":"packages/wx-agent/src/wx_agent/macos_sender_driver.py","line":686,"endLine":705,"label":"发送共享桌面锁","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/packages/wx-agent/src/wx_agent/macos_sender_driver.py#L686-L705"}],"resident_agents":[{"path":"docs/CONVERSATIONS_CLI.md","line":92,"endLine":94,"label":"未实现范围","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/docs/CONVERSATIONS_CLI.md#L92-L94"}],"mcp":[{"path":"docs/CONVERSATIONS_CLI.md","line":92,"endLine":94,"label":"未实现范围","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/docs/CONVERSATIONS_CLI.md#L92-L94"}],"p3_wrong_target":[{"path":"native/macos/wechat-bridge/VisualParameters.swift","line":63,"endLine":97,"label":"标题完整边界和会话种类匹配","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/VisualParameters.swift#L63-L97"},{"path":"native/macos/wechat-bridge/parameter_tests.swift","line":135,"endLine":160,"label":"发送者区域误匹配回归","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/parameter_tests.swift#L135-L160"}],"legacy_live":[{"path":"docs/INTERACTIVE_VALIDATION_20261016.md","line":33,"endLine":58,"label":"既有单群现场记录","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/docs/INTERACTIVE_VALIDATION_20261016.md#L33-L58"}],"return_popup":[{"path":"native/macos/wechat-bridge/VisualParameters.swift","line":123,"endLine":132,"label":"短搜索弹窗几何门槛","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/VisualParameters.swift#L123-L132"},{"path":"native/macos/wechat-bridge/main.swift","line":718,"endLine":753,"label":"搜索弹窗捕获与复核","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/main.swift#L718-L753"},{"path":"native/macos/wechat-bridge/parameter_tests.swift","line":54,"endLine":76,"label":"368×194 与边界回归","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/parameter_tests.swift#L54-L76"}],"v5_nav_read":[{"path":"native/macos/wechat-bridge/main.swift","line":768,"endLine":817,"label":"有界分类搜索与窗口校验","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/main.swift#L768-L817"},{"path":"native/macos/wechat-bridge/VisualParameters.swift","line":48,"endLine":59,"label":"六秒搜索预算与脱敏诊断","href":"https://github.com/cyl19970726/wx-cli/blob/fa3187b6f775f6ffcc0d8c10f9f0c3f83d92e72b/native/macos/wechat-bridge/VisualParameters.swift#L48-L59"}]}}</script>
     <script id="archify-i18n-data" type="application/json">{"locale":"zh-CN","messages":{"viewer.kind.frontend":"前端","viewer.kind.backend":"后端","viewer.kind.database":"数据库","viewer.kind.cloud":"云服务","viewer.kind.security":"安全","viewer.kind.messagebus":"消息总线","viewer.kind.external":"外部系统","viewer.kind.neutral":"中性","viewer.kind.node":"节点","viewer.kind.start":"开始","viewer.kind.active":"活动","viewer.kind.waiting":"等待","viewer.kind.decision":"决策","viewer.kind.success":"成功","viewer.kind.failure":"失败","viewer.toolbar.actions":"图表操作","viewer.theme.toggle.title":"切换主题（T）","viewer.theme.toggle":"切换颜色主题","viewer.theme.dark":"深色","viewer.theme.light":"浅色","viewer.preset.choose.title":"选择视觉风格（S 循环切换）","viewer.preset.choose":"选择视觉风格","viewer.preset.style":"风格","viewer.preset.menu":"视觉风格","viewer.preset.identity":"视觉表达","viewer.preset.cycles":"循环切换","viewer.preset.classic":"经典","viewer.preset.classic.short":"经典","viewer.preset.classic.hint":"稳定的技术默认风格","viewer.preset.flow":"信号流","viewer.preset.flow.short":"流动","viewer.preset.flow.hint":"突出动态流向","viewer.preset.blueprint":"蓝图","viewer.preset.blueprint.hint":"工程评审","viewer.preset.editorial":"编辑风格","viewer.preset.editorial.hint":"适合发布与上线说明","viewer.preset.badge.signalFlow":"信号流","viewer.preset.badge.blueprint":"蓝图 / 修订 01","viewer.preset.badge.editorial":"编辑风格 / 现场笔记","viewer.preset.badge.editorialPlate":"ARCHIFY / 图版 04","viewer.preset.current":"当前视觉风格：{style}。选择视觉风格","viewer.motion.live":"动态","viewer.motion.still":"静态","viewer.motion.pause":"暂停动效","viewer.motion.resume":"恢复动效","viewer.motion.reduced":"已根据减少动态效果偏好暂停动效","viewer.motion.hidden":"页面不可见时已暂停动效","viewer.motion.yielding":"暂停动效；当前让位于{owner}","viewer.motion.yielding.title":"动态预览已启用 · 正在让位于{owner}","viewer.owner.route":"路径探测","viewer.owner.lens":"语义透镜","viewer.owner.relationship":"关系预览","viewer.owner.intent":"意图追踪","viewer.owner.focus":"语义聚焦","viewer.owner.legend":"图例预览","viewer.owner.reader":"读者交互","viewer.present.enter":"进入演示模式","viewer.present.enter.title":"演示模式（F）","viewer.present.exit":"退出演示模式","viewer.present.exit.title":"退出演示模式（F 或 Escape）","viewer.present.present":"演示","viewer.present.exit.label":"退出","viewer.export.button":"导出","viewer.export.button.title":"导出图表（E）","viewer.export.diagram":"导出图表","viewer.export.menu":"导出","viewer.export.subtitle":"便携、整洁的输出","viewer.export.share":"分享","viewer.export.shareCard":"分享卡片","viewer.export.routeShareCard":"路径分享卡片","viewer.export.reachShareCard":"可达范围分享卡片","viewer.export.copyDiagram":"复制图表","viewer.export.clipboardPng":"复制 PNG 到剪贴板","viewer.export.raster":"位图","viewer.export.image":"图像","viewer.export.lossless":"无损图像","viewer.export.compact":"紧凑图像","viewer.export.modern":"现代图像格式","viewer.export.vectorMotion":"矢量与动效","viewer.export.vectorMotion.heading":"矢量与动效","viewer.export.editable":"可编辑矢量图","viewer.export.svg.auto":"SVG · 自动","viewer.export.svg.auto.hint":"匹配宿主主题","viewer.export.svg.light":"SVG · 浅色","viewer.export.svg.light.hint":"始终浅色","viewer.export.svg.dark":"SVG · 深色","viewer.export.svg.dark.hint":"始终深色","viewer.export.motion6s":"6 秒动效","viewer.export.unsupported":"当前浏览器不支持","viewer.export.clipboardUnsupported":"当前浏览器不支持写入图片剪贴板","viewer.export.clipboardUnsupported.short":"此浏览器不支持写入图片剪贴板。","viewer.export.motionUnavailable":"当前浏览器无法录制动效","viewer.export.webmUnavailable":"当前浏览器不支持 WebM","viewer.export.failed":"导出失败：{message}","viewer.export.unknownVariant":"未知的分享卡片类型：{variant}","viewer.export.routeRequired":"请先追踪路径，再导出路径分享卡片","viewer.export.reachRequired":"请先追踪编写可达范围，再导出可达范围分享卡片","viewer.export.unknown":"未知错误","viewer.export.routeFailed":"路径分享卡片导出失败：{message}","viewer.export.reachFailed":"可达范围分享卡片导出失败：{message}","viewer.export.copyFailed":"复制失败：{message}","viewer.export.copiedPng":"已将 PNG 复制到剪贴板","viewer.export.downloadedRoute":"已下载路径分享卡片","viewer.export.downloadedReach":"已下载可达范围分享卡片","viewer.export.downloadedWebm":"已下载 WebM","viewer.export.recording":"正在录制 6 秒动效…","viewer.export.card.routeSummary.one":"路径：{source} → {target} · {count} 步","viewer.export.card.routeSummary.other":"路径：{source} → {target} · {count} 步","viewer.export.card.reachSummary":"从{origin}开始的编写{direction} · {nodes} · {links} · 最深 {hops}","viewer.export.card.node.one":"{count} 个节点","viewer.export.card.node.other":"{count} 个节点","viewer.export.card.link.one":"{count} 条连接","viewer.export.card.link.other":"{count} 条连接","viewer.export.card.hop.one":"{count} 跳","viewer.export.card.hop.other":"{count} 跳","viewer.export.card.routeBadge":"ARCHIFY · 路径 · {hops}","viewer.export.card.reachBadge":"ARCHIFY · {direction}可达范围","viewer.export.direction.upstream":"上游","viewer.export.direction.downstream":"下游","viewer.export.error.canvasUnavailable":"无法为{label}使用画布","viewer.export.error.contextUnavailable":"无法为{label}创建二维画布上下文","viewer.export.error.toBlobUnavailable":"{label}无法使用 canvas.toBlob","viewer.export.error.toBlobNull":"{label}的 canvas.toBlob 未返回数据","viewer.export.error.variantsCombined":"无法同时组合多种分享卡片类型","viewer.export.error.viewerState":"分享卡片导出无法移除临时 Viewer 状态","viewer.export.error.routeState":"路径卡片导出无法安全保留已解析路径","viewer.export.error.reachState":"可达范围卡片导出无法安全保留编写的可达范围","viewer.export.error.webmRequirements":"WebM 动效导出需要追踪动画及浏览器 MediaRecorder 支持","viewer.export.error.mediaRecorder":"MediaRecorder 录制失败","viewer.export.error.emptyWebm":"MediaRecorder 生成了空的 WebM","viewer.export.error.webmBackground":"无法为 WebM 导出加载 SVG 背景","viewer.guide.title":"探索此系统","viewer.focus.selectedNodes":"已选择 {count} 个节点","viewer.guide.eyebrow":"图表指南","viewer.guide.close":"关闭图表指南","viewer.guide.inspecting":"正在检查已编译语义","viewer.guide.actions":"图表探索操作","viewer.guide.find":"查找任意节点","viewer.guide.find.hint":"搜索标签、职责、类型和稳定 ID。","viewer.guide.route":"追踪路径","viewer.guide.route.aria":"追踪有向路径","viewer.guide.route.hint":"查看两个语义节点如何按编写方向连接。","viewer.guide.map":"查看完整系统","viewer.guide.map.hint":"打开带实时视口和稳定节点的语义雷达。","viewer.guide.lens":"比较语义类型","viewer.guide.lens.hint":"统计角色、显示流量并比较直接编写的连接。","viewer.guide.present":"进入演示模式","viewer.guide.present.hint":"让实时图表占满视口，同时不改变导出。","viewer.guide.shortcuts":"其他键盘快捷键","viewer.guide.shortcut.export":"导出","viewer.guide.shortcut.theme":"主题","viewer.guide.shortcut.style":"风格","viewer.guide.shortcut.reset":"重置","viewer.guide.shortcut.zoomIn":"放大","viewer.guide.shortcut.zoomOut":"缩小","viewer.guide.shortcut.close":"关闭","viewer.guide.credit":"觉得好用？在 GitHub 给 Archify 点个 Star","viewer.guide.star":"Star","viewer.guide.facts":"{nodes} · {relationships}","viewer.guide.fact.node.one":"{count} 个语义节点","viewer.guide.fact.node.other":"{count} 个语义节点","viewer.guide.fact.relationship.one":"{count} 条关系","viewer.guide.fact.relationship.other":"{count} 条关系","viewer.guide.open":"打开图表指南","viewer.finder.title":"查找节点","viewer.finder.close":"关闭节点查找器","viewer.finder.placeholder":"搜索标签或 ID","viewer.finder.search":"搜索图表节点","viewer.finder.results":"图表节点","viewer.finder.empty":"没有匹配的节点","viewer.finder.result.focus":"聚焦{label}","viewer.finder.result.routeStart":"选择{label}作为路径起点","viewer.finder.result.routeTarget":"选择{label}作为路径终点，{links}","viewer.finder.status.empty":"没有匹配的节点","viewer.finder.status.count.one":"{count} 个匹配节点","viewer.finder.status.count.other":"{count} 个匹配节点","viewer.finder.noun.nodes":"个节点","viewer.finder.link.one":"{count} 条连接","viewer.finder.link.other":"{count} 条连接","viewer.finder.result.focus.one":"聚焦{label}，{count} 条相关连接","viewer.finder.result.focus.other":"聚焦{label}，{count} 条相关连接","viewer.finder.status.filtered":"{visible}/{available} {noun}","viewer.finder.status.all":"{available} {noun}","viewer.passport.eyebrow":"语义护照","viewer.passport.metadata":"节点元数据","viewer.passport.evidence":"已验证的源代码证据","viewer.passport.verified":"已验证来源","viewer.passport.verificationScope":"已按固定修订版本验证本地 Git 证据，未检查远程访问权限。","viewer.passport.reach":"编写可达范围","viewer.passport.reach.trace":"追踪编写的可达性","viewer.passport.upstream":"上游","viewer.passport.downstream":"下游","viewer.passport.upstream.trace":"追踪上游编写可达性","viewer.passport.downstream.trace":"追踪下游编写可达性","viewer.passport.close":"关闭语义护照","viewer.passport.move":"移动语义护照。可拖动、使用方向键移动，或按 Home 恢复自动位置。","viewer.passport.copy":"复制链接","viewer.passport.copy.focus":"复制聚焦节点的链接","viewer.passport.relations":"关系","viewer.passport.relations.show":"显示关联关系","viewer.passport.relations.hide":"隐藏关联关系","viewer.passport.relations.list":"关联关系","viewer.passport.copyRelation":"复制关系","viewer.passport.copyNode":"复制节点","viewer.passport.copyPinned":"复制固定关系的链接","viewer.passport.copySource":"复制来源节点的链接","viewer.passport.copy.focused.success":"已复制聚焦节点链接","viewer.passport.copy.pinned.success":"已复制固定关系链接","viewer.passport.copy.focused.failed":"无法复制聚焦节点链接","viewer.passport.copy.pinned.failed":"无法复制固定关系链接","viewer.passport.relationship.none":"没有关联关系","viewer.passport.relationship.count.one":"{count} 条关系","viewer.passport.relationship.count.other":"{count} 条关系","viewer.passport.relationship.show.one":"显示 {count} 条关联关系","viewer.passport.relationship.show.other":"显示 {count} 条关联关系","viewer.passport.relationship.summary":"{out} 条出向 · {in} 条入向{loops}","viewer.passport.relationship.loops":" · {count} 条自环","viewer.passport.relationship.explorer":"直接关系浏览器","viewer.passport.relationship.help":"使用方向键浏览关系。按 Enter 或空格键固定详情；按 Escape 清除。","viewer.passport.relationship.loopsBack":"回环","viewer.passport.relationship.connectsTo":"连接到","viewer.passport.relationship.connectsFrom":"连接自","viewer.passport.relationship.pinned":"已固定关系 · {from} → {to} · {label}","viewer.passport.relationship.inspect":"检查第 {index}/{total} 条关系：{from} 到 {to}，{label}。按 Enter 查看详情。","viewer.passport.relationship.group.out":"出向","viewer.passport.relationship.group.in":"入向","viewer.passport.relationship.group.loop":"自环","viewer.passport.relationship.row":"{group}：{relationship}，{neighbor}","viewer.passport.relationship.direction.out":"出 →","viewer.passport.relationship.direction.in":"← 入","viewer.passport.relationship.direction.loop":"自环","viewer.passport.sourceCount.one":"{count} 个已验证来源引用","viewer.passport.sourceCount.other":"{count} 个已验证来源引用","viewer.passport.repository.open":"打开已验证的仓库修订版本 {revision}","viewer.passport.source.open":"打开修订版本 {revision} 中已验证的来源 {path}","viewer.passport.source.openLink":"打开 ↗","viewer.passport.reach.upstream.one":"追踪 {count} 个上游编写节点","viewer.passport.reach.upstream.other":"追踪 {count} 个上游编写节点","viewer.passport.reach.downstream.one":"追踪 {count} 个下游编写节点","viewer.passport.reach.downstream.other":"追踪 {count} 个下游编写节点","viewer.passport.reach.noUpstream":"没有上游编写节点","viewer.passport.reach.noDownstream":"没有下游编写节点","viewer.passport.reach.status":"{direction} · {nodes} 个节点 · {links} 条连接 · 最深 {hops} 跳","viewer.route.eyebrow":"路径","viewer.route.start":"点击路径的起点","viewer.route.start.find":"查找起点","viewer.route.start.find.aria":"查找路径起点","viewer.route.copy":"复制链接","viewer.route.copy.aria":"复制已追踪路径的链接","viewer.route.clear":"清除","viewer.route.clear.aria":"清除路径探测","viewer.route.traced":"路径","viewer.route.pickTwo":"在图上点两个节点","viewer.route.pickOne":"在图上点一个节点","viewer.route.controls":"路径旅程控制","viewer.route.previous":"上一个路径位置","viewer.route.play":"播放路径旅程","viewer.route.pause":"暂停路径旅程","viewer.route.replay":"重播路径旅程","viewer.route.next":"下一个路径位置","viewer.route.journey":"旅程","viewer.route.pause.label":"暂停","viewer.route.replay.label":"重播","viewer.route.overview":"总览","viewer.route.overview.aria":"显示完整路径总览","viewer.route.instructions":"先点起点，再点终点，沿箭头方向找路。","viewer.route.destination":"从{label}出发，走到哪里？","viewer.route.destination.find":"查找目标","viewer.route.destination.find.aria":"查找可达的路径目标","viewer.route.differentDestination":"选择其他目标","viewer.route.distinct":"请选两个不同的节点。","viewer.route.unreachable":"走不到{label}","viewer.route.unreachable.detail":"沿箭头方向，从{source}走不到{target}。请选一个高亮节点。","viewer.route.start.instructions":"接着选终点，能走到的节点会亮起。","viewer.route.copy.success":"已复制路径链接","viewer.route.copy.failed":"无法复制路径链接","viewer.route.position":"路径位置 {index}/{total}：{label}","viewer.route.step":"第 {index}/{total} 步 · {phase} · {label}","viewer.route.motionRequired":"自动旅程需要动态模式","viewer.route.trigger.clear":"清除已追踪路径","viewer.route.overview.status":"{nodes} · {hops} · 最短路径","viewer.route.overview.node.one":"{count} 个节点","viewer.route.overview.node.other":"{count} 个节点","viewer.route.overview.hop.one":"{count} 步","viewer.route.overview.hop.other":"{count} 步","viewer.route.phase.playing":"播放中","viewer.route.phase.complete":"已完成","viewer.route.phase.inspecting":"检查中","viewer.route.destination.count.one":"有 {count} 个能走到的节点已高亮，点一下。","viewer.route.destination.count.other":"有 {count} 个能走到的节点已高亮，点一个。","viewer.route.noOutgoing":"这个节点没有向外的箭头。清除后换一个起点。","viewer.route.result.title":"{source} 到 {target}","viewer.route.finder.source.title":"选择路径起点","viewer.route.finder.source.placeholder":"搜索路径来源","viewer.route.finder.source.empty":"没有匹配的路径来源","viewer.route.finder.source.results":"可作为路径起点的节点","viewer.route.finder.source.noun":"个路径来源","viewer.route.finder.source.badge":"起点","viewer.route.finder.target.title":"从{label}出发的目标","viewer.route.finder.target.placeholder":"搜索可达目标","viewer.route.finder.target.empty":"没有匹配的可达目标","viewer.route.finder.target.results":"可达路径目标","viewer.route.finder.target.noun":"个可达目标","viewer.route.hop.one":"{count} 跳","viewer.route.hop.other":"{count} 跳","viewer.lens.eyebrow":"语义透镜","viewer.lens.title":"比较系统角色","viewer.lens.close":"关闭语义透镜","viewer.lens.instruction":"最多选择两种语义类型。选择一种可显示其真实流量；选择两种只比较直接编写的关系。","viewer.lens.kinds":"语义类型","viewer.lens.choose":"选择一种类型以检查其节点和相连关系。","viewer.lens.copy":"复制语义透镜链接","viewer.lens.clear":"清除语义透镜","viewer.lens.open":"打开语义透镜","viewer.lens.openActive":"打开当前语义透镜","viewer.lens.legend":"语义图例","viewer.lens.legend.inspect.one":"检查{label}，{count} 个节点","viewer.lens.legend.inspect.other":"检查{label}，{count} 个节点","viewer.lens.kind.count.one":"{label}，{count} 个节点","viewer.lens.kind.count.other":"{label}，{count} 个节点","viewer.lens.compare.one":"{first} → {second}：{forward} · {second} → {first}：{reverse} · 共 {count} 条直接关系","viewer.lens.compare.other":"{first} → {second}：{forward} · {second} → {first}：{reverse} · 共 {count} 条直接关系","viewer.lens.single":"{nodes} · {relationships} · 已连接节点保持可见","viewer.lens.node.one":"{count} 个{label}节点","viewer.lens.node.other":"{count} 个{label}节点","viewer.lens.relationship.one":"{count} 条相连关系","viewer.lens.relationship.other":"{count} 条相连关系","viewer.radar.title":"语义雷达","viewer.radar.building":"正在构建总览","viewer.radar.openFull":"打开完整语义雷达","viewer.radar.open":"打开雷达","viewer.radar.close":"关闭语义雷达","viewer.radar.surface":"图表总览。点击节点进行聚焦，或使用方向键平移。","viewer.radar.click":"点击节点","viewer.radar.drag":"拖动平移","viewer.radar.space":"语义雷达需要更多地图可见空间。","viewer.radar.nodes":"语义图表雷达节点","viewer.radar.focus":"从语义雷达聚焦{label}","viewer.radar.status":"{count} 个节点 · {viewport}","viewer.radar.fullMap":"{count} 个节点 · 完整地图","viewer.radar.compacted":"已收紧雷达，避免遮挡语义护照或地图控件。","viewer.radar.cancelWaiting":"取消等待更多地图空间的语义雷达","viewer.radar.needsSpace":"语义雷达需要更多可见地图空间","viewer.radar.viewport.full":"完整地图","viewer.radar.viewport.width":"宽度 {percent}%","viewer.radar.viewport.scale":"视口 {percent}%","viewer.nav.controls":"图表视图控制","viewer.nav.route":"追踪有向路径","viewer.nav.route.title":"追踪路径（R）","viewer.nav.route.short":"路径","viewer.nav.radar":"打开语义雷达","viewer.nav.radar.title":"语义雷达（M）","viewer.nav.radar.short":"地图","viewer.nav.lens":"打开语义透镜","viewer.nav.lens.title":"语义透镜（L）","viewer.nav.lens.short":"透镜","viewer.nav.find":"查找节点","viewer.nav.find.title":"查找节点（/）","viewer.outline.title":"节点索引","viewer.rail.show":"要点与索引","viewer.rail.controls":"侧栏","viewer.rail.collapse":"收起侧栏","viewer.rail.bottom":"移到图下方","viewer.rail.right":"移到图右侧","viewer.nav.guide":"打开图表指南","viewer.nav.guide.title":"图表指南（?）","viewer.nav.zoomOut":"缩小","viewer.nav.zoomOut.title":"缩小（-）","viewer.nav.reset":"重置图表视图","viewer.nav.reset.title":"重置视图（0）","viewer.nav.read":"阅读","viewer.nav.zoomIn":"放大","viewer.nav.zoomIn.title":"放大（+）","viewer.nav.camera":"{hint}。重置图表视图","viewer.nav.camera.title":"{semantic}{hint} · 重置视图（0）","viewer.nav.camera.semantic":"语义相机已启用 · ","viewer.nav.level.map":"概览","viewer.nav.level.read":"阅读","viewer.nav.level.full":"完整","viewer.nav.level.auto":"自动","viewer.nav.detail.map":"放大以显示关系标签和节点上下文","viewer.nav.detail.read":"再次放大以显示标签和注释","viewer.nav.detail.full":"完整图表详情","viewer.intent.summary":"{label}。{out} 条出向，{in} 条入向{loops}。共 {total} 条连接。按 Enter 查看详情。","viewer.intent.loops":"，{count} 条自环","viewer.common.copied":"已复制","viewer.common.copyFailed":"复制失败","viewer.common.copyLink":"复制链接","viewer.common.clear":"清除","viewer.common.close":"关闭"}}</script>
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / 图版 04">
-      <svg viewBox="0 0 772 1302" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="classic" data-quality-profile="showcase" data-tree-ui="" data-tree-direction="right" data-reader-fit="intrinsic-height" data-reader-min-text="7.5">
-        <title id="archify-diagram-title">微信会话 CLI 能力规划</title>
-        <desc id="archify-diagram-description">现有单群闭环已实测；通用多会话能力仍是规划目标。</desc>
+      <svg viewBox="0 0 885 2555" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="classic" data-quality-profile="showcase" data-tree-ui="" data-tree-direction="right" data-reader-fit="intrinsic-height" data-reader-min-text="7.5">
+        <title id="archify-diagram-title">微信会话 CLI：实现与实机验证</title>
+        <desc id="archify-diagram-description">通用会话 CLI 已实现；v3 授权目标有界实测通过，个人新发与完整往返仍未验收。</desc>
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -5227,202 +5227,333 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Containment links -->
-        <path data-edge-from="cli" data-edge-to="verified" data-edge-key="0" data-tree-ancestors="cli" data-composition-points="216,637.5;237,637.5;237,320.5;258,320.5" d="M 216 637.5 L 227 637.5 Q 237 637.5 237 627.5 L 237 330.5 Q 237 320.5 247 320.5 L 258 320.5" class="a-default tree-edge tree-edge-trunk" data-animate="edge" style="--step:1" stroke-width="1.8"/>
-        <path data-edge-from="verified" data-edge-to="selection" data-edge-key="1" data-tree-ancestors="verified cli" data-composition-points="446,320.5;467,320.5;467,102.5;488,102.5" d="M 446 320.5 L 457 320.5 Q 467 320.5 467 310.5 L 467 112.5 Q 467 102.5 477 102.5 L 488 102.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="verified" data-edge-to="incremental_read" data-edge-key="2" data-tree-ancestors="verified cli" data-composition-points="446,320.5;467,320.5;467,211.5;488,211.5" d="M 446 320.5 L 457 320.5 Q 467 320.5 467 310.5 L 467 221.5 Q 467 211.5 477 211.5 L 488 211.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="verified" data-edge-to="manual_reply" data-edge-key="3" data-tree-ancestors="verified cli" data-composition-points="446,321;488,321" d="M 446 321 L 488 321" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="verified" data-edge-to="handoff" data-edge-key="4" data-tree-ancestors="verified cli" data-composition-points="446,320.5;467,320.5;467,436.5;488,436.5" d="M 446 320.5 L 457 320.5 Q 467 320.5 467 330.5 L 467 426.5 Q 467 436.5 477 436.5 L 488 436.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="verified" data-edge-to="gui_target" data-edge-key="5" data-tree-ancestors="verified cli" data-composition-points="446,320.5;467,320.5;467,552.5;488,552.5" d="M 446 320.5 L 457 320.5 Q 467 320.5 467 330.5 L 467 542.5 Q 467 552.5 477 552.5 L 488 552.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="cli" data-edge-to="general" data-edge-key="6" data-tree-ancestors="cli" data-composition-points="216,637.5;237,637.5;237,953.5;258,953.5" d="M 216 637.5 L 227 637.5 Q 237 637.5 237 647.5 L 237 943.5 Q 237 953.5 247 953.5 L 258 953.5" class="a-default tree-edge tree-edge-trunk" data-animate="edge" style="--step:1" stroke-width="1.8"/>
-        <path data-edge-from="general" data-edge-to="conversation_id" data-edge-key="7" data-tree-ancestors="general cli" data-composition-points="446,953.5;467,953.5;467,659.5;488,659.5" d="M 446 953.5 L 457 953.5 Q 467 953.5 467 943.5 L 467 669.5 Q 467 659.5 477 659.5 L 488 659.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="general" data-edge-to="history_api" data-edge-key="8" data-tree-ancestors="general cli" data-composition-points="446,953.5;467,953.5;467,757.5;488,757.5" d="M 446 953.5 L 457 953.5 Q 467 953.5 467 943.5 L 467 767.5 Q 467 757.5 477 757.5 L 488 757.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="general" data-edge-to="agent_modes" data-edge-key="9" data-tree-ancestors="general cli" data-composition-points="446,953.5;467,953.5;467,855.5;488,855.5" d="M 446 953.5 L 457 953.5 Q 467 953.5 467 943.5 L 467 865.5 Q 467 855.5 477 855.5 L 488 855.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="general" data-edge-to="reply_policy" data-edge-key="10" data-tree-ancestors="general cli" data-composition-points="446,954;488,954" d="M 446 954 L 488 954" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="general" data-edge-to="session_state" data-edge-key="11" data-tree-ancestors="general cli" data-composition-points="446,953.5;467,953.5;467,1044.5;488,1044.5" d="M 446 953.5 L 457 953.5 Q 467 953.5 467 963.5 L 467 1034.5 Q 467 1044.5 477 1044.5 L 488 1044.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="general" data-edge-to="shared_gui" data-edge-key="12" data-tree-ancestors="general cli" data-composition-points="446,953.5;467,953.5;467,1142.5;488,1142.5" d="M 446 953.5 L 457 953.5 Q 467 953.5 467 963.5 L 467 1132.5 Q 467 1142.5 477 1142.5 L 488 1142.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
-        <path data-edge-from="general" data-edge-to="mcp" data-edge-key="13" data-tree-ancestors="general cli" data-composition-points="446,953.5;467,953.5;467,1240.5;488,1240.5" d="M 446 953.5 L 457 953.5 Q 467 953.5 467 963.5 L 467 1230.5 Q 467 1240.5 477 1240.5 L 488 1240.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="cli" data-edge-to="generic_cli" data-edge-key="0" data-tree-ancestors="cli" data-composition-points="247,1130.5;268,1130.5;268,457.5;289,457.5" d="M 247 1130.5 L 258 1130.5 Q 268 1130.5 268 1120.5 L 268 467.5 Q 268 457.5 278 457.5 L 289 457.5" class="a-default tree-edge tree-edge-trunk" data-animate="edge" style="--step:1" stroke-width="1.8"/>
+        <path data-edge-from="generic_cli" data-edge-to="find_select" data-edge-key="1" data-tree-ancestors="generic_cli cli" data-composition-points="544,457.5;565,457.5;565,102.5;586,102.5" d="M 544 457.5 L 555 457.5 Q 565 457.5 565 447.5 L 565 112.5 Q 565 102.5 575 102.5 L 586 102.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="generic_cli" data-edge-to="session_state" data-edge-key="2" data-tree-ancestors="generic_cli cli" data-composition-points="544,457.5;565,457.5;565,218.5;586,218.5" d="M 544 457.5 L 555 457.5 Q 565 457.5 565 447.5 L 565 228.5 Q 565 218.5 575 218.5 L 586 218.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="generic_cli" data-edge-to="read_page" data-edge-key="3" data-tree-ancestors="generic_cli cli" data-composition-points="544,457.5;565,457.5;565,341.5;586,341.5" d="M 544 457.5 L 555 457.5 Q 565 457.5 565 447.5 L 565 351.5 Q 565 341.5 575 341.5 L 586 341.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="generic_cli" data-edge-to="manual_ops" data-edge-key="4" data-tree-ancestors="generic_cli cli" data-composition-points="544,458;586,458" d="M 544 458 L 586 458" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="generic_cli" data-edge-to="controller_handoff" data-edge-key="5" data-tree-ancestors="generic_cli cli" data-composition-points="544,457.5;565,457.5;565,575;586,575" d="M 544 457.5 L 555 457.5 Q 565 457.5 565 467.5 L 565 565 Q 565 575 575 575 L 586 575" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="generic_cli" data-edge-to="identity_guard" data-edge-key="6" data-tree-ancestors="generic_cli cli" data-composition-points="544,457.5;565,457.5;565,699.5;586,699.5" d="M 544 457.5 L 555 457.5 Q 565 457.5 565 467.5 L 565 689.5 Q 565 699.5 575 699.5 L 586 699.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="generic_cli" data-edge-to="shared_ui_lock" data-edge-key="7" data-tree-ancestors="generic_cli cli" data-composition-points="544,457.5;565,457.5;565,822.5;586,822.5" d="M 544 457.5 L 555 457.5 Q 565 457.5 565 467.5 L 565 812.5 Q 565 822.5 575 822.5 L 586 822.5" class="a-default tree-edge tree-edge-hued tree-hue-backend" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="cli" data-edge-to="future" data-edge-key="8" data-tree-ancestors="cli" data-composition-points="247,1130.5;268,1130.5;268,993.5;289,993.5" d="M 247 1130.5 L 258 1130.5 Q 268 1130.5 268 1120.5 L 268 1003.5 Q 268 993.5 278 993.5 L 289 993.5" class="a-default tree-edge tree-edge-trunk" data-animate="edge" style="--step:1" stroke-width="1.8"/>
+        <path data-edge-from="future" data-edge-to="resident_agents" data-edge-key="9" data-tree-ancestors="future cli" data-composition-points="544,993.5;565,993.5;565,938.5;586,938.5" d="M 544 993.5 L 555 993.5 Q 565 993.5 565 983.5 L 565 948.5 Q 565 938.5 575 938.5 L 586 938.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="future" data-edge-to="mcp" data-edge-key="10" data-tree-ancestors="future cli" data-composition-points="544,993.5;565,993.5;565,1047.5;586,1047.5" d="M 544 993.5 L 555 993.5 Q 565 993.5 565 1003.5 L 565 1037.5 Q 565 1047.5 575 1047.5 L 586 1047.5" class="a-default tree-edge tree-edge-hued tree-hue-database" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="cli" data-edge-to="field_checks" data-edge-key="11" data-tree-ancestors="cli" data-composition-points="247,1130.5;268,1130.5;268,1802.5;289,1802.5" d="M 247 1130.5 L 258 1130.5 Q 268 1130.5 268 1140.5 L 268 1792.5 Q 268 1802.5 278 1802.5 L 289 1802.5" class="a-default tree-edge tree-edge-trunk" data-animate="edge" style="--step:1" stroke-width="1.8"/>
+        <path data-edge-from="field_checks" data-edge-to="metadata_unique" data-edge-key="12" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1154.5;586,1154.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1792.5 L 565 1164.5 Q 565 1154.5 575 1154.5 L 586 1154.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="read_field" data-edge-key="13" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1259.5;586,1259.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1792.5 L 565 1269.5 Q 565 1259.5 575 1259.5 L 586 1259.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="v3_deployed" data-edge-key="14" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1364.5;586,1364.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1792.5 L 565 1374.5 Q 565 1364.5 575 1364.5 L 586 1364.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="group_send" data-edge-key="15" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1469.5;586,1469.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1792.5 L 565 1479.5 Q 565 1469.5 575 1469.5 L 586 1469.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="old_receipts" data-edge-key="16" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1574.5;586,1574.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1792.5 L 565 1584.5 Q 565 1574.5 575 1574.5 L 586 1574.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="p3_wrong_target" data-edge-key="17" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1688.5;586,1688.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1792.5 L 565 1698.5 Q 565 1688.5 575 1688.5 L 586 1688.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="roundtrip_pending" data-edge-key="18" data-tree-ancestors="field_checks cli" data-composition-points="544,1803;586,1803" d="M 544 1803 L 586 1803" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="legacy_live" data-edge-key="19" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,1916.5;586,1916.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1812.5 L 565 1906.5 Q 565 1916.5 575 1916.5 L 586 1916.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="private_send" data-edge-key="20" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,2030.5;586,2030.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1812.5 L 565 2020.5 Q 565 2030.5 575 2030.5 L 586 2030.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="return_popup" data-edge-key="21" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,2144.5;586,2144.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1812.5 L 565 2134.5 Q 565 2144.5 575 2144.5 L 586 2144.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="v5_nav_read" data-edge-key="22" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,2267.5;586,2267.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1812.5 L 565 2257.5 Q 565 2267.5 575 2267.5 L 586 2267.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="v4_send_refused" data-edge-key="23" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,2381.5;586,2381.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1812.5 L 565 2371.5 Q 565 2381.5 575 2381.5 L 586 2381.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
+        <path data-edge-from="field_checks" data-edge-to="send_current_unverified" data-edge-key="24" data-tree-ancestors="field_checks cli" data-composition-points="544,1802.5;565,1802.5;565,2486.5;586,2486.5" d="M 544 1802.5 L 555 1802.5 Q 565 1802.5 565 1812.5 L 565 2476.5 Q 565 2486.5 575 2486.5 L 586 2486.5" class="a-default tree-edge tree-edge-hued tree-hue-cloud" data-animate="edge" style="--step:2" stroke-width="1.5"/>
 
         <!-- Nodes -->
-        <g id="node-cli" data-node-id="cli" data-node-label="微信会话 CLI" tabindex="0" role="button" aria-label="聚焦微信会话 CLI，能力现状与目标, 根节点" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="能力现状与目标" data-node-context="根节点" data-tree-depth="0" class="tree-hue-root">
-          <title>微信会话 CLI · 能力现状与目标 · 根节点</title>
-          <rect data-tree-stack="" x="37" y="613" width="184" height="59" rx="10" class="tree-stack-frontend" stroke-width="1.2"/>
-          <rect x="32" y="608" width="184" height="59" rx="10" class="c-mask"/>
-          <rect x="32" y="608" width="184" height="59" rx="10" class="c-frontend tree-root" data-animate="node" style="--step:0" stroke-width="0"/>
+        <g id="node-cli" data-node-id="cli" data-node-label="微信会话 CLI" tabindex="0" role="button" aria-label="聚焦微信会话 CLI，代码能力、实机证据与后续范围, 根节点" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="代码能力、实机证据与后续范围" data-node-context="根节点" data-tree-depth="0" class="tree-hue-root">
+          <title>微信会话 CLI · 代码能力、实机证据与后续范围 · 根节点</title>
+          <rect data-tree-stack="" x="37" y="1106" width="215" height="59" rx="10" class="tree-stack-frontend" stroke-width="1.2"/>
+          <rect x="32" y="1101" width="215" height="59" rx="10" class="c-mask"/>
+          <rect x="32" y="1101" width="215" height="59" rx="10" class="c-frontend tree-root" data-animate="node" style="--step:0" stroke-width="0"/>
 
 
-          <text data-node-label="" x="124" class="t-primary tree-label" font-size="14.5" font-weight="750" text-anchor="middle"><tspan x="124" y="632.5">微信会话 CLI</tspan></text>
-          <text data-detail="context" x="124" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="124" y="651.5">能力现状与目标</tspan></text>
+          <text data-node-label="" x="139.5" class="t-primary tree-label" font-size="14.5" font-weight="750" text-anchor="middle"><tspan x="139.5" y="1125.5">微信会话 CLI</tspan></text>
+          <text data-detail="context" x="139.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="139.5" y="1144.5">代码能力、实机证据与后续范围</tspan></text>
         </g>
-        <g id="node-verified" data-node-id="verified" data-node-label="当前：单群闭环" tabindex="0" role="button" aria-label="聚焦当前：单群闭环，已实测：一个已配置测试群, 分支" aria-pressed="false" data-node-kind="backend" data-node-sublabel="已实测：一个已配置测试群" data-node-context="分支" data-tree-depth="1" data-tree-ancestors="cli" class="tree-hue-backend">
-          <title>当前：单群闭环 · 已实测：一个已配置测试群 · 分支</title>
-          <rect data-tree-stack="" x="263" y="287" width="188" height="77" rx="10" class="tree-stack-backend" stroke-width="1.2"/>
-          <rect x="258" y="282" width="188" height="77" rx="10" class="c-mask"/>
-          <rect x="258" y="282" width="188" height="77" rx="10" class="c-backend tree-branch" data-animate="node" style="--step:1" stroke-width="1.2"/>
+        <g id="node-generic_cli" data-node-id="generic_cli" data-node-label="已实现：通用手动 CLI" tabindex="0" role="button" aria-label="聚焦已实现：通用手动 CLI，群聊与个人会话按需操作；Agent 可选，不自动回复所有会话, 分支" aria-pressed="false" data-node-kind="backend" data-node-sublabel="群聊与个人会话按需操作；Agent 可选，不自动回复所有会话" data-node-context="分支" data-tree-depth="1" data-tree-ancestors="cli" class="tree-hue-backend">
+          <title>已实现：通用手动 CLI · 群聊与个人会话按需操作；Agent 可选，不自动回复所有会话 · 分支</title>
+          <rect data-tree-stack="" x="294" y="417" width="255" height="91" rx="10" class="tree-stack-backend" stroke-width="1.2"/>
+          <rect x="289" y="412" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="289" y="412" width="255" height="91" rx="10" class="c-backend tree-branch" data-animate="node" style="--step:1" stroke-width="1.2"/>
 
-          <circle cx="258" cy="320.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="352" class="t-primary tree-label" font-size="13" font-weight="700" text-anchor="middle"><tspan x="352" y="324.5">当前：单群闭环</tspan></text>
-          <text data-detail="context" x="352" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="352" y="343.5">已实测：一个已配置测试群</tspan></text>
+          <circle cx="289" cy="457.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="416.5" class="t-primary tree-label" font-size="13" font-weight="700" text-anchor="middle"><tspan x="416.5" y="454.5">已实现：通用手动 CLI</tspan></text>
+          <text data-detail="context" x="416.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="416.5" y="473.5">群聊与个人会话按需操作；Agent</tspan><tspan x="416.5" y="487.5">可选，不自动回复所有会话</tspan></text>
         </g>
-        <g id="node-selection" data-node-id="selection" data-node-label="查找并选定已绑定群" tabindex="0" role="button" aria-label="聚焦查找并选定已绑定群，精确名称查找；拒绝切换其他 ID, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="精确名称查找；拒绝切换其他 ID" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="verified cli" class="tree-hue-backend">
-          <title>查找并选定已绑定群 · 精确名称查找；拒绝切换其他 ID · 叶子节点</title>
+        <g id="node-find_select" data-node-id="find_select" data-node-label="发现并选择会话" tabindex="0" role="button" aria-label="聚焦发现并选择会话，群/个人按稳定 conversation_id 选择, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="群/个人按稳定 conversation_id 选择" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>发现并选择会话 · 群/个人按稳定 conversation_id 选择 · 叶子节点</title>
 
-          <rect x="488" y="64" width="240" height="77" rx="10" class="c-mask"/>
-          <rect x="488" y="64" width="240" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="64" width="255" height="77" rx="10" class="c-mask"/>
+          <rect x="586" y="64" width="255" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="102.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="106.5">查找并选定已绑定群</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="125.5">精确名称查找；拒绝切换其他 ID</tspan></text>
+          <circle cx="586" cy="102.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="106.5">发现并选择会话</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="125.5">群/个人按稳定 conversation_id 选择</tspan></text>
         </g>
-        <g id="node-incremental_read" data-node-id="incremental_read" data-node-label="加密副本读取与增量分页" tabindex="0" role="button" aria-label="聚焦加密副本读取与增量分页，事件游标、发送者、方向；历史有界, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="事件游标、发送者、方向；历史有界" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="verified cli" class="tree-hue-backend">
-          <title>加密副本读取与增量分页 · 事件游标、发送者、方向；历史有界 · 叶子节点</title>
+        <g id="node-session_state" data-node-id="session_state" data-node-label="会话状态彼此独立" tabindex="0" role="button" aria-label="聚焦会话状态彼此独立，每个 ID 有独立 channel；已有状态拒绝重绑, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="每个 ID 有独立 channel；已有状态拒绝重绑" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>会话状态彼此独立 · 每个 ID 有独立 channel；已有状态拒绝重绑 · 叶子节点</title>
 
-          <rect x="488" y="173" width="240" height="77" rx="10" class="c-mask"/>
-          <rect x="488" y="173" width="240" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="173" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="173" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="211.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="215.5">加密副本读取与增量分页</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="234.5">事件游标、发送者、方向；历史有界</tspan></text>
+          <circle cx="586" cy="218.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="215.5">会话状态彼此独立</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="234.5">每个 ID 有独立 channel</tspan><tspan x="713.5" y="248.5">；已有状态拒绝重绑</tspan></text>
         </g>
-        <g id="node-manual_reply" data-node-id="manual_reply" data-node-label="按需回复或跳过" tabindex="0" role="button" aria-label="聚焦按需回复或跳过，操作者决定是否回复；同来源防重复, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="操作者决定是否回复；同来源防重复" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="verified cli" class="tree-hue-backend">
-          <title>按需回复或跳过 · 操作者决定是否回复；同来源防重复 · 叶子节点</title>
+        <g id="node-read_page" data-node-id="read_page" data-node-label="只读读取与游标分页" tabindex="0" role="button" aria-label="聚焦只读读取与游标分页，发送者、方向、正文与增量 cursor；不确认消费, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="发送者、方向、正文与增量 cursor；不确认消费" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>只读读取与游标分页 · 发送者、方向、正文与增量 cursor；不确认消费 · 叶子节点</title>
 
-          <rect x="488" y="282" width="240" height="77" rx="10" class="c-mask"/>
-          <rect x="488" y="282" width="240" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="296" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="296" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="320.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="324.5">按需回复或跳过</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="343.5">操作者决定是否回复；同来源防重复</tspan></text>
+          <circle cx="586" cy="341.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="338.5">只读读取与游标分页</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="357.5">发送者、方向、正文与增</tspan><tspan x="713.5" y="371.5">量 cursor；不确认消费</tspan></text>
         </g>
-        <g id="node-handoff" data-node-id="handoff" data-node-label="安全接管与交还" tabindex="0" role="button" aria-label="聚焦安全接管与交还，与常驻运行器协调，不强杀发送中任务, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="与常驻运行器协调，不强杀发送中任务" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="verified cli" class="tree-hue-backend">
-          <title>安全接管与交还 · 与常驻运行器协调，不强杀发送中任务 · 叶子节点</title>
+        <g id="node-manual_ops" data-node-id="manual_ops" data-node-label="手动 focus / send / reply" tabindex="0" role="button" aria-label="聚焦手动 focus / send / reply，显式调用；读取不触发发言或模型, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="显式调用；读取不触发发言或模型" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>手动 focus / send / reply · 显式调用；读取不触发发言或模型 · 叶子节点</title>
 
-          <rect x="488" y="391" width="240" height="91" rx="10" class="c-mask"/>
-          <rect x="488" y="391" width="240" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="419" width="255" height="77" rx="10" class="c-mask"/>
+          <rect x="586" y="419" width="255" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="436.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="433.5">安全接管与交还</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="452.5">与常驻运行器协调，不强</tspan><tspan x="608" y="466.5">杀发送中任务</tspan></text>
+          <circle cx="586" cy="457.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="461.5">手动 focus / send / reply</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="480.5">显式调用；读取不触发发言或模型</tspan></text>
         </g>
-        <g id="node-gui_target" data-node-id="gui_target" data-node-label="发送时定位绑定群" tabindex="0" role="button" aria-label="聚焦发送时定位绑定群，核对窗口与目标；不是任意会话切换, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="核对窗口与目标；不是任意会话切换" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="verified cli" class="tree-hue-backend">
-          <title>发送时定位绑定群 · 核对窗口与目标；不是任意会话切换 · 叶子节点</title>
+        <g id="node-controller_handoff" data-node-id="controller_handoff" data-node-label="导入旧 controller 并协调交接" tabindex="0" role="button" aria-label="聚焦导入旧 controller 并协调交接，操作前接管；结束后恢复原启停状态, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="操作前接管；结束后恢复原启停状态" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>导入旧 controller 并协调交接 · 操作前接管；结束后恢复原启停状态 · 叶子节点</title>
 
-          <rect x="488" y="514" width="240" height="77" rx="10" class="c-mask"/>
-          <rect x="488" y="514" width="240" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="528" width="255" height="94" rx="10" class="c-mask"/>
+          <rect x="586" y="528" width="255" height="94" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="552.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="556.5">发送时定位绑定群</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="575.5">核对窗口与目标；不是任意会话切换</tspan></text>
+          <circle cx="586" cy="575" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="570.5">导入旧 controller 并协调</tspan><tspan x="713.5" y="587.5">交接</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="606.5">操作前接管；结束后恢复原启停状态</tspan></text>
         </g>
-        <g id="node-general" data-node-id="general" data-node-label="目标：通用会话 CLI" tabindex="0" role="button" aria-label="聚焦目标：通用会话 CLI，规划目标 · 尚未实现, 分支" aria-pressed="false" data-node-kind="backend" data-node-sublabel="规划目标 · 尚未实现" data-node-context="分支" data-tree-depth="1" data-tree-ancestors="cli" class="tree-hue-database">
-          <title>目标：通用会话 CLI · 规划目标 · 尚未实现 · 分支</title>
-          <rect data-tree-stack="" x="263" y="929" width="188" height="59" rx="10" class="tree-stack-backend" stroke-width="1.2"/>
-          <rect x="258" y="924" width="188" height="59" rx="10" class="c-mask"/>
-          <rect x="258" y="924" width="188" height="59" rx="10" class="c-backend tree-branch" data-animate="node" style="--step:1" stroke-width="1.2"/>
+        <g id="node-identity_guard" data-node-id="identity_guard" data-node-label="桌面目标身份防歧义" tabindex="0" role="button" aria-label="聚焦桌面目标身份防歧义，发送前按 ID 与种类复核；完整标题框/分类搜索双重校验, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="发送前按 ID 与种类复核；完整标题框/分类搜索双重校验" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>桌面目标身份防歧义 · 发送前按 ID 与种类复核；完整标题框/分类搜索双重校验 · 叶子节点</title>
 
-          <circle cx="258" cy="953.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="352" class="t-primary tree-label" font-size="13" font-weight="700" text-anchor="middle"><tspan x="352" y="948.5">目标：通用会话 CLI</tspan></text>
-          <text data-detail="context" x="352" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="352" y="967.5">规划目标 · 尚未实现</tspan></text>
+          <rect x="586" y="654" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="654" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="699.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="696.5">桌面目标身份防歧义</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="715.5">发送前按 ID 与种类复核；完</tspan><tspan x="713.5" y="729.5">整标题框/分类搜索双重校验</tspan></text>
         </g>
-        <g id="node-conversation_id" data-node-id="conversation_id" data-node-label="任意会话选择" tabindex="0" role="button" aria-label="聚焦任意会话选择，微信群或指定个人；稳定唯一 conversation_id, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="微信群或指定个人；稳定唯一 conversation_id" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>任意会话选择 · 微信群或指定个人；稳定唯一 conversation_id · 叶子节点</title>
+        <g id="node-shared_ui_lock" data-node-id="shared_ui_lock" data-node-label="共享桌面发送锁" tabindex="0" role="button" aria-label="聚焦共享桌面发送锁，聚焦与发送共用 sender.lock，避免并行操作桌面, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="聚焦与发送共用 sender.lock，避免并行操作桌面" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="generic_cli cli" class="tree-hue-backend">
+          <title>共享桌面发送锁 · 聚焦与发送共用 sender.lock，避免并行操作桌面 · 叶子节点</title>
 
-          <rect x="488" y="623" width="240" height="73" rx="10" class="c-mask"/>
-          <rect x="488" y="623" width="240" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="777" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="777" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="659.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="647.5">任意会话选择</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="666.5">微信群或指定个人；稳定</tspan><tspan x="608" y="680.5">唯一 conversation_id</tspan></text>
+          <circle cx="586" cy="822.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="819.5">共享桌面发送锁</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="838.5">聚焦与发送共用 sender.lock</tspan><tspan x="713.5" y="852.5">，避免并行操作桌面</tspan></text>
         </g>
-        <g id="node-history_api" data-node-id="history_api" data-node-label="统一读取接口" tabindex="0" role="button" aria-label="聚焦统一读取接口，历史、发送者、分页与增量游标, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="历史、发送者、分页与增量游标" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>统一读取接口 · 历史、发送者、分页与增量游标 · 叶子节点</title>
+        <g id="node-future" data-node-id="future" data-node-label="尚未实现的扩展" tabindex="0" role="button" aria-label="聚焦尚未实现的扩展，不影响当前手动 CLI 能力, 分支" aria-pressed="false" data-node-kind="backend" data-node-sublabel="不影响当前手动 CLI 能力" data-node-context="分支" data-tree-depth="1" data-tree-ancestors="cli" class="tree-hue-database">
+          <title>尚未实现的扩展 · 不影响当前手动 CLI 能力 · 分支</title>
+          <rect data-tree-stack="" x="294" y="969" width="255" height="59" rx="10" class="tree-stack-backend" stroke-width="1.2"/>
+          <rect x="289" y="964" width="255" height="59" rx="10" class="c-mask"/>
+          <rect x="289" y="964" width="255" height="59" rx="10" class="c-backend tree-branch" data-animate="node" style="--step:1" stroke-width="1.2"/>
 
-          <rect x="488" y="728" width="240" height="59" rx="10" class="c-mask"/>
-          <rect x="488" y="728" width="240" height="59" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
-
-          <circle cx="488" cy="757.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="752.5">统一读取接口</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="771.5">历史、发送者、分页与增量游标</tspan></text>
+          <circle cx="289" cy="993.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="416.5" class="t-primary tree-label" font-size="13" font-weight="700" text-anchor="middle"><tspan x="416.5" y="988.5">尚未实现的扩展</tspan></text>
+          <text data-detail="context" x="416.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="416.5" y="1007.5">不影响当前手动 CLI 能力</tspan></text>
         </g>
-        <g id="node-agent_modes" data-node-id="agent_modes" data-node-label="会话独立运行方式" tabindex="0" role="button" aria-label="聚焦会话独立运行方式，仅 CLI / 当前 Agent / 常驻 Agent，逐会话选择, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="仅 CLI / 当前 Agent / 常驻 Agent，逐会话选择" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>会话独立运行方式 · 仅 CLI / 当前 Agent / 常驻 Agent，逐会话选择 · 叶子节点</title>
+        <g id="node-resident_agents" data-node-id="resident_agents" data-node-label="多常驻 Agent 与调度" tabindex="0" role="button" aria-label="聚焦多常驻 Agent 与调度，逐会话运行模式注册与共享桌面调度, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="逐会话运行模式注册与共享桌面调度" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="future cli" class="tree-hue-database">
+          <title>多常驻 Agent 与调度 · 逐会话运行模式注册与共享桌面调度 · 叶子节点</title>
 
-          <rect x="488" y="819" width="240" height="73" rx="10" class="c-mask"/>
-          <rect x="488" y="819" width="240" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="900" width="255" height="77" rx="10" class="c-mask"/>
+          <rect x="586" y="900" width="255" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="855.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="843.5">会话独立运行方式</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="862.5">仅 CLI / 当前 Agent /</tspan><tspan x="608" y="876.5">常驻 Agent，逐会话选择</tspan></text>
+          <circle cx="586" cy="938.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="942.5">多常驻 Agent 与调度</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="961.5">逐会话运行模式注册与共享桌面调度</tspan></text>
         </g>
-        <g id="node-reply_policy" data-node-id="reply_policy" data-node-label="按需发送与回复" tabindex="0" role="button" aria-label="聚焦按需发送与回复，支持主动联系；读到消息不强制发言, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="支持主动联系；读到消息不强制发言" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>按需发送与回复 · 支持主动联系；读到消息不强制发言 · 叶子节点</title>
+        <g id="node-mcp" data-node-id="mcp" data-node-label="MCP 适配层" tabindex="0" role="button" aria-label="聚焦MCP 适配层，尚未实现, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="尚未实现" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="future cli" class="tree-hue-database">
+          <title>MCP 适配层 · 尚未实现 · 叶子节点</title>
 
-          <rect x="488" y="924" width="240" height="59" rx="10" class="c-mask"/>
-          <rect x="488" y="924" width="240" height="59" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="1009" width="255" height="77" rx="10" class="c-mask"/>
+          <rect x="586" y="1009" width="255" height="77" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="953.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="948.5">按需发送与回复</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="967.5">支持主动联系；读到消息不强制发言</tspan></text>
+          <circle cx="586" cy="1047.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1051.5">MCP 适配层</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1070.5">尚未实现</tspan></text>
         </g>
-        <g id="node-session_state" data-node-id="session_state" data-node-label="每会话独立状态" tabindex="0" role="button" aria-label="聚焦每会话独立状态，模式、上下文与读取游标分别保存, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="模式、上下文与读取游标分别保存" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>每会话独立状态 · 模式、上下文与读取游标分别保存 · 叶子节点</title>
+        <g id="node-field_checks" data-node-id="field_checks" data-node-label="实机状态：v5 导航/读取通过" tabindex="0" role="button" aria-label="聚焦实机状态：v5 导航/读取通过，v5 未发送；v3 单条发送证据单独标注, 分支" aria-pressed="false" data-node-kind="backend" data-node-sublabel="v5 未发送；v3 单条发送证据单独标注" data-node-context="分支" data-tree-depth="1" data-tree-ancestors="cli" class="tree-hue-cloud">
+          <title>实机状态：v5 导航/读取通过 · v5 未发送；v3 单条发送证据单独标注 · 分支</title>
+          <rect data-tree-stack="" x="294" y="1778" width="255" height="59" rx="10" class="tree-stack-backend" stroke-width="1.2"/>
+          <rect x="289" y="1773" width="255" height="59" rx="10" class="c-mask"/>
+          <rect x="289" y="1773" width="255" height="59" rx="10" class="c-backend tree-branch" data-animate="node" style="--step:1" stroke-width="1.2"/>
 
-          <rect x="488" y="1015" width="240" height="59" rx="10" class="c-mask"/>
-          <rect x="488" y="1015" width="240" height="59" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
-
-          <circle cx="488" cy="1044.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="1039.5">每会话独立状态</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="1058.5">模式、上下文与读取游标分别保存</tspan></text>
+          <circle cx="289" cy="1802.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="416.5" class="t-primary tree-label" font-size="13" font-weight="700" text-anchor="middle"><tspan x="416.5" y="1797.5">实机状态：v5 导航/读取通过</tspan></text>
+          <text data-detail="context" x="416.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="416.5" y="1816.5">v5 未发送；v3 单条发送证据单独标注</tspan></text>
         </g>
-        <g id="node-shared_gui" data-node-id="shared_gui" data-node-label="多会话 GUI 调度" tabindex="0" role="button" aria-label="聚焦多会话 GUI 调度，共享桌面资源并按绑定定位和切换目标, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="共享桌面资源并按绑定定位和切换目标" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>多会话 GUI 调度 · 共享桌面资源并按绑定定位和切换目标 · 叶子节点</title>
+        <g id="node-metadata_unique" data-node-id="metadata_unique" data-node-label="授权会话元数据唯一" tabindex="0" role="button" aria-label="聚焦授权会话元数据唯一，个人与测试群均通过；不公开名称或 ID, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="个人与测试群均通过；不公开名称或 ID" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>授权会话元数据唯一 · 个人与测试群均通过；不公开名称或 ID · 叶子节点</title>
 
-          <rect x="488" y="1106" width="240" height="73" rx="10" class="c-mask"/>
-          <rect x="488" y="1106" width="240" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="1118" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1118" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="1142.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="1130.5">多会话 GUI 调度</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="1149.5">共享桌面资源并按绑定定</tspan><tspan x="608" y="1163.5">位和切换目标</tspan></text>
+          <circle cx="586" cy="1154.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1142.5">授权会话元数据唯一</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1161.5">个人与测试群均通过；不</tspan><tspan x="713.5" y="1175.5">公开名称或 ID</tspan></text>
         </g>
-        <g id="node-mcp" data-node-id="mcp" data-node-label="MCP 工具适配层" tabindex="0" role="button" aria-label="聚焦MCP 工具适配层，规划项；复用 CLI 能力与状态规则, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="规划项；复用 CLI 能力与状态规则" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="general cli" class="tree-hue-database">
-          <title>MCP 工具适配层 · 规划项；复用 CLI 能力与状态规则 · 叶子节点</title>
+        <g id="node-read_field" data-node-id="read_field" data-node-label="加密副本读取核验" tabindex="0" role="button" aria-label="聚焦加密副本读取核验，个人入站及群发送后事件读回通过；非 OCR, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="个人入站及群发送后事件读回通过；非 OCR" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>加密副本读取核验 · 个人入站及群发送后事件读回通过；非 OCR · 叶子节点</title>
 
-          <rect x="488" y="1211" width="240" height="59" rx="10" class="c-mask"/>
-          <rect x="488" y="1211" width="240" height="59" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+          <rect x="586" y="1223" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1223" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
 
-          <circle cx="488" cy="1240.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
-          <text data-node-label="" x="608" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="608" y="1235.5">MCP 工具适配层</tspan></text>
-          <text data-detail="context" x="608" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="608" y="1254.5">规划项；复用 CLI 能力与状态规则</tspan></text>
+          <circle cx="586" cy="1259.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1247.5">加密副本读取核验</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1266.5">个人入站及群发送后事件</tspan><tspan x="713.5" y="1280.5">读回通过；非 OCR</tspan></text>
+        </g>
+        <g id="node-v3_deployed" data-node-id="v3_deployed" data-node-label="v3 helper 与权限已确认" tabindex="0" role="button" aria-label="聚焦v3 helper 与权限已确认，固定路径部署；辅助功能、录屏、事件控制均启用, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="固定路径部署；辅助功能、录屏、事件控制均启用" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>v3 helper 与权限已确认 · 固定路径部署；辅助功能、录屏、事件控制均启用 · 叶子节点</title>
+
+          <rect x="586" y="1328" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1328" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="1364.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1352.5">v3 helper 与权限已确认</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1371.5">固定路径部署；辅助功能、录</tspan><tspan x="713.5" y="1385.5">屏、事件控制均启用</tspan></text>
+        </g>
+        <g id="node-group_send" data-node-id="group_send" data-node-label="v3 测试群发送闭环通过" tabindex="0" role="button" aria-label="聚焦v3 测试群发送闭环通过，一次发送获收件确认、事件读回；重复请求未重发, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="一次发送获收件确认、事件读回；重复请求未重发" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>v3 测试群发送闭环通过 · 一次发送获收件确认、事件读回；重复请求未重发 · 叶子节点</title>
+
+          <rect x="586" y="1433" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1433" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="1469.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1457.5">v3 测试群发送闭环通过</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1476.5">一次发送获收件确认、事件读</tspan><tspan x="713.5" y="1490.5">回；重复请求未重发</tspan></text>
+        </g>
+        <g id="node-old_receipts" data-node-id="old_receipts" data-node-label="旧版 PRIVATE-OK 与群回复" tabindex="0" role="button" aria-label="聚焦旧版 PRIVATE-OK 与群回复，用户各确认收到一次；不是 v3 私人发送证据, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="用户各确认收到一次；不是 v3 私人发送证据" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>旧版 PRIVATE-OK 与群回复 · 用户各确认收到一次；不是 v3 私人发送证据 · 叶子节点</title>
+
+          <rect x="586" y="1538" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1538" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="1574.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1562.5">旧版 PRIVATE-OK 与群回复</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1581.5">用户各确认收到一次；不是 v3 私</tspan><tspan x="713.5" y="1595.5">人发送证据</tspan></text>
+        </g>
+        <g id="node-p3_wrong_target" data-node-id="p3_wrong_target" data-node-label="P3 错误目标事故保留边界" tabindex="0" role="button" aria-label="聚焦P3 错误目标事故保留边界，旧发送落入测试群；禁止恢复/重放，不作为私聊成功, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="旧发送落入测试群；禁止恢复/重放，不作为私聊成功" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>P3 错误目标事故保留边界 · 旧发送落入测试群；禁止恢复/重放，不作为私聊成功 · 叶子节点</title>
+
+          <rect x="586" y="1643" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="1643" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="1688.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1685.5">P3 错误目标事故保留边界</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1704.5">旧发送落入测试群；禁止恢复/重</tspan><tspan x="713.5" y="1718.5">放，不作为私聊成功</tspan></text>
+        </g>
+        <g id="node-roundtrip_pending" data-node-id="roundtrip_pending" data-node-label="完整发送与回复闭环未验收" tabindex="0" role="button" aria-label="聚焦完整发送与回复闭环未验收，v5 仅导航/读取；v3 旧单条发送已确认，不能外推当前版本, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="v5 仅导航/读取；v3 旧单条发送已确认，不能外推当前版本" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>完整发送与回复闭环未验收 · v5 仅导航/读取；v3 旧单条发送已确认，不能外推当前版本 · 叶子节点</title>
+
+          <rect x="586" y="1766" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1766" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="1802.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1790.5">完整发送与回复闭环未验收</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1809.5">v5 仅导航/读取；v3 旧单条发送</tspan><tspan x="713.5" y="1823.5">已确认，不能外推当前版本</tspan></text>
+        </g>
+        <g id="node-legacy_live" data-node-id="legacy_live" data-node-label="既有单群历史闭环" tabindex="0" role="button" aria-label="聚焦既有单群历史闭环，历史 reply / skip / handback 证据独立保留, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="历史 reply / skip / handback 证据独立保留" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>既有单群历史闭环 · 历史 reply / skip / handback 证据独立保留 · 叶子节点</title>
+
+          <rect x="586" y="1871" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="1871" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="1916.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="1913.5">既有单群历史闭环</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="1932.5">历史 reply / skip /</tspan><tspan x="713.5" y="1946.5">handback 证据独立保留</tspan></text>
+        </g>
+        <g id="node-private_send" data-node-id="private_send" data-node-label="v3 个人单条发送通过" tabindex="0" role="button" aria-label="聚焦v3 个人单条发送通过，用户确认收到一次，副本读回一条；不重放旧意图, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="用户确认收到一次，副本读回一条；不重放旧意图" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>v3 个人单条发送通过 · 用户确认收到一次，副本读回一条；不重放旧意图 · 叶子节点</title>
+
+          <rect x="586" y="1994" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="1994" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="2030.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="2018.5">v3 个人单条发送通过</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="2037.5">用户确认收到一次，副本读</tspan><tspan x="713.5" y="2051.5">回一条；不重放旧意图</tspan></text>
+        </g>
+        <g id="node-return_popup" data-node-id="return_popup" data-node-label="返群短弹窗修复待复验" tabindex="0" role="button" aria-label="聚焦返群短弹窗修复待复验，v4 368×194 短弹窗门槛修复；v5 导航与读后 focus 通过, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="v4 368×194 短弹窗门槛修复；v5 导航与读后 focus 通过" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>返群短弹窗修复待复验 · v4 368×194 短弹窗门槛修复；v5 导航与读后 focus 通过 · 叶子节点</title>
+
+          <rect x="586" y="2099" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="2099" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="2144.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="2141.5">返群短弹窗修复待复验</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="2160.5">v4 368×194 短弹窗门槛修复</tspan><tspan x="713.5" y="2174.5">；v5 导航与读后 focus 通过</tspan></text>
+        </g>
+        <g id="node-v5_nav_read" data-node-id="v5_nav_read" data-node-label="v5 实机导航与读取通过" tabindex="0" role="button" aria-label="聚焦v5 实机导航与读取通过，三权限已确认；个人/群 focus、群读取、读后再 focus 均成功, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="三权限已确认；个人/群 focus、群读取、读后再 focus 均成功" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>v5 实机导航与读取通过 · 三权限已确认；个人/群 focus、群读取、读后再 focus 均成功 · 叶子节点</title>
+
+          <rect x="586" y="2222" width="255" height="91" rx="10" class="c-mask"/>
+          <rect x="586" y="2222" width="255" height="91" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="2267.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="2264.5">v5 实机导航与读取通过</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="2283.5">三权限已确认；个人/群 focus、</tspan><tspan x="713.5" y="2297.5">群读取、读后再 focus 均成功</tspan></text>
+        </g>
+        <g id="node-v4_send_refused" data-node-id="v4_send_refused" data-node-label="v4 发送尝试输入前停止" tabindex="0" role="button" aria-label="聚焦v4 发送尝试输入前停止，focus 未确认；无输入、无新发送、未重试, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="focus 未确认；无输入、无新发送、未重试" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>v4 发送尝试输入前停止 · focus 未确认；无输入、无新发送、未重试 · 叶子节点</title>
+
+          <rect x="586" y="2345" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="2345" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="2381.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="2369.5">v4 发送尝试输入前停止</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="2388.5">focus 未确认；无输入、无新</tspan><tspan x="713.5" y="2402.5">发送、未重试</tspan></text>
+        </g>
+        <g id="node-send_current_unverified" data-node-id="send_current_unverified" data-node-label="v5 发送与完整回复流程未测" tabindex="0" role="button" aria-label="聚焦v5 发送与完整回复流程未测，没有 v5 send；v3 单条收件确认不代表当前版本, 叶子节点" aria-pressed="false" data-node-kind="external" data-node-sublabel="没有 v5 send；v3 单条收件确认不代表当前版本" data-node-context="叶子节点" data-tree-depth="2" data-tree-ancestors="field_checks cli" class="tree-hue-cloud">
+          <title>v5 发送与完整回复流程未测 · 没有 v5 send；v3 单条收件确认不代表当前版本 · 叶子节点</title>
+
+          <rect x="586" y="2450" width="255" height="73" rx="10" class="c-mask"/>
+          <rect x="586" y="2450" width="255" height="73" rx="10" class="c-external tree-leaf" data-animate="node" style="--step:2" stroke-width="1"/>
+
+          <circle cx="586" cy="2486.5" r="2.6" class="tree-socket" stroke-width="1.4"/>
+          <text data-node-label="" x="713.5" class="t-primary tree-label" font-size="13" font-weight="560" text-anchor="middle"><tspan x="713.5" y="2474.5">v5 发送与完整回复流程未测</tspan></text>
+          <text data-detail="context" x="713.5" class="t-muted tree-sublabel" font-size="11" text-anchor="middle"><tspan x="713.5" y="2493.5">没有 v5 send；v3 单条收件确认不</tspan><tspan x="713.5" y="2507.5">代表当前版本</tspan></text>
         </g>
 
         <!-- Branch toggles -->
-        <g data-tree-toggle="cli" data-tree-count="14" data-tree-label-collapse="收起 微信会话 CLI（下方 14 项）" data-tree-label-expand="展开 微信会话 CLI（已隐藏 14 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 微信会话 CLI（下方 14 项）" class="tree-hue-root">
-          <circle cx="216" cy="637.5" r="14.5" class="tree-toggle-hit"/>
-          <circle cx="216" cy="637.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
-          <path class="tree-toggle-glyph" d="M 212.85 637.5 H 219.15" stroke-width="1.5" stroke-linecap="round"/>
-          <path class="tree-toggle-glyph tree-toggle-plus" d="M 216 634.35 V 640.65" stroke-width="1.5" stroke-linecap="round"/>
+        <g data-tree-toggle="cli" data-tree-count="25" data-tree-label-collapse="收起 微信会话 CLI（下方 25 项）" data-tree-label-expand="展开 微信会话 CLI（已隐藏 25 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 微信会话 CLI（下方 25 项）" class="tree-hue-root">
+          <circle cx="247" cy="1130.5" r="14.5" class="tree-toggle-hit"/>
+          <circle cx="247" cy="1130.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
+          <path class="tree-toggle-glyph" d="M 243.85 1130.5 H 250.15" stroke-width="1.5" stroke-linecap="round"/>
+          <path class="tree-toggle-glyph tree-toggle-plus" d="M 247 1127.35 V 1133.65" stroke-width="1.5" stroke-linecap="round"/>
           <g class="tree-toggle-count">
-            <rect x="226.5" y="630" width="23.4" height="15" rx="7.5" class="tree-count-pill"/>
-            <text x="238.2" y="641.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">14</text>
+            <rect x="257.5" y="1123" width="23.4" height="15" rx="7.5" class="tree-count-pill"/>
+            <text x="269.2" y="1134.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">25</text>
           </g>
         </g>
-        <g data-tree-toggle="verified" data-tree-count="5" data-tree-ancestors="cli" data-tree-label-collapse="收起 当前：单群闭环（下方 5 项）" data-tree-label-expand="展开 当前：单群闭环（已隐藏 5 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 当前：单群闭环（下方 5 项）" class="tree-hue-backend">
-          <circle cx="446" cy="320.5" r="14.5" class="tree-toggle-hit"/>
-          <circle cx="446" cy="320.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
-          <path class="tree-toggle-glyph" d="M 442.85 320.5 H 449.15" stroke-width="1.5" stroke-linecap="round"/>
-          <path class="tree-toggle-glyph tree-toggle-plus" d="M 446 317.35 V 323.65" stroke-width="1.5" stroke-linecap="round"/>
+        <g data-tree-toggle="generic_cli" data-tree-count="7" data-tree-ancestors="cli" data-tree-label-collapse="收起 已实现：通用手动 CLI（下方 7 项）" data-tree-label-expand="展开 已实现：通用手动 CLI（已隐藏 7 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 已实现：通用手动 CLI（下方 7 项）" class="tree-hue-backend">
+          <circle cx="544" cy="457.5" r="14.5" class="tree-toggle-hit"/>
+          <circle cx="544" cy="457.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
+          <path class="tree-toggle-glyph" d="M 540.85 457.5 H 547.15" stroke-width="1.5" stroke-linecap="round"/>
+          <path class="tree-toggle-glyph tree-toggle-plus" d="M 544 454.35 V 460.65" stroke-width="1.5" stroke-linecap="round"/>
           <g class="tree-toggle-count">
-            <rect x="456.5" y="313" width="17.2" height="15" rx="7.5" class="tree-count-pill"/>
-            <text x="465.1" y="324.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">5</text>
+            <rect x="554.5" y="450" width="17.2" height="15" rx="7.5" class="tree-count-pill"/>
+            <text x="563.1" y="461.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">7</text>
           </g>
         </g>
-        <g data-tree-toggle="general" data-tree-count="7" data-tree-ancestors="cli" data-tree-label-collapse="收起 目标：通用会话 CLI（下方 7 项）" data-tree-label-expand="展开 目标：通用会话 CLI（已隐藏 7 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 目标：通用会话 CLI（下方 7 项）" class="tree-hue-database">
-          <circle cx="446" cy="953.5" r="14.5" class="tree-toggle-hit"/>
-          <circle cx="446" cy="953.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
-          <path class="tree-toggle-glyph" d="M 442.85 953.5 H 449.15" stroke-width="1.5" stroke-linecap="round"/>
-          <path class="tree-toggle-glyph tree-toggle-plus" d="M 446 950.35 V 956.65" stroke-width="1.5" stroke-linecap="round"/>
+        <g data-tree-toggle="future" data-tree-count="2" data-tree-ancestors="cli" data-tree-label-collapse="收起 尚未实现的扩展（下方 2 项）" data-tree-label-expand="展开 尚未实现的扩展（已隐藏 2 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 尚未实现的扩展（下方 2 项）" class="tree-hue-database">
+          <circle cx="544" cy="993.5" r="14.5" class="tree-toggle-hit"/>
+          <circle cx="544" cy="993.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
+          <path class="tree-toggle-glyph" d="M 540.85 993.5 H 547.15" stroke-width="1.5" stroke-linecap="round"/>
+          <path class="tree-toggle-glyph tree-toggle-plus" d="M 544 990.35 V 996.65" stroke-width="1.5" stroke-linecap="round"/>
           <g class="tree-toggle-count">
-            <rect x="456.5" y="946" width="17.2" height="15" rx="7.5" class="tree-count-pill"/>
-            <text x="465.1" y="957.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">7</text>
+            <rect x="554.5" y="986" width="17.2" height="15" rx="7.5" class="tree-count-pill"/>
+            <text x="563.1" y="997.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">2</text>
+          </g>
+        </g>
+        <g data-tree-toggle="field_checks" data-tree-count="13" data-tree-ancestors="cli" data-tree-label-collapse="收起 实机状态：v5 导航/读取通过（下方 13 项）" data-tree-label-expand="展开 实机状态：v5 导航/读取通过（已隐藏 13 项）" role="button" tabindex="0" aria-expanded="true" aria-label="收起 实机状态：v5 导航/读取通过（下方 13 项）" class="tree-hue-cloud">
+          <circle cx="544" cy="1802.5" r="14.5" class="tree-toggle-hit"/>
+          <circle cx="544" cy="1802.5" r="7.5" class="tree-toggle-disc" stroke-width="1.2"/>
+          <path class="tree-toggle-glyph" d="M 540.85 1802.5 H 547.15" stroke-width="1.5" stroke-linecap="round"/>
+          <path class="tree-toggle-glyph tree-toggle-plus" d="M 544 1799.35 V 1805.65" stroke-width="1.5" stroke-linecap="round"/>
+          <g class="tree-toggle-count">
+            <rect x="554.5" y="1795" width="23.4" height="15" rx="7.5" class="tree-count-pill"/>
+            <text x="566.2" y="1806.1" class="t-primary" font-size="10" font-weight="700" text-anchor="middle">13</text>
           </g>
         </g>
 
@@ -5611,24 +5742,24 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>当前验证边界</h3>
+          <h3>实机证据边界</h3>
         </div>
         <ul>
-          <li>已验证：单个已配置测试群、结构化读取（加密副本，非 OCR）、sender 与分页/增量、按需 reply/skip、防重复、takeover/handback，以及发送时定位该绑定群。</li>
-          <li>未实现：任意会话注册/切换、指定个人私聊、逐群模式注册表、多群 GUI 调度与 MCP。</li>
-          <li>可选路径仍有限：高层 CLI 沿用已初始化控制器，尚无独立的首次人工初始化命令；底层 channel 消息接口提供事件与游标操作，不调用模型。</li>
-          <li>图中能力规划不代表所有目标节点均已有源码实现。</li>
+          <li>v5 已验证导航/读取：三项 macOS 权限均为启用；授权个人 focus 2.789 秒、测试群 focus 3.553 秒；群读取 3 条事件、next cursor 43；读取后再次 focus 4.331 秒。界面搜索弹窗在 334/582/1408 ms 首次被观察到。</li>
+          <li>v3 历史单条发送：授权个人与测试群各发送一次，用户各确认收到一次；群副本读回一条，重复同一 request 返回已完成且未再次操作 GUI。它们不是 v5 发送证据。</li>
+          <li>P3 错误目标尝试不得恢复或重放。v4 末次发送 focus 在输入前失败，无新发送且未重试；v5 没有发送消息。当前版本 send、群 reply 与完整往返仍未验收。</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot amber"></div>
-          <h3>运行原则</h3>
+          <h3>实现范围</h3>
         </div>
         <ul>
-          <li>每个会话由操作者明确选择 Agent 与运行模式；不对所有群默认自动回复。</li>
-          <li>读取不等于回复；每条消息可处理、延后或跳过。</li>
+          <li>稳定 conversation_id、群/个人 find/select/read/focus/send/reply 已实现；Agent 可选，读取不强制发言，发送与回复由调用方按需发起。</li>
+          <li>现场证据限于授权目标和已完成的有界操作。桌面 UI 仍受窗口状态、同名标题及并发手动切换影响，不宣称任意目标无条件可用或长期无人值守可靠。</li>
+          <li>多常驻 Agent、逐会话模式表、共享桌面多群调度与 MCP 尚未实现；公开图不含私有会话标识、消息正文、截图或运行路径。</li>
         </ul>
       </div>
     </div>

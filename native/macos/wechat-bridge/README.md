@@ -25,28 +25,46 @@ Actions are `request-permissions`, `inspect`, `capture`, `focus-group`,
 inspect WeChat window metadata, and take a window-only PNG, respectively. `inspect` reports
 `frontmost` and session lock flags separately.
 
-`focus-group` takes its own unique `id` and the exact test-group title. Use a
+`focus-group` takes its own unique `id`, exact target title, and `targetKind`
+(`group` or `private`). Use a
 fresh `inspect` and `capture` to calibrate the sole window and the left
 conversation list/search control; these coordinates are examples, not defaults:
 
 ```json
 {"id":"example-focus-001","action":"focus-group",
- "targetGroup":"Synthetic Test Group","expectedPID":12345,
+ "targetGroup":"Synthetic Test Group","targetKind":"group","expectedPID":12345,
  "expectedWindowID":678,
  "expectedFrame":{"x":100,"y":100,"width":900,"height":650},
  "conversationListRect":{"x":0,"y":60,"width":270,"height":570},
  "searchPoint":{"x":100,"y":30}}
 ```
 
-The helper first checks the current chat header for the exact title. If it
-already matches, it returns without selecting another chat. Otherwise it
-requires a unique exact OCR match in the visible conversation list; if absent,
-it pastes and copies back the exact group title in the calibrated search box,
-then requires a unique exact match in bounded search results. It verifies the
-row again immediately before clicking and rechecks the chat header afterward.
+The helper pastes and copies back the exact title in the calibrated search box.
+Search may create one additional WeChat-owned popup beside the expected main
+window. Navigation captures that popup separately and accepts its bounded search
+geometry down to 160px high. The short popup is also visible to the sole-window
+send guard, so send cannot proceed while it is open. Navigation accepts a unique
+exact result below Contacts for `private`, Group Chats for
+`group`, or Most used for either kind (including Chinese labels). Most used
+does not establish the conversation kind; the exact postclick header does.
+Duplicate exact names across conversation categories are refused. Internet
+search results and web suggestions are never selectable. It
+checks the popup ID, frame and row again immediately before clicking, then
+requires the sole expected main window and kind-aware exact chat header afterward.
+Group headers must show the exact name followed by a numeric member count;
+private headers must show the exact name without that suffix. Names already
+ending in a numeric parenthesized suffix are refused as ambiguous.
 Missing, ambiguous, moved, or mismatched results stop. Before navigation it
 creates `<id>.focus-attempted.json`; an uncertain attempt with the same ID is
-not replayed. The output is `<id>.result.json`. Group title matching depends
+not replayed. A successful search writes `<id>.focus-evidence.json` with the
+title, kind, PID, window ID/frame, actual search category, source and time. The
+output is `<id>.result.json`.
+Popup discovery is bounded to six seconds. The private `<id>.focus-polls.json`
+records each probe's elapsed time, WeChat window IDs and frames, and whether a
+popup and eligible result were seen. It contains no OCR text, chat titles or
+message content. Timeout errors distinguish an unseen popup from a visible
+popup without a unique eligible result.
+Title matching depends
 on fresh OCR and is not proof of delivery or account identity.
 
 The two visual actions use the **same** transaction `id` and all the same input
@@ -54,7 +72,8 @@ fields. Change only `action` from `prepare-visual` to `submit-visual`:
 
 ```json
 {"id":"example-001","action":"prepare-visual",
- "targetGroup":"Synthetic Test Group","expectedDraft":"old draft",
+ "targetGroup":"Synthetic Test Group","targetKind":"group",
+ "focusEvidenceID":"example-focus-001","expectedDraft":"old draft",
  "text":"Hello, test message 😊\nSecond line",
  "expectedPID":12345,"expectedWindowID":678,
  "expectedFrame":{"x":100,"y":100,"width":900,"height":650},
@@ -69,7 +88,8 @@ It must contain meaningful text, have at most 2,000 Swift characters and
 tab and line endings. `expectedDraft` follows the same limits and may be empty.
 Only CRLF/CR-to-LF normalization is allowed when comparing copied text; spaces
 and all other characters remain significant. `targetGroup` must be an explicit
-single-line name of at most 100 characters. The example PID, window ID, frame,
+single-line name of at most 100 characters. Visual actions require a matching
+category-verified `focusEvidenceID` less than 120 seconds old. The example PID, window ID, frame,
 composer rect, and button point are not defaults: obtain them from a fresh
 `inspect` and `capture` immediately before use. Rects/points are image-relative;
 the frame is in global screen coordinates.
@@ -87,12 +107,14 @@ mouse event. It becomes `prepared` only after exact copied-text verification.
 exclusively before the Send click. A failed or uncertain attempt cannot be
 replayed with the same ID.
 
-Every UI step requires one WeChat process/window, the declared PID/ID/frame,
+Every send UI step requires one WeChat process/window, the declared PID/ID/frame,
 WeChat frontmost, `onConsole=true`, no explicit locked flag, Accessibility,
 Screen Recording, Post Events access, a nonblank window-only screenshot, and
 fresh OCR of the exact `targetGroup` header. An absent lock flag remains
 `unknown`; it is not proof of unlock. Send must be the unique recognized button
 in the lower conversation pane. The helper never uses Return to send.
+Only search navigation may observe the bounded second WeChat popup; it cannot
+prepare or submit a message while that popup is present.
 
 For draft verification, the helper clicks the declared composer, selects it,
 sets a unique clipboard sentinel, copies, and compares the copied plain text

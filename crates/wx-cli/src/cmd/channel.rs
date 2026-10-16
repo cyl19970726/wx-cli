@@ -1,4 +1,4 @@
-//! One explicitly bound group, backed by a private local event journal.
+//! One explicitly bound conversation, backed by a private local event journal.
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
@@ -15,13 +15,13 @@ use wx_db::{
     ChatRoomQuery, MessageQuery, MessageQueryResult, SortOrder, WechatDb, MAX_QUERY_LIMIT,
 };
 
-use super::channel_snapshot as snapshot;
+use super::{channel_snapshot as snapshot, conversations};
 
 const DB_NAME: &str = "channel.sqlite3";
 
 #[derive(Debug, Subcommand)]
 pub enum ChannelAction {
-    /// Permanently bind this state directory to exactly one local group.
+    /// Permanently bind this state directory to exactly one local conversation.
     Bind {
         #[arg(long)]
         account: String,
@@ -244,11 +244,12 @@ fn bind(
     if account.trim().is_empty()
         || session_id.trim().is_empty()
         || talker.trim().is_empty()
-        || !talker.ends_with("@chatroom")
+        || talker.contains('@') && !talker.ends_with("@chatroom")
         || talker.contains(char::is_whitespace)
+        || matches!(talker.as_str(), "." | "..")
     {
         return Err(invalid(
-            "account, exact @chatroom talker, and session are required",
+            "account, exact group or private talker, and session are required",
         ));
     }
     if encrypted_snapshot {
@@ -358,13 +359,19 @@ fn read_source(
         .with_filtered_count(true);
     let result = db.query_messages(&q)?;
     if result.items.is_empty() && result.stats.filtered_count == Some(0) {
-        // A missing per-group Msg table also produces an empty result. Require
-        // independent evidence that this exact group exists before accepting
-        // an empty scan. An absent chat_room schema is likewise inconclusive.
-        let rooms = db.query_chatrooms(&ChatRoomQuery::new().username(&binding.talker).limit(1))?;
-        if rooms.items.len() != 1 {
+        // Missing per-conversation Msg tables also produce empty results.
+        // Require independent, complete metadata evidence before accepting one.
+        if binding.talker.ends_with("@chatroom") {
+            let rooms =
+                db.query_chatrooms(&ChatRoomQuery::new().username(&binding.talker).limit(1))?;
+            if rooms.items.len() != 1 {
+                return Err(invalid(
+                    "empty group scan cannot be verified against chat_room",
+                ));
+            }
+        } else if !conversations::has_private_contact(&db, &binding.talker)? {
             return Err(invalid(
-                "empty group scan cannot be verified against chat_room",
+                "empty private scan cannot be verified against contacts",
             ));
         }
     }
@@ -372,7 +379,7 @@ fn read_source(
 }
 
 /// Validate the entire scan before mutating the journal. A capped or partially decoded
-/// query cannot establish that every local group message was observed.
+/// query cannot establish that every local conversation message was observed.
 fn validate_batch(
     binding: &BindingView,
     result: &MessageQueryResult,
@@ -863,6 +870,108 @@ mod tests {
         assert_eq!(binding.channel_id, "old");
         assert!(!binding.encrypted_snapshot);
         assert!(binding.self_wxid.is_none());
+    }
+
+    #[test]
+    fn private_binding_sync_direction_and_state_are_isolated() {
+        let source = TempDir::new().unwrap();
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        for state in [&first, &second] {
+            fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut alice = bind(
+            first.path(),
+            "account".into(),
+            "wxid_alice".into(),
+            "alice-session".into(),
+            source.path().to_path_buf(),
+            false,
+        )
+        .unwrap();
+        let bob = bind(
+            second.path(),
+            "account".into(),
+            "ordinary_bob".into(),
+            "bob-session".into(),
+            source.path().to_path_buf(),
+            false,
+        )
+        .unwrap();
+        assert_ne!(alice.channel_id, bob.channel_id);
+        assert_eq!(load_binding(second.path()).unwrap().talker, "ordinary_bob");
+        assert!(bind(
+            first.path(),
+            "account".into(),
+            "ordinary_bob".into(),
+            "alice-session".into(),
+            source.path().to_path_buf(),
+            false
+        )
+        .is_err());
+
+        alice.self_wxid = Some("wxid_me".into());
+        let mut incoming = msg(1, 1, "prefix:\nbody");
+        incoming.talker = "wxid_alice".into();
+        incoming.sender = "wxid_alice".into();
+        let mut outgoing = msg(2, 2, "reply");
+        outgoing.talker = "wxid_alice".into();
+        outgoing.sender = "wxid_me".into();
+        let mut conn = open_state(first.path(), true).unwrap();
+        assert_eq!(
+            sync_result(&mut conn, &alice, &batch(vec![incoming, outgoing])).unwrap(),
+            2
+        );
+        let lines: Vec<serde_json::Value> = event_lines(&conn, &alice, 0, 10)
+            .unwrap()
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["direction"], "incoming");
+        assert_eq!(lines[0]["message"]["content"]["Text"], "prefix:\nbody");
+        assert_eq!(lines[1]["direction"], "outgoing");
+        assert_eq!(cursor(&open_state(second.path(), false).unwrap()), 0);
+    }
+
+    #[test]
+    fn empty_private_scan_requires_complete_matching_contact() {
+        let source = TempDir::new().unwrap();
+        for part in ["contact", "session"] {
+            fs::create_dir(source.path().join(part)).unwrap();
+        }
+        fs::create_dir(source.path().join("message")).unwrap();
+        Connection::open(source.path().join("message/message_0.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE placeholder (id INTEGER);")
+            .unwrap();
+        let contact = Connection::open(source.path().join("contact/contact.db")).unwrap();
+        contact.execute_batch("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, nick_name TEXT, description TEXT, extra_buffer BLOB);
+            CREATE TABLE chat_room (username TEXT, owner TEXT, ext_buffer BLOB);
+            INSERT INTO contact VALUES ('ordinary_bob','','Bob','','',NULL);").unwrap();
+        Connection::open(source.path().join("session/session.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE SessionTable (username TEXT, sort_timestamp INTEGER, summary TEXT);",
+            )
+            .unwrap();
+        let state = TempDir::new().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let binding = bind(
+            state.path(),
+            "account".into(),
+            "ordinary_bob".into(),
+            "session".into(),
+            source.path().to_path_buf(),
+            false,
+        )
+        .unwrap();
+        let (scan, _) = read_source(state.path(), &binding).unwrap();
+        assert!(scan.items.is_empty());
+        let missing = BindingView {
+            talker: "wxid_missing".into(),
+            ..binding
+        };
+        assert!(read_source(state.path(), &missing).is_err());
     }
 
     #[test]
