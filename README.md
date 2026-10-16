@@ -4,7 +4,7 @@
 
 本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。当前开发方向是单群 Agent 渠道；只在授权测试账号中做过有限现场验证，尚未承诺客户环境、媒体发送、多群或全天无人值守。
 
-[开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [交互原理图](docs/diagrams/agent-channel.html) · [消息契约](docs/contracts.md) · [验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
+[完整操作指南](docs/OPERATING_GUIDE.md) · [开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [交互原理图](docs/diagrams/agent-channel.html) · [消息契约](docs/contracts.md) · [验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
 
 ## 一个仓库，三个执行层
 
@@ -16,7 +16,7 @@
 
 项目内 [wechat-group-agent skill](.agents/skills/wechat-group-agent/SKILL.md) 教 Agent 如何操作上述 CLI。skill 不自带后台监听器；MCP 尚未实现，后续会复用同一套状态和协议。
 
-当前 Agent 也可以通过 [`wx-agent chat`](docs/INTERACTIVE_CLI.md) 查找并选择配置中的群、分页读取、接管回复和交还后台，共用原有消费进度与发件箱。它不需要启动另一个回复模型。
+当前 Agent 可以通过 [`wx-agent chat`](docs/INTERACTIVE_CLI.md) 查找并选择配置中的群、分页读取，再按需要回复或标记无需回复。只读访问不启动后台；常驻 Agent 是可选入口。已有后台发言者时才需要接管协调，两者共用原有消费进度与发件箱。未来不同群可以独立选择按需或常驻方式，当前验证范围仍为一个已配置测试群。
 
 ## 已经具备的能力
 
@@ -45,7 +45,7 @@ python3 -m venv .local/venv
 
 结构调整前的单群链路完成过真实读取、发送、跨重启上下文和一次 **32 分钟**的有界观察；读取入口恢复后补回一次积压，连续两条入站按序回复，重启未重发。部分旧消息有独立收件确认；新四条自动回复仅验证到本地出站。
 
-新包、会话记忆与工程检查使用合成数据验证，未自动替换现有运行端。窗口锁定、微信退出、权限变化或不可读剪贴板仍可能停止图形发送。测试结论与不足见 [验证记录](docs/REAL_READ_VALIDATION_20261015.md)，当前交付检查见 [实施记录](IMPLEMENTATION_PLAN.md)。
+0.2.0 已在授权测试端隔离部署，实测选群、分页、按需读取、人工回复与交还后台；本轮两条回复有用户提供的收件端截图和确认。会话笔记与故障分支另有合成数据验证。窗口锁定、微信退出、权限变化或不可读剪贴板仍可能停止图形发送。最新证据见 [交互 CLI 验证](docs/INTERACTIVE_VALIDATION_20261016.md)，早期证据见 [读取与发送验证](docs/REAL_READ_VALIDATION_20261015.md)。
 
 ## 开发
 

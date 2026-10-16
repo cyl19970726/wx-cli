@@ -249,6 +249,22 @@ def _finish_pending(settings, binding, lease, item):
             "status": item["status"], "already_completed": current == pending["cursor"]}
 
 
+def _skip_record(state, cursor):
+    records = state.get("manual_skips", [])
+    _check(isinstance(records, list) and all(isinstance(item, dict)
+           and type(item.get("cursor")) is int and isinstance(item.get("reason"), str)
+           and type(item.get("server_id")) is int and item["server_id"] > 0
+           for item in records), "runner_state", "manual skip audit is invalid")
+    matching = [item for item in records if item["cursor"] == cursor]
+    _check(len(matching) <= 1, "runner_state", "manual skip audit has duplicate cursor")
+    return matching[0] if matching else None
+
+
+def _completed_skip(record, reason):
+    _check(record["reason"] == reason, "skip_conflict", "cursor was skipped with a different reason")
+    return {"cursor": record["cursor"], "reason": reason, "status": "skipped", "already_completed": True}
+
+
 def groups(settings, name, exact=False):
     binding = _status(settings)["binding"]
     _check(isinstance(binding.get("source"), str) and binding["source"], "binding", "channel source is missing")
@@ -343,6 +359,7 @@ def reply(settings, cursor, text):
         _check(state.get("pending") is None, "runner_pending", "runner has a pending reply")
         pending = lease.get("pending")
         if pending is not None:
+            _check(pending.get("kind") in (None, "reply"), "pending_conflict", "a manual skip is pending")
             _check(pending.get("cursor") == cursor and pending.get("text") == text,
                    "pending_conflict", "another manual reply is pending")
             _check(state_cursor in (pending.get("previous_cursor"), cursor)
@@ -409,6 +426,77 @@ def reply(settings, cursor, text):
         return _finish_pending(settings, binding, lease, item)
 
 
+def skip(settings, cursor, reason):
+    _check(isinstance(reason, str) and reason.strip() and "\x00" not in reason
+           and len(reason.encode("utf-8")) <= 1000,
+           "reason", "skip reason must be nonempty and at most 1000 bytes")
+    state_dir = Path(settings["state_dir"])
+    with _lock(state_dir, ctl.LOCK_NAME), _lock(state_dir, runner.LOCK_NAME, blocking=False):
+        status = _status(settings)
+        binding = status["binding"]
+        _selection(settings, binding)
+        lease = _lease(settings, binding)
+        _check(not ctl.status(settings)["alive"], "runner_active", "automatic runner is still active")
+        state_path, state, state_cursor = _runner_state(settings, binding)
+        _check(state.get("pending") is None, "runner_pending", "runner has a pending reply")
+        pending = lease.get("pending")
+        if pending is not None:
+            _check(pending.get("kind") == "skip", "pending_conflict", "a manual reply is pending")
+            _check(pending.get("cursor") == cursor and pending.get("reason") == reason,
+                   "pending_conflict", "another manual skip is pending")
+            previous = pending.get("previous_cursor")
+            _check(type(previous) is int and previous >= 0
+                   and state_cursor in (previous, cursor)
+                   and status["consumer_cursor"] in (previous, cursor)
+                   and not (state_cursor == cursor and status["consumer_cursor"] != cursor),
+                   "cursor_drift", "manual skip cursor changed")
+            event = _target_event(settings, binding, previous, cursor)
+            _check(event["server_id"] == pending.get("server_id"),
+                   "event", "manual skip source changed")
+        else:
+            _check(state_cursor == status["consumer_cursor"],
+                   "cursor_drift", "runner and consumer cursors differ")
+            if cursor <= state_cursor:
+                record = _skip_record(state, cursor)
+                _check(record is not None, "cursor_order", "cursor is already processed")
+                _check(_outbox_item(settings, _request_id(binding, record["server_id"])) is None,
+                       "existing_reply", "source already has an outbox request")
+                return _completed_skip(record, reason)
+            _json(settings, "channel", "sync")
+            status = _status(settings)
+            _check(status["binding"] == binding and status["consumer_cursor"] == state_cursor,
+                   "cursor_drift", "channel changed before skip")
+            event = _target_event(settings, binding, state_cursor, cursor)
+            previous = state_cursor
+            request_id = _request_id(binding, event["server_id"])
+            _check(_outbox_item(settings, request_id) is None,
+                   "existing_reply", "source already has an outbox request")
+            lease["pending"] = {"kind": "skip", "cursor": cursor,
+                                "previous_cursor": previous, "server_id": event["server_id"],
+                                "reason": reason}
+            runner.save(state_dir / LEASE_NAME, lease)
+        request_id = _request_id(binding, event["server_id"])
+        _check(_outbox_item(settings, request_id) is None,
+               "existing_reply", "source already has an outbox request")
+        current = status["consumer_cursor"]
+        if current == previous:
+            _ack(settings, previous, cursor)
+        record = _skip_record(state, cursor)
+        if record is None:
+            _check(state_cursor == previous, "runner_drift", "skip audit is missing")
+            state.setdefault("manual_skips", []).append({"cursor": cursor,
+                                                          "server_id": event["server_id"], "reason": reason})
+            state["last_cursor"] = cursor
+            runner.save(state_path, state)
+        else:
+            _completed_skip(record, reason)
+            _check(state_cursor == cursor, "runner_drift", "skip audit cursor differs")
+        lease["pending"] = None
+        runner.save(state_dir / LEASE_NAME, lease)
+        return {"cursor": cursor, "reason": reason, "status": "skipped",
+                "already_completed": current == cursor}
+
+
 def handback(settings):
     state_dir = Path(settings["state_dir"])
     lease_path = state_dir / LEASE_NAME
@@ -418,7 +506,10 @@ def handback(settings):
         binding = status["binding"]
         _selection(settings, binding)
         lease = _lease(settings, binding, active=False)
-        _check(lease.get("pending") is None, "manual_pending", "manual reply is pending")
+        pending = lease.get("pending")
+        _check(pending is None, "manual_pending",
+               "manual skip is pending" if isinstance(pending, dict) and pending.get("kind") == "skip"
+               else "manual reply is pending")
         _check(type(lease.get("previously_alive")) is bool, "lease_invalid", "original runner state is missing")
         if lease["phase"] == "active":
             with _lock(state_dir, runner.LOCK_NAME, blocking=False):
@@ -502,6 +593,9 @@ def main(argv=None):
     send = commands.add_parser("reply")
     send.add_argument("--cursor", type=int, required=True)
     send.add_argument("--text-stdin", action="store_true", required=True)
+    dismiss = commands.add_parser("skip")
+    dismiss.add_argument("--cursor", type=int, required=True)
+    dismiss.add_argument("--reason", required=True)
     commands.add_parser("handback")
     commands.add_parser("status")
     args = parser.parse_args(argv)
@@ -520,6 +614,8 @@ def main(argv=None):
             raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
             _check(len(raw) <= runner.MAX_REPLY, "text", "reply text is too large")
             result = reply(settings, args.cursor, raw.decode("utf-8"))
+        elif args.command == "skip":
+            result = skip(settings, args.cursor, args.reason)
         elif args.command == "handback":
             result = handback(settings)
         else:

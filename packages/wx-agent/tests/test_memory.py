@@ -115,6 +115,7 @@ class MemoryTests(unittest.TestCase):
     def test_cli_private_input_and_atomic_rejection(self):
         source = self.root / "update.json"
         source.write_text(json.dumps(self.doc()))
+        source.chmod(0o644)
         self.assertEqual(main(["update", "--state-dir", str(self.state), "--wx-cli", str(self.cli),
                                "--file", str(source), "--expected-revision", "0"]), 1)
         self.assertFalse((self.state / MEMORY_NAME).exists())
