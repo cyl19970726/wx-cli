@@ -16,6 +16,8 @@ private struct Command: Decodable {
     let text: String?
     let body: String?
     let targetGroup: String?
+    let targetKind: TargetKind?
+    let focusEvidenceID: String?
     let expectedDraft: String?
     let expectedPID: Int32?
     let expectedWindowID: UInt32?
@@ -147,7 +149,8 @@ private func processAndWindows() async throws -> (NSRunningApplication, [SCWindo
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     let windows = content.windows.filter {
         $0.owningApplication?.processID == app.processIdentifier &&
-        $0.isOnScreen && $0.frame.width >= 300 && $0.frame.height >= 250
+        // Include short search panels so the sole-window send guard sees them too.
+        $0.isOnScreen && $0.frame.width >= 300 && $0.frame.height >= 160
     }
     return (app, windows)
 }
@@ -165,14 +168,17 @@ private func windowSummary(_ window: SCWindow) -> [String: Any] {
                "width": window.frame.width, "height": window.frame.height]]
 }
 
-private func capture(_ window: SCWindow, destination: URL) async throws -> CGImage {
+private func capture(_ window: SCWindow, destination: URL,
+                     minimumHeight: Int = 250) async throws -> CGImage {
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let configuration = SCStreamConfiguration()
     configuration.width = max(1, Int(window.frame.width))
     configuration.height = max(1, Int(window.frame.height))
     configuration.showsCursor = false
     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-    guard image.width >= 300, image.height >= 250 else { throw Failure("Window screenshot too small") }
+    guard image.width >= 300, image.height >= minimumHeight else {
+        throw Failure("Window screenshot too small")
+    }
     let bitmap = NSBitmapImageRep(cgImage: image)
     guard let png = bitmap.representation(using: .png, properties: [:]) else { throw Failure("Cannot encode window screenshot") }
     // A uniform/black image cannot establish the selected conversation.
@@ -191,7 +197,8 @@ private func capture(_ window: SCWindow, destination: URL) async throws -> CGIma
     return image
 }
 
-private func headerContainsGroup(_ image: CGImage, target: String) async throws -> Bool {
+private func headerContainsTarget(_ image: CGImage, target: String,
+                                  kind: TargetKind) async throws -> Bool {
     guard let crop = VisualParameters.headerOCRRect(imageWidth: image.width,
             imageHeight: image.height) else {
         throw Failure("Chat header geometry is not calibrated for this window")
@@ -211,7 +218,7 @@ private func headerContainsGroup(_ image: CGImage, target: String) async throws 
             width: bounds.width * crop.width,
             height: bounds.height * crop.height))
     }
-    return VisualParameters.uniqueHeaderTitle(candidates, target: target,
+    return VisualParameters.uniqueHeaderTitle(candidates, target: target, kind: kind,
         imageWidth: image.width, imageHeight: image.height)
 }
 
@@ -235,12 +242,45 @@ private struct VisualStage: Codable {
     var stage: String
     let text: String
     let targetGroup: String
+    let targetKind: TargetKind
+    let focusEvidenceID: String
     let expectedDraft: String
     let expectedPID: Int32
     let expectedWindowID: UInt32
     let expectedFrame: RectInput
     let composerRect: RectInput
     let buttonPoint: PointInput
+}
+
+private struct FocusEvidence: Codable {
+    let id: String
+    let targetGroup: String
+    let targetKind: TargetKind
+    let expectedPID: Int32
+    let expectedWindowID: UInt32
+    let expectedFrame: RectInput
+    let source: String
+    let category: SearchCategory
+    let selectedAt: Date
+}
+
+private func focusEvidenceURL(_ id: String) -> URL {
+    outputDirectory.appendingPathComponent("\(id).focus-evidence.json")
+}
+
+private func requireFocusEvidence(_ state: VisualStage) throws {
+    let evidence = try JSONDecoder().decode(FocusEvidence.self,
+        from: Data(contentsOf: focusEvidenceURL(state.focusEvidenceID)))
+    let age = Date().timeIntervalSince(evidence.selectedAt)
+    guard evidence.id == state.focusEvidenceID, evidence.source == "search",
+          evidence.category.accepts(state.targetKind),
+          evidence.targetGroup == state.targetGroup, evidence.targetKind == state.targetKind,
+          evidence.expectedPID == state.expectedPID,
+          evidence.expectedWindowID == state.expectedWindowID,
+          evidence.expectedFrame == state.expectedFrame,
+          age >= 0, age <= 120 else {
+        throw Failure("Recent category-verified focus evidence does not match visual target")
+    }
 }
 
 private func visualStageURL(_ id: String) -> URL {
@@ -261,6 +301,8 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
     guard let text = command.text ?? command.body,
           command.text == nil || command.body == nil || command.text == command.body,
           let targetGroup = command.targetGroup,
+          let targetKind = command.targetKind,
+          let focusEvidenceID = command.focusEvidenceID, safeID(focusEvidenceID),
           let expectedDraft = command.expectedDraft,
           VisualParameters.acceptsText(text, allowEmpty: false),
           VisualParameters.acceptsText(expectedDraft, allowEmpty: true),
@@ -270,7 +312,7 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
           let frame = command.expectedFrame,
           let composer = command.composerRect,
           let button = command.buttonPoint else {
-        throw Failure("Visual action requires valid text, targetGroup, expectedDraft, PID, window ID, frame, composer rect and button point")
+        throw Failure("Visual action requires valid text, targetGroup, targetKind, focusEvidenceID, expectedDraft and calibrated window coordinates")
     }
     guard pid > 0, windowID > 0,
           frame.width >= 300, frame.height >= 250,
@@ -288,6 +330,7 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
     }
     return VisualStage(id: command.id, stage: "",
                        text: VisualParameters.canonicalNewlines(text), targetGroup: targetGroup,
+                       targetKind: targetKind, focusEvidenceID: focusEvidenceID,
                        expectedDraft: VisualParameters.canonicalNewlines(expectedDraft),
                        expectedPID: pid, expectedWindowID: windowID,
                        expectedFrame: frame, composerRect: composer, buttonPoint: button)
@@ -298,6 +341,7 @@ private func sameVisualInputs(_ a: VisualStage, _ b: VisualStage) -> Bool {
     VisualParameters.sameTransactionText(text: a.text, draft: a.expectedDraft, group: a.targetGroup,
                                          otherText: b.text, otherDraft: b.expectedDraft, otherGroup: b.targetGroup) &&
     a.expectedPID == b.expectedPID &&
+    a.targetKind == b.targetKind && a.focusEvidenceID == b.focusEvidenceID &&
     a.expectedWindowID == b.expectedWindowID && a.expectedFrame == b.expectedFrame &&
     a.composerRect == b.composerRect && a.buttonPoint == b.buttonPoint
 }
@@ -361,6 +405,7 @@ private func consoleAndFocus(_ app: NSRunningApplication) throws -> String {
 }
 
 private func freshVisual(_ state: VisualStage, step: String, draft: String?) async throws -> (SCWindow, CGImage, String) {
+    try requireFocusEvidence(state)
     guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(), CGPreflightPostEventAccess() else {
         throw Failure("Accessibility, Screen Recording and Post Events access required")
     }
@@ -375,7 +420,10 @@ private func freshVisual(_ state: VisualStage, step: String, draft: String?) asy
     }
     let lockStatus = try consoleAndFocus(app)
     let image = try await capture(window, destination: outputDirectory.appendingPathComponent("\(state.id).\(step).png"))
-    guard try await headerContainsGroup(image, target: state.targetGroup) else { throw Failure("Fresh chat header is not exact target group") }
+    guard try await headerContainsTarget(image, target: state.targetGroup,
+                                        kind: state.targetKind) else {
+        throw Failure("Fresh chat header is not exact target and kind")
+    }
     guard image.width == Int(b.width), image.height == Int(b.height) else {
         throw Failure("Screenshot pixel size differs from expected geometry")
     }
@@ -477,6 +525,7 @@ private func pastePlainText(_ state: VisualStage, step: String) async throws {
 private struct FocusInputs {
     let id: String
     let targetGroup: String
+    let targetKind: TargetKind
     let expectedPID: Int32
     let expectedWindowID: UInt32
     let expectedFrame: RectInput
@@ -486,12 +535,13 @@ private struct FocusInputs {
 
 private func focusInputs(_ command: Command) throws -> FocusInputs {
     guard let group = command.targetGroup, VisualParameters.acceptsGroup(group),
+          let kind = command.targetKind,
           let pid = command.expectedPID, pid > 0,
           let windowID = command.expectedWindowID, windowID > 0,
           let frame = command.expectedFrame,
           let list = command.conversationListRect,
           let search = command.searchPoint else {
-        throw Failure("Focus requires target group, PID, window ID, frame, list rect and search point")
+        throw Failure("Focus requires targetGroup, targetKind, PID, window ID, frame, list rect and search point")
     }
     guard frame.width >= 300, frame.height >= 250,
           list.x >= 0, list.y >= 50,
@@ -502,19 +552,21 @@ private func focusInputs(_ command: Command) throws -> FocusInputs {
           search.y >= 5, search.y < list.y - 5 else {
         throw Failure("Focus coordinates must identify the left conversation list and top search input")
     }
-    return FocusInputs(id: command.id, targetGroup: group, expectedPID: pid,
+    return FocusInputs(id: command.id, targetGroup: group, targetKind: kind, expectedPID: pid,
                        expectedWindowID: windowID, expectedFrame: frame,
                        listRect: list, searchPoint: search)
 }
 
-private func freshFocus(_ input: FocusInputs, step: String) async throws -> (SCWindow, CGImage) {
+private func freshFocus(_ input: FocusInputs, step: String,
+                        allowSearchPopup: Bool = false) async throws -> (SCWindow, CGImage, SCWindow?) {
     guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(), CGPreflightPostEventAccess() else {
         throw Failure("Accessibility, Screen Recording and Post Events access required")
     }
     let (app, windows) = try await processAndWindows()
-    guard app.processIdentifier == input.expectedPID, windows.count == 1,
-          let window = windows.first, window.windowID == input.expectedWindowID else {
-        throw Failure("WeChat PID or sole window changed")
+    guard app.processIdentifier == input.expectedPID,
+          let window = windows.first(where: { $0.windowID == input.expectedWindowID }),
+          windows.count <= (allowSearchPopup ? 2 : 1) else {
+        throw Failure("WeChat PID, expected window, or navigation window count changed")
     }
     let actual = window.frame, expected = input.expectedFrame.rect
     guard abs(actual.minX - expected.minX) <= 3,
@@ -523,13 +575,22 @@ private func freshFocus(_ input: FocusInputs, step: String) async throws -> (SCW
           abs(actual.height - expected.height) <= 3 else {
         throw Failure("WeChat window frame changed")
     }
+    let extras = windows.filter { $0.windowID != input.expectedWindowID }
+    guard extras.count <= 1 else { throw Failure("Ambiguous WeChat navigation windows") }
+    if let popup = extras.first {
+        guard allowSearchPopup,
+              VisualParameters.plausibleSearchPopup(popup.frame, main: expected,
+                                                    search: input.searchPoint.point) else {
+            throw Failure("Unexpected WeChat window during navigation")
+        }
+    }
     _ = try consoleAndFocus(app)
     let image = try await capture(window, destination: outputDirectory.appendingPathComponent("\(input.id).\(step).png"))
     guard image.width == Int(expected.width), image.height == Int(expected.height) else {
         throw Failure("Screenshot pixel size differs from expected geometry")
     }
     _ = try consoleAndFocus(app)
-    return (window, image)
+    return (window, image, extras.first)
 }
 
 private func groupCandidates(_ image: CGImage, rect: CGRect) throws -> [GroupOCRCandidate] {
@@ -553,7 +614,10 @@ private func groupCandidates(_ image: CGImage, rect: CGRect) throws -> [GroupOCR
 }
 
 private func exactVisibleRow(_ image: CGImage, input: FocusInputs) throws -> GroupOCRCandidate? {
-    let candidates = try groupCandidates(image, rect: input.listRect.rect)
+    guard let nameRect = VisualParameters.conversationNameRect(input.listRect.rect) else {
+        throw Failure("Conversation name column is not calibrated")
+    }
+    let candidates = try groupCandidates(image, rect: nameRect)
     let matches = candidates.filter { $0.y >= input.listRect.y &&
         VisualParameters.exactGroupTitle($0.text, target: input.targetGroup) }
     guard matches.count <= 1 else { throw Failure("Ambiguous exact group rows in left conversation list") }
@@ -562,7 +626,7 @@ private func exactVisibleRow(_ image: CGImage, input: FocusInputs) throws -> Gro
 }
 
 private func clickGroupRow(_ input: FocusInputs, row: GroupOCRCandidate, step: String) async throws {
-    let (window, image) = try await freshFocus(input, step: step)
+    let (window, image, _) = try await freshFocus(input, step: step)
     guard let current = try exactVisibleRow(image, input: input),
           current.text == row.text,
           abs(current.x - row.x) <= 10, abs(current.y - row.y) <= 10 else {
@@ -570,22 +634,23 @@ private func clickGroupRow(_ input: FocusInputs, row: GroupOCRCandidate, step: S
     }
     try mouseClick(globalPoint(CGPoint(x: row.x, y: row.y), window: window))
     try await Task.sleep(nanoseconds: 300_000_000)
-    let (_, after) = try await freshFocus(input, step: "\(step)-after-click")
-    guard try await headerContainsGroup(after, target: input.targetGroup) else {
-        throw Failure("Selected chat header is not exact target group")
+    let (_, after, _) = try await freshFocus(input, step: "\(step)-after-click")
+    guard try await headerContainsTarget(after, target: input.targetGroup,
+                                         kind: input.targetKind) else {
+        throw Failure("Selected chat header is not exact target and kind")
     }
 }
 
 private func pasteSearch(_ input: FocusInputs) async throws {
-    let (window, _) = try await freshFocus(input, step: "before-search-click")
+    let (window, _, _) = try await freshFocus(input, step: "before-search-click")
     try mouseClick(globalPoint(input.searchPoint.point, window: window))
     try await Task.sleep(nanoseconds: 150_000_000)
-    _ = try await freshFocus(input, step: "before-search-select")
+    _ = try await freshFocus(input, step: "before-search-select", allowSearchPopup: true)
     try key(0, command: true) // Select only calibrated search input.
     let snapshot = try ClipboardSnapshot.capture()
     let owned = try setClipboardString(input.targetGroup, snapshot: snapshot)
     do {
-        _ = try await freshFocus(input, step: "before-search-paste")
+        _ = try await freshFocus(input, step: "before-search-paste", allowSearchPopup: true)
         guard NSPasteboard.general.changeCount == owned,
               NSPasteboard.general.string(forType: .string) == input.targetGroup else {
             throw Failure("Temporary clipboard changed before Search Paste")
@@ -601,14 +666,14 @@ private func pasteSearch(_ input: FocusInputs) async throws {
         throw error
     }
     // Copy back from the calibrated search input, never from the message composer.
-    _ = try await freshFocus(input, step: "before-search-copy")
+    _ = try await freshFocus(input, step: "before-search-copy", allowSearchPopup: true)
     try key(0, command: true)
     let copiedSnapshot = try ClipboardSnapshot.capture()
     let sentinel = "CODEX-SEARCH-\(UUID().uuidString)"
     let copiedOwned = try setClipboardString(sentinel, snapshot: copiedSnapshot)
     var restorable = copiedOwned
     do {
-        _ = try await freshFocus(input, step: "search-copy-ready")
+        _ = try await freshFocus(input, step: "search-copy-ready", allowSearchPopup: true)
         guard NSPasteboard.general.changeCount == copiedOwned else { throw Failure("Clipboard changed before Search Copy") }
         try key(8, command: true)
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -628,28 +693,128 @@ private func pasteSearch(_ input: FocusInputs) async throws {
     }
 }
 
+private func popupCandidates(_ image: CGImage) throws -> [SearchOCRCandidate] {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
+    request.usesLanguageCorrection = false
+    try VNImageRequestHandler(cgImage: image).perform([request])
+    return (request.results ?? []).compactMap { result in
+        guard let text = result.topCandidates(1).first?.string else { return nil }
+        let box = result.boundingBox
+        return SearchOCRCandidate(text: text, bounds: CGRect(
+            x: box.minX * CGFloat(image.width),
+            y: (1 - box.maxY) * CGFloat(image.height),
+            width: box.width * CGFloat(image.width),
+            height: box.height * CGFloat(image.height)))
+    }
+}
+
+private struct SearchProbe {
+    let windows: [SCWindow]
+    let selection: (SCWindow, SearchSelection)?
+}
+
+private func searchPopupResult(_ input: FocusInputs, step: String,
+                               expectedPopupID: UInt32? = nil,
+                               expectedPopupFrame: CGRect? = nil)
+    async throws -> SearchProbe {
+    let (main, _, popup) = try await freshFocus(input, step: "\(step)-main", allowSearchPopup: true)
+    guard let popup else { return SearchProbe(windows: [main], selection: nil) }
+    if let expectedPopupID, popup.windowID != expectedPopupID {
+        throw Failure("Search popup ID changed before click")
+    }
+    if let frame = expectedPopupFrame {
+        guard abs(popup.frame.minX - frame.minX) <= 3,
+              abs(popup.frame.minY - frame.minY) <= 3,
+              abs(popup.frame.width - frame.width) <= 3,
+              abs(popup.frame.height - frame.height) <= 3 else {
+            throw Failure("Search popup frame changed before click")
+        }
+    }
+    let image = try await capture(popup,
+        destination: outputDirectory.appendingPathComponent("\(input.id).\(step)-popup.png"),
+        minimumHeight: 160)
+    guard image.width == Int(popup.frame.width), image.height == Int(popup.frame.height) else {
+        throw Failure("Search popup screenshot geometry changed")
+    }
+    let (_, _, currentPopup) = try await freshFocus(input, step: "\(step)-confirm", allowSearchPopup: true)
+    guard let currentPopup, currentPopup.windowID == popup.windowID,
+          abs(currentPopup.frame.minX - popup.frame.minX) <= 3,
+          abs(currentPopup.frame.minY - popup.frame.minY) <= 3,
+          abs(currentPopup.frame.width - popup.frame.width) <= 3,
+          abs(currentPopup.frame.height - popup.frame.height) <= 3 else {
+        throw Failure("Search popup changed during capture")
+    }
+    let candidates = try popupCandidates(image)
+    let selection = VisualParameters.uniqueSearchResult(candidates, target: input.targetGroup,
+        kind: input.targetKind,
+        popupSize: CGSize(width: image.width, height: image.height)).map { (popup, $0) }
+    return SearchProbe(windows: [main, popup], selection: selection)
+}
+
+private func writeFocusPolls(_ polls: [FocusPollDiagnostic], id: String) throws {
+    try JSONEncoder().encode(polls).write(
+        to: outputDirectory.appendingPathComponent("\(id).focus-polls.json"), options: .atomic)
+}
+
+private func focusWindowDiagnostic(_ window: SCWindow) -> FocusWindowDiagnostic {
+    let frame = window.frame
+    return FocusWindowDiagnostic(id: window.windowID,
+        x: Double(frame.minX), y: Double(frame.minY),
+        width: Double(frame.width), height: Double(frame.height))
+}
+
 private func runFocus(_ command: Command) async throws -> [String: Any] {
     let input = try focusInputs(command)
-    let (_, initial) = try await freshFocus(input, step: "focus-initial")
-    if try await headerContainsGroup(initial, target: input.targetGroup) {
-        return ["focused": true, "alreadySelected": true]
-    }
+    _ = try await freshFocus(input, step: "focus-initial")
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(input.id).focus-attempted.json"))
-    if let row = try exactVisibleRow(initial, input: input) {
-        try await clickGroupRow(input, row: row, step: "focus-list")
-        return ["focused": true, "alreadySelected": false, "source": "visible-list"]
-    }
     try await pasteSearch(input)
-    let until = Date().addingTimeInterval(2.5)
-    while Date() < until {
-        let (_, image) = try await freshFocus(input, step: "focus-search-result")
-        if let row = try exactVisibleRow(image, input: input) {
-            try await clickGroupRow(input, row: row, step: "focus-search")
-            return ["focused": true, "alreadySelected": false, "source": "search"]
+    let searchStarted = Date()
+    var polls: [FocusPollDiagnostic] = []
+    while VisualParameters.withinFocusSearchBudget(Date().timeIntervalSince(searchStarted)) {
+        let probe = try await searchPopupResult(input, step: "focus-search-result")
+        polls.append(FocusPollDiagnostic(
+            elapsedMs: Int(Date().timeIntervalSince(searchStarted) * 1_000),
+            windowCount: probe.windows.count,
+            windows: probe.windows.map(focusWindowDiagnostic),
+            popupPresent: probe.windows.count == 2,
+            popupSelected: probe.selection != nil))
+        try writeFocusPolls(polls, id: input.id)
+        if let (popup, selected) = probe.selection {
+            let confirmed = try await searchPopupResult(input,
+                step: "focus-search-before-click", expectedPopupID: popup.windowID,
+                expectedPopupFrame: popup.frame)
+            guard let (currentPopup, current) = confirmed.selection,
+                current.category == selected.category,
+                current.row.text == selected.row.text,
+                abs(current.row.bounds.midX - selected.row.bounds.midX) <= 10,
+                abs(current.row.bounds.midY - selected.row.bounds.midY) <= 10 else {
+                throw Failure("Search popup row changed before click")
+            }
+            try mouseClick(globalPoint(CGPoint(x: current.row.bounds.midX, y: current.row.bounds.midY),
+                                       window: currentPopup))
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let (_, after, _) = try await freshFocus(input, step: "focus-search-after-click")
+            guard try await headerContainsTarget(after, target: input.targetGroup,
+                                                 kind: input.targetKind) else {
+                throw Failure("Selected chat header is not exact target and kind")
+            }
+            let evidence = FocusEvidence(id: input.id, targetGroup: input.targetGroup,
+                targetKind: input.targetKind, expectedPID: input.expectedPID,
+                expectedWindowID: input.expectedWindowID, expectedFrame: input.expectedFrame,
+                source: "search", category: current.category, selectedAt: Date())
+            try JSONEncoder().encode(evidence).write(to: focusEvidenceURL(input.id), options: .atomic)
+            return ["focused": true, "alreadySelected": false, "source": "search",
+                    "category": current.category.rawValue,
+                    "targetKind": input.targetKind.rawValue, "focusEvidenceID": input.id]
         }
         try await Task.sleep(nanoseconds: 200_000_000)
     }
-    throw Failure("Exact target group absent from bounded search results")
+    if polls.allSatisfy({ !$0.popupPresent }) {
+        throw Failure("Search popup not enumerated by ScreenCaptureKit within six seconds")
+    }
+    throw Failure("Search popup had no unique category-eligible exact target within six seconds")
 }
 
 private func runVisual(_ command: Command) async throws -> [String: Any] {

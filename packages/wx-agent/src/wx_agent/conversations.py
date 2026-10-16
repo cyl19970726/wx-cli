@@ -501,6 +501,60 @@ def reply(settings, cursor, text, id=None):
         return result
 
 
+def recover_unsent_send(settings, request_id, expected_attempt, id=None):
+    """Recover one existing outbox intent for a freshly verified stable conversation ID."""
+    require(isinstance(id, str) and bool(CONVERSATION_ID.fullmatch(id)),
+            "conversation_id_required", "recovery requires a stable conversation ID")
+    require(isinstance(request_id, str) and bool(REQUEST_ID.fullmatch(request_id)),
+            "request_id", "invalid request ID")
+    require(type(expected_attempt) is int and expected_attempt > 0,
+            "attempt", "positive expected attempt required")
+    snapshot, entry = selected(settings, id)
+    fresh(settings, entry["conversation_id"], entry, unique_name=True)
+    if entry["imported"]:
+        value = ctl.config(Path(entry["controller_config"]), require_executables=False)
+        lease = interactive._read_optional(Path(value["state_dir"]) / interactive.LEASE_NAME)
+        pending = lease.get("pending") if isinstance(lease, dict) else None
+        require(isinstance(lease, dict) and lease.get("phase") == "active"
+                and isinstance(pending, dict) and pending.get("request_id") == request_id,
+                "retained_lease_required", "imported controller recovery requires its retained reply lease")
+        item = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
+        require(item.get("request_id") == request_id and item.get("text") == pending.get("text"),
+                "outbox_drift", "retained reply and outbox intent differ")
+        require(item.get("attempt_number") == expected_attempt,
+                "attempt_drift", "outbox attempt differs from the requested recovery")
+        assert_selection(settings, snapshot, entry)
+        return interactive.recover_unsent_reply(value, pending.get("cursor"), expected_attempt)
+
+    with coordinated(settings, entry):
+        assert_selection(settings, snapshot, entry)
+        item = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
+        require(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
+        require(isinstance(item.get("text"), str), "outbox_drift", "outbox text is unavailable")
+        sender.validate_text(item["text"])
+        require(item.get("status") in ("failed", "indeterminate"),
+                "send_uncertain", "only a failed or indeterminate intent can be recovered")
+        require(item.get("attempt_number") == expected_attempt,
+                "attempt_drift", "outbox attempt differs from the requested recovery")
+        fresh(settings, entry["conversation_id"], entry, unique_name=True)
+        assert_selection(settings, snapshot, entry)
+        one_json(settings, "channel", entry["state_dir"], "sync")
+        channel_status(settings, entry)
+        driver = prepare_driver(settings, entry)
+        try:
+            one_json(settings, "outbox", entry["state_dir"], "recover-unsent", "--request-id", request_id,
+                     "--expected-attempt", str(expected_attempt), "--driver", driver)
+        except ConversationError:
+            # The claim may have been committed. Inspect its immutable current state only.
+            pass
+        result = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
+        require(result.get("request_id") == request_id and result.get("text") == item["text"],
+                "outbox_drift", "recovered intent differs from the original")
+        require(result.get("status") in TERMINAL, "send_uncertain", "recovery result needs manual inspection")
+        return {"request_id": request_id, "attempt_number": result.get("attempt_number"),
+                "status": result["status"], "already_completed": False}
+
+
 def focus_conversation(settings, id=None):
     snapshot, entry = selected(settings, id)
     fresh(settings, entry["conversation_id"], entry, unique_name=True)
@@ -538,6 +592,11 @@ def main(argv=None):
     replying = commands.choices["reply"]
     replying.add_argument("--cursor", type=int, required=True)
     replying.add_argument("--text-stdin", action="store_true", required=True)
+    commands.add_parser("recover-unsent-send")
+    recovering = commands.choices["recover-unsent-send"]
+    recovering.add_argument("--id", required=True)
+    recovering.add_argument("--request-id", required=True)
+    recovering.add_argument("--expected-attempt", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         settings = config(args.config)
@@ -553,11 +612,20 @@ def main(argv=None):
                 result = read(settings, args.after, args.limit, args.id)
             elif args.command == "focus":
                 result = focus_conversation(settings, args.id)
-            else:
+            elif args.command == "recover-unsent-send":
+                require(args.id is not None, "conversation_id_required",
+                        "recovery requires a stable conversation --id")
+                result = recover_unsent_send(settings, args.request_id, args.expected_attempt, args.id)
+            elif args.command == "send":
                 raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
                 require(len(raw) <= runner.MAX_REPLY, "text", "message text too large")
-                body = raw.decode("utf-8")
-                result = send(settings, args.request_id, body, args.id) if args.command == "send" else reply(settings, args.cursor, body, args.id)
+                result = send(settings, args.request_id, raw.decode("utf-8"), args.id)
+            elif args.command == "reply":
+                raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
+                require(len(raw) <= runner.MAX_REPLY, "text", "message text too large")
+                result = reply(settings, args.cursor, raw.decode("utf-8"), args.id)
+            else:
+                raise ConversationError("command", "unsupported conversation command")
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
     except (ConversationError, interactive.ChatError, ctl.ControlError, runner.RunnerError,

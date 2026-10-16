@@ -32,6 +32,14 @@ class SenderTests(unittest.TestCase):
         tid = driver.request_ok(self.request, self.config)
         self.assertRegex(tid, r"^send-[0-9a-f]{48}$")
         self.assertEqual(tid, driver.request_ok(dict(self.request), self.config))
+        self.assertEqual(tid, driver.request_ok(dict(self.request, attempt_number=1), self.config))
+        self.assertEqual(driver.request_ok(dict(self.request, attempt_number=2), self.config), tid + "-a2")
+        self.assertEqual(driver.request_ok(dict(self.request, attempt_number=3, recovery_from_attempt=2),
+                                           self.config), tid + "-a3")
+        for altered in (dict(self.request, attempt_number=0),
+                        dict(self.request, attempt_number=3, recovery_from_attempt=1)):
+            with self.assertRaises(driver.Refused):
+                driver.request_ok(altered, self.config)
         for key in ("channel_id", "session_id", "account", "talker"):
             bad = dict(self.request, **{key: "other"})
             with self.subTest(key=key), self.assertRaises(driver.Refused):
@@ -96,6 +104,155 @@ class SenderTests(unittest.TestCase):
                 self.assertFalse(list(ui.glob("*.client-result.json")))
             finally:
                 os.close(fd)
+
+    def _prior_unsent_artifacts(self, root, result_error="Cannot snapshot a clipboard item", modern=False):
+        ui = Path(root)
+        ui.chmod(0o700)
+        config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_draft="",
+                      conversation_kind="group",
+                      expected_pid=42, composer_rect={"x": 400, "y": 500, "width": 300, "height": 50},
+                      button_point={"x": 800, "y": 570})
+        request = dict(self.request)
+        tid = driver.request_ok(request, config)
+        report = {"id": tid, "stage": "group_focused", "status": "indeterminate",
+                  "error": driver.helper_reason({"error": result_error})}
+        frame = {"x": 0, "y": 0, "width": 900, "height": 650}
+        state = {"id": tid, "stage": "prepare-attempted", "text": request["text"],
+                 "targetGroup": config["target_group"], "expectedDraft": "", "expectedPID": 42,
+                 "expectedWindowID": 20, "expectedFrame": frame,
+                 "composerRect": config["composer_rect"], "buttonPoint": config["button_point"]}
+        prep_job = dict(state, action="prepare-visual")
+        focus_id = tid + "-focus"
+        focus_result = {"id": focus_id, "ok": True, "focused": True,
+                        "alreadySelected": False, "source": "search"}
+        focus_job = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+                     "expectedPID": 42, "expectedWindowID": 20, "expectedFrame": frame,
+                     "conversationListRect": {"x": 1, "y": 60, "width": 200, "height": 200},
+                     "searchPoint": {"x": 20, "y": 30}}
+        if modern:
+            state.update(targetKind="group", focusEvidenceID=focus_id)
+            prep_job.update(targetKind="group", focusEvidenceID=focus_id)
+            focus_job["targetKind"] = "group"
+            focus_result.update(targetKind="group", focusEvidenceID=focus_id, category="group-chats")
+            driver.private_create(ui / (focus_id + ".focus-evidence.json"), {
+                "id": focus_id, "targetGroup": config["target_group"], "targetKind": "group",
+                "expectedPID": 42, "expectedWindowID": 20, "expectedFrame": frame,
+                "source": "search", "category": "group-chats", "selectedAt": 1234.5})
+        driver.private_create(ui / (tid + ".client-result.json"), report)
+        driver.private_create(ui / (tid + ".prepare-visual.job.json"), prep_job)
+        driver.private_create(ui / (tid + ".prepare-visual.result.json"),
+                              {"id": tid, "ok": False, "error": result_error,
+                               "permissions": {"accessibility": True, "screenRecording": True,
+                                               "postEvents": True}})
+        driver.private_create(ui / (tid + ".visual-state.json"), state)
+        for suffix, action in (("-inspect", "inspect"), ("-focus", "focus-group")):
+            prefix = tid + suffix
+            driver.private_create(ui / (prefix + "." + action + ".job.json"),
+                                  focus_job if action == "focus-group" else {"id": prefix, "action": action})
+            driver.private_create(ui / (prefix + ".result.json"),
+                                  focus_result if action == "focus-group" else {"id": prefix, "ok": True})
+        return request, config, tid
+
+    def test_unsent_proof_requires_exact_prepare_failure_and_rejects_replay(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_unsent_artifacts(root)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                proof = driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+            self.assertTrue(Path(proof).is_file())
+            self.assertEqual(driver.private_read(Path(proof))["prior_focus_mode"], "legacy")
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+                 self.assertRaisesRegex(driver.Refused, "already exists"):
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+            self.assertEqual(Path(proof).name, tid + ".recovery-proof-to-2.json")
+
+    def test_unsent_proof_accepts_complete_kind_aware_history_and_rejects_partial_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, _ = self._prior_unsent_artifacts(root, modern=True)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                proof = driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3,
+                                            persist=False)
+            self.assertEqual(proof["prior_focus_mode"], "kind-aware")
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_unsent_artifacts(root, modern=True)
+            evidence_path = config["ui_dir"] / (tid + "-focus.focus-evidence.json")
+            evidence = driver.private_read(evidence_path)
+            evidence["category"] = "contacts"
+            driver.private_update(evidence_path, evidence)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+                 self.assertRaisesRegex(driver.Refused, "focus evidence"):
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3,
+                                    persist=False)
+
+    def test_unsent_proof_rejects_submit_markers_late_results_live_helper_and_mismatches(self):
+        mutations = ("marker", "missing_result", "live", "wrong_text", "wrong_target", "wrong_stage")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root:
+                request, config, tid = self._prior_unsent_artifacts(root)
+                ui = config["ui_dir"]
+                if mutation == "marker":
+                    driver.private_create(ui / (tid + ".submit-attempted.json"), {"id": tid})
+                elif mutation == "missing_result":
+                    (ui / (tid + ".prepare-visual.result.json")).unlink()
+                elif mutation == "wrong_text":
+                    path = ui / (tid + ".visual-state.json")
+                    value = driver.private_read(path)
+                    value["text"] = "different"
+                    driver.private_update(path, value)
+                elif mutation == "wrong_target":
+                    path = ui / (tid + ".prepare-visual.job.json")
+                    value = driver.private_read(path)
+                    value["targetGroup"] = "another conversation"
+                    driver.private_update(path, value)
+                elif mutation == "wrong_stage":
+                    path = ui / (tid + ".client-result.json")
+                    value = driver.private_read(path)
+                    value["stage"] = "prepared"
+                    driver.private_update(path, value)
+                recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+                with mock.patch.object(driver, "_helper_is_live", return_value=(mutation == "live")), \
+                     self.assertRaises(driver.Refused):
+                    driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+        with tempfile.TemporaryDirectory() as root:
+            request, config, _ = self._prior_unsent_artifacts(root)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1, talker="other@chatroom")
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+                 self.assertRaisesRegex(driver.Refused, "binding mismatch"):
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+
+    def test_installed_sender_reports_recovery_capability_without_configuration(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--recovery-capabilities"],
+                                capture_output=True, text=True, check=True, timeout=5)
+        self.assertEqual(json.loads(result.stdout), {"protocol_version": 1,
+                         "recovery_protocol_version": 1, "pre_submit_proof_required": True})
+
+    def test_recovery_preflight_is_read_only_and_uses_shared_desktop_lock(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_unsent_artifacts(root)
+            lock_path = config["ui_dir"] / "sender.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.close(fd)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            before = {path.name for path in config["ui_dir"].iterdir()}
+            with mock.patch.object(driver, "status", return_value=11), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False):
+                result = driver.recovery_preflight(recovery, config)
+            self.assertEqual(result, {"protocol_version": 1, "recovery_protocol_version": 1,
+                                      "unsent_proven": True})
+            after = {path.name for path in config["ui_dir"].iterdir()}
+            self.assertEqual(after, before)
+            self.assertFalse((config["ui_dir"] / (tid + ".recovery-proof-to-2.json")).exists())
+            with mock.patch.object(driver, "status", return_value=11), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False):
+                fd = os.open(lock_path, os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    with self.assertRaisesRegex(driver.Refused, "sender busy"):
+                        driver.recovery_preflight(recovery, config)
+                finally:
+                    os.close(fd)
 
     def test_inspect_requires_one_calibrated_window_and_permissions(self):
         config = {"expected_pid": 42, "window_size": {"width": 900, "height": 650}}
@@ -222,8 +379,20 @@ class SenderTests(unittest.TestCase):
             result = {"inspect": inspect, "focus-group": {"focused": True},
                       "prepare-visual": {"prepared": True}, "submit-visual": {"submitted": True}}
             actions = []
-            def fake_bridge(_cfg, _tid, action, _command, _deadline, _seconds):
+            commands = {}
+            def fake_bridge(_cfg, _tid, action, command, _deadline, _seconds):
                 actions.append(action)
+                commands[action] = command
+                if action == "focus-group":
+                    driver.private_create(ui / (_tid + ".focus-evidence.json"), {
+                        "id": _tid, "targetGroup": command["targetGroup"],
+                        "targetKind": command["targetKind"], "expectedPID": command["expectedPID"],
+                        "expectedWindowID": command["expectedWindowID"],
+                        "expectedFrame": command["expectedFrame"], "source": "search",
+                        "category": "group-chats", "selectedAt": 1234.5})
+                    return {"focused": True, "alreadySelected": False, "source": "search",
+                            "targetKind": command["targetKind"], "focusEvidenceID": _tid,
+                            "category": "group-chats"}
                 return result[action]
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
                  mock.patch.object(driver, "verify_target"), \
@@ -234,6 +403,10 @@ class SenderTests(unittest.TestCase):
                 outcome = driver.run(self.request, config)
             self.assertEqual(outcome["status"], "ui_observed")
             self.assertEqual(actions, ["inspect", "focus-group", "prepare-visual", "submit-visual"])
+            self.assertEqual(commands["focus-group"]["targetKind"], "group")
+            self.assertEqual(commands["prepare-visual"]["targetKind"], "group")
+            self.assertEqual(commands["submit-visual"]["targetKind"], "group")
+            self.assertEqual(commands["prepare-visual"]["focusEvidenceID"], commands["submit-visual"]["focusEvidenceID"])
             report = driver.private_read(Path(outcome["evidence"]))
             self.assertEqual(report["stage"], "local_outgoing_observed")
             self.assertGreaterEqual(report["ui_submit_seconds"], 0)
@@ -245,6 +418,7 @@ class SenderTests(unittest.TestCase):
             ui = Path(root)
             ui.chmod(0o700)
             config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_pid=42,
+                          conversation_kind="group",
                           window_size={"width": 880, "height": 640},
                           conversation_list_rect={"x": 60, "y": 55, "width": 240, "height": 500},
                           search_point={"x": 155, "y": 28})
@@ -252,20 +426,31 @@ class SenderTests(unittest.TestCase):
                        "session": {"onConsole": True, "locked": False},
                        "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}}
             actions = []
-            def fake_bridge(_cfg, _tid, action, _command, _deadline, _seconds):
+            def fake_bridge(_cfg, _tid, action, command, _deadline, _seconds):
                 actions.append(action)
                 if action == "inspect":
                     return inspect
                 if action == "focus-group":
                     self.assertTrue((ui / "sender.lock").exists())
-                    return {"focused": True, "alreadySelected": False, "source": "search"}
+                    driver.private_create(ui / (_tid + ".focus-evidence.json"), {
+                        "id": _tid, "targetGroup": command["targetGroup"],
+                        "targetKind": command["targetKind"], "expectedPID": command["expectedPID"],
+                        "expectedWindowID": command["expectedWindowID"],
+                        "expectedFrame": command["expectedFrame"], "source": "search",
+                        "category": "group-chats", "selectedAt": 1234.5})
+                    return {"focused": True, "alreadySelected": False, "source": "search",
+                            "targetKind": command["targetKind"], "focusEvidenceID": _tid,
+                            "category": "group-chats"}
                 self.fail("focus-only called a sending action")
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
                  mock.patch.object(driver, "verify_target"), \
                  mock.patch.object(driver, "status", return_value=0) as check_status, \
                  mock.patch.object(driver, "call", return_value=""):
                 result = driver.focus_only(config)
-            self.assertEqual(result, {"focused": True, "already_selected": False, "source": "search"})
+            self.assertRegex(result["focus_evidence_id"], r"^focus-[a-f0-9]{32}$")
+            self.assertEqual({key: result[key] for key in ("focused", "already_selected", "source", "target_kind", "category")},
+                             {"focused": True, "already_selected": False, "source": "search",
+                              "target_kind": "group", "category": "group-chats"})
             self.assertEqual(actions, ["inspect", "focus-group"])
             check_status.assert_called_once()
             self.assertFalse(list(ui.glob("*.client-result.json")))
@@ -290,6 +475,43 @@ class SenderTests(unittest.TestCase):
                     driver.focus_only(config)
             self.assertEqual(actions, ["inspect"])
             activate.assert_not_called()
+
+    def test_private_visual_command_binds_contact_category_and_focus_evidence(self):
+        config = dict(self.config, binding=dict(self.binding, talker="friend-wxid"),
+                      target_name="Friend", target_group="Friend", conversation_kind="private",
+                      expected_pid=42, composer_rect={"x": 400, "y": 500, "width": 300, "height": 50},
+                      button_point={"x": 800, "y": 570})
+        command = driver._prepare_command(self.request, config, 20,
+                                          {"x": 0, "y": 0, "width": 900, "height": 650},
+                                          "send-focus")
+        self.assertEqual(command["targetKind"], "private")
+        self.assertEqual(command["focusEvidenceID"], "send-focus")
+
+    def test_focus_category_contract_matches_kind_and_saved_evidence(self):
+        cases = (("contacts", "private", True), ("group-chats", "group", True),
+                 ("most-used", "private", True), ("most-used", "group", True),
+                 ("contacts", "group", False), ("group-chats", "private", False),
+                 ("other", "group", False))
+        for category, kind, accepted in cases:
+            with self.subTest(category=category, kind=kind), tempfile.TemporaryDirectory() as root:
+                ui = Path(root)
+                ui.chmod(0o700)
+                config = {"ui_dir": ui, "target_group": "Contact or group", "conversation_kind": kind,
+                          "expected_pid": 42}
+                focus_id = "focus-contract"
+                frame = {"x": 0, "y": 0, "width": 900, "height": 650}
+                driver.private_create(ui / (focus_id + ".focus-evidence.json"), {
+                    "id": focus_id, "targetGroup": config["target_group"], "targetKind": kind,
+                    "expectedPID": 42, "expectedWindowID": 20, "expectedFrame": frame,
+                    "source": "search", "category": category, "selectedAt": 1234.5})
+                result = {"focused": True, "alreadySelected": False, "source": "search",
+                          "targetKind": kind, "focusEvidenceID": focus_id, "category": category}
+                if accepted:
+                    self.assertEqual(driver.focus_result_ok(result, config, focus_id, 20, frame)["category"],
+                                     category)
+                else:
+                    with self.assertRaises(driver.Uncertain):
+                        driver.focus_result_ok(result, config, focus_id, 20, frame)
 
     def test_focus_cli_does_not_read_stdin_and_returns_nonzero_on_failure(self):
         class ForbiddenInput:

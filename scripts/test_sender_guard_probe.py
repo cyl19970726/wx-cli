@@ -74,7 +74,7 @@ class ProbeTests(unittest.TestCase):
                                   "account": "account", "talker": "group@chatroom", "self_wxid": "self"},
                       "ui_dir": ui, "expected_pid": 42,
                       "window_size": {"width": 880, "height": 640},
-                      "target_group": "Synthetic Group", "expected_draft": "",
+                      "target_group": "Synthetic Group", "conversation_kind": "group", "expected_draft": "",
                       "composer_rect": {}, "button_point": {},
                       "conversation_list_rect": {}, "search_point": {}}
             inspected = {"weChatPID": 42, "windows": [{"id": 2,
@@ -82,10 +82,21 @@ class ProbeTests(unittest.TestCase):
                          "session": {"onConsole": True, "locked": False},
                          "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}}
             actions = []
-            def bridge(_cfg, _tid, action, _command, _deadline, _seconds):
+            commands = {}
+            def bridge(_cfg, _tid, action, command, _deadline, _seconds):
                 actions.append(action)
+                commands[action] = command
                 if action == "inspect": return inspected
-                if action == "focus-group": return {"focused": True}
+                if action == "focus-group":
+                    sender.private_create(ui / (_tid + ".focus-evidence.json"), {
+                        "id": _tid, "targetGroup": command["targetGroup"],
+                        "targetKind": command["targetKind"], "expectedPID": command["expectedPID"],
+                        "expectedWindowID": command["expectedWindowID"],
+                        "expectedFrame": command["expectedFrame"], "source": "search",
+                        "category": "group-chats", "selectedAt": 1234.5})
+                    return {"focused": True, "alreadySelected": False, "source": "search",
+                            "targetKind": command["targetKind"], "focusEvidenceID": _tid,
+                            "category": "group-chats"}
                 if action == "prepare-visual": return {"prepared": True}
                 self.fail("read failure allowed submit or another UI action")
             with mock.patch.object(sender, "status", return_value=0), \
@@ -96,6 +107,9 @@ class ProbeTests(unittest.TestCase):
                 outcome = sender.run(request, config)
             self.assertEqual(outcome["status"], "indeterminate")
             self.assertEqual(actions, ["inspect", "focus-group", "prepare-visual"])
+            self.assertEqual(commands["focus-group"]["targetKind"], "group")
+            self.assertEqual(commands["prepare-visual"]["targetKind"], "group")
+            self.assertTrue(commands["prepare-visual"]["focusEvidenceID"].endswith("-focus"))
             report = sender.private_read(Path(outcome["evidence"]))
             self.assertEqual(report["stage"], "prepared")
             self.assertNotIn("ui_submit_seconds", report)

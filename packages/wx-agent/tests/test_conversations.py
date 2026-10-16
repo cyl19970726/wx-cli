@@ -1,4 +1,6 @@
 """Synthetic conversation registry and guarded outbox tests."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -27,6 +29,7 @@ class FakeCLI:
         self.events = {}
         self.synced = []
         self.sent = []
+        self.recoveries = []
         self.on_queue = None
 
     def __call__(self, argv, data=None, timeout=60, limit=None):
@@ -89,7 +92,15 @@ class FakeCLI:
         if action == "send":
             self.sent.append((state, rid))
             box[rid]["status"] = "ui_observed"
+            box[rid]["attempt_number"] = 1
             return json.dumps(box[rid])
+        if action == "recover-unsent":
+            expected = int(argv[argv.index("--expected-attempt") + 1])
+            self.recoveries.append((state, rid, expected, argv[argv.index("--driver") + 1]))
+            box[rid]["attempt_number"] = expected + 1
+            box[rid]["status"] = "ui_observed"
+            return json.dumps({"request_id": rid, "attempt_number": expected + 1,
+                               "status": "ui_observed"})
         raise AssertionError(argv)
 
 
@@ -241,6 +252,72 @@ class ConversationTests(unittest.TestCase):
         self.fake.events[entry["state_dir"]][0]["direction"] = "outgoing"
         with self.assertRaisesRegex(conv.ConversationError, "not an incoming"):
             conv.reply(self.settings, 1, "different")
+
+    def test_recover_unsent_send_requires_stable_conversation_and_reuses_exact_intent(self):
+        self.choose(2)
+        entry = conv.registry(self.settings)["entries"][self.fake.metadata[2]["conversation_id"]]
+        state = entry["state_dir"]
+        self.fake.outboxes[state] = {"original-request": {"request_id": "original-request",
+            "text": "exact original text", "status": "indeterminate", "attempt_number": 1}}
+        result = conv.recover_unsent_send(self.settings, "original-request", 1,
+                                          entry["conversation_id"])
+        self.assertEqual(result, {"request_id": "original-request", "attempt_number": 2,
+                                  "status": "ui_observed", "already_completed": False})
+        self.assertEqual(len(self.fake.recoveries), 1)
+        self.assertEqual(self.fake.recoveries[0][:3], (state, "original-request", 1))
+        self.assertEqual(self.fake.sent, [])
+        self.assertEqual(self.fake.outboxes[state]["original-request"]["text"], "exact original text")
+
+    def test_recovery_rejects_terminal_or_stale_attempt_without_calling_rust(self):
+        self.choose(2)
+        entry = conv.registry(self.settings)["entries"][self.fake.metadata[2]["conversation_id"]]
+        state = entry["state_dir"]
+        self.fake.outboxes[state] = {"original-request": {"request_id": "original-request",
+            "text": "original", "status": "ui_observed", "attempt_number": 1}}
+        with self.assertRaisesRegex(conv.ConversationError, "failed or indeterminate"):
+            conv.recover_unsent_send(self.settings, "original-request", 1, entry["conversation_id"])
+        self.fake.outboxes[state]["original-request"].update(status="failed", attempt_number=2)
+        with self.assertRaisesRegex(conv.ConversationError, "differs from the requested recovery"):
+            conv.recover_unsent_send(self.settings, "original-request", 1, entry["conversation_id"])
+        self.assertEqual(self.fake.recoveries, [])
+
+    def test_recovery_cli_requires_stable_conversation_id(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as missing:
+            conv.main(["--config", "/synthetic/config.json", "recover-unsent-send",
+                       "--request-id", "original-request", "--expected-attempt", "1"])
+        self.assertEqual(missing.exception.code, 2)
+        self.assertIn("--id", errors.getvalue())
+        self.assertIn("required", errors.getvalue())
+
+    def test_imported_controller_recovery_uses_retained_lease_without_coordinator(self):
+        metadata = self.fake.metadata[0]
+        state = self.registry / "imported-controller"
+        state.mkdir(mode=0o700)
+        binding = {"channel_id": "imported-channel", "session_id": "imported-session",
+                   "account": self.settings["account"], "talker": metadata["talker"],
+                   "source": self.settings["source"], "encrypted_snapshot": True,
+                   "self_wxid": "wxid_self"}
+        self.fake.channels[str(state)] = binding
+        config_path = self.registry / "imported-controller.json"
+        controller = {"state_dir": str(state), "wx_cli": self.settings["wx_cli"]}
+        self.settings["controller_configs"] = [str(config_path)]
+        with mock.patch.object(conv, "controllers", return_value=[(config_path, controller, binding)]), \
+             mock.patch.object(conv.ctl, "config", return_value=controller):
+            conv.select(self.settings, metadata["conversation_id"])
+            entry = conv.registry(self.settings)["entries"][metadata["conversation_id"]]
+            request_id = "stable-reply"
+            lease = {"version": 1, "phase": "active", "pending": {
+                "cursor": 8, "request_id": request_id, "text": "same text"}}
+            write_private(state / conv.interactive.LEASE_NAME, lease)
+            self.fake.outboxes[str(state)] = {request_id: {"request_id": request_id, "text": "same text",
+                "status": "failed", "attempt_number": 1}}
+            with mock.patch.object(conv, "coordinated", side_effect=AssertionError("retakeover")), \
+                 mock.patch.object(conv.interactive, "recover_unsent_reply",
+                                   return_value={"request_id": request_id, "status": "ui_observed"}) as recover:
+                result = conv.recover_unsent_send(self.settings, request_id, 1, entry["conversation_id"])
+        self.assertEqual(result["request_id"], request_id)
+        recover.assert_called_once_with(controller, 8, 1)
 
     def test_controller_takeover_restores_only_acquired_lease(self):
         config_one = {"state_dir": str(self.registry / "controller-one")}
