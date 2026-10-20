@@ -91,7 +91,7 @@ request = json.load(sys.stdin)
 assert request['version'] == 1
 d['last_request'] = request
 p.write_text(json.dumps(d))
-print(json.dumps({'text':'reply to '+str(request['event']['server_id'])}))
+print(json.dumps({'text':d.get('agent_text','reply to '+str(request['event']['server_id']))}))
 '''
 
 
@@ -225,6 +225,16 @@ class RunnerTests(unittest.TestCase):
         self.save()
         self.run_agent(start=None,okay=False)
         self.assertEqual((self.data["acked"],self.data["sends"]),(0,0))
+
+    def test_agent_terminal_line_break_stops_before_pending_or_outbox(self):
+        self.data["events"] = [event(1, 10)]
+        self.data["agent_text"] = "中文 😊\n第二行\n"
+        self.save()
+        self.run_agent(okay=False)
+        self.assertEqual((self.data["acked"], self.data["sends"]), (0, 0))
+        self.assertEqual(self.data["outbox"], {})
+        state = channel_agent.load(self.state / channel_agent.STATE_NAME)
+        self.assertIsNone(state["pending"])
 
     def test_indeterminate_send_never_replayed(self):
         self.data["events"] = [event(1,10)]

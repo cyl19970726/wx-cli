@@ -463,6 +463,8 @@ class Runner:
         text = response.get("text")
         if set(response) != {"text"} or not isinstance(text, str) or not text.strip() or "\x00" in text or len(text.encode()) > MAX_REPLY:
             raise RunnerError("agent must return nonempty bounded text or skip")
+        if text.endswith(("\r", "\n")):
+            raise RunnerError("agent text has a trailing line break")
         state["pending"] = {"cursor": cursor, "server_id": server_id,
                             "request_id": request_id, "text": text, "phase": "prepared"}
         save(self.state_path, state)

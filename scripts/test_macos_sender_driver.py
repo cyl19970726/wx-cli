@@ -140,9 +140,12 @@ class SenderTests(unittest.TestCase):
                 driver.request_ok(bad, self.config)
 
     def test_reject_invalid_text(self):
-        for text in ("", " \n", "bad\x00text", "x" * 2001):
+        for text in ("", " \n", "bad\x00text", "x" * 2001,
+                     "你好 😊\n第二行\n", "你好 😊\n第二行\r\n"):
             with self.subTest(text=repr(text)[:15]), self.assertRaises(driver.Refused):
                 driver.request_ok(dict(self.request, text=text), self.config)
+        self.assertRegex(driver.request_ok(dict(self.request, text="你好 😊\n第二行"), self.config),
+                         r"^send-[0-9a-f]{48}$")
 
     def test_generic_transaction_is_scoped_to_conversation(self):
         first = dict(self.config, target_name="Contact A")
@@ -396,6 +399,8 @@ class SenderTests(unittest.TestCase):
             self.assertFalse(driver.matching_event(altered, self.request, "wxid-self", 10))
         self.assertFalse(driver.matching_event(dict(event, message=dict(event["message"], sender="other")), self.request, "wxid-self", 10))
         self.assertFalse(driver.matching_event(dict(event, message=dict(event["message"], content={"Text": "other"})), self.request, "wxid-self", 10))
+        trailing = dict(self.request, text="Hello 😊\n")
+        self.assertFalse(driver.matching_event(event, trailing, "wxid-self", 10))
 
     def test_observation_retries_transient_snapshot_failure_without_resend(self):
         event = {"cursor": 18, "kind": "message_observed", "channel_id": "channel-one",

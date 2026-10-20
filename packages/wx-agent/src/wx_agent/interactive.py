@@ -348,6 +348,8 @@ def takeover(settings, wait_seconds=15):
 def reply(settings, cursor, text):
     _check(isinstance(text, str) and text.strip() and "\x00" not in text
            and len(text.encode("utf-8")) <= runner.MAX_REPLY, "text", "reply text must be nonempty and at most 64 KiB")
+    _check(not text.endswith(("\r", "\n")), "text",
+           "trailing line break is not supported; remove it from message input")
     state_dir = Path(settings["state_dir"])
     with _lock(state_dir, ctl.LOCK_NAME), _lock(state_dir, runner.LOCK_NAME, blocking=False):
         status = _status(settings)

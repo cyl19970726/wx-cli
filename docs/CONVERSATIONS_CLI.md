@@ -2,7 +2,7 @@
 
 `wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。已配置的单群 controller 可以导入复用，涉及它时 CLI 会协调原 writer 并在完成后交还。当前不提供多常驻 Agent 调度或 MCP。
 
-**现场状态（2026-10-21）：用户完成认证后的仅聚焦试验因搜索分类歧义停止，候选运行时已回退，状态完整保留。原意图保留四个 attempt，第四次 focus 失败不可恢复。私聊 focus 和三页只读读取曾通过，完整往返尚未验收。** 激活、草稿、中文按钮及分类边界修复已通过离线矩阵；新的分类边界候选尚未安装或现场验收；当前版本、停止条件和日常检查见[最新验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)，历史异常见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。v4 原群请求仍不得重试；每次桌面写操作前核对当前权限和验证门槛。
+**已完成基线：** 2026-10-20 的 `d8f4910` 已完成授权私聊→测试群的有界往返及独立收件确认；末尾换行导致的一条私聊 `indeterminate` 原记录保留，不可重发。当前源码拒绝终止 LF/CR。**后续候选：** 10 月 21 日新增激活/草稿/中文按钮/搜索分类修复，离线通过；最近聚焦试验未通过并已回退，新分类补丁尚待现场验收。见[验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)与[历史记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
 ## 配置一次
 
@@ -79,6 +79,8 @@ chmod 700 /ABS/private/wx-agent/conversations
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json send \
   --request-id synthetic-message-001 --text-stdin < /ABS/private/wx-agent/message.txt
 ```
+
+本入口只有 `--text-stdin`；`< 文件` 是 shell 重定向，不是 `--text-file` 参数，也没有 `--text` 正文参数。本分支源码将标准输入的 UTF-8 正文按原样绑定 request ID，不做 `strip` 或换行归一化。正文内部换行、中文和 emoji 保留；若正文以 LF、CR 或 CRLF 结束，会在入队和桌面操作前拒绝，并提示去掉末尾换行。微信可能不保留这个末尾字符，继续发送会使严格出站核验无法确认实际已发消息。该修复尚未装入现场运行时；文件生成工具若自动附加换行，先检查其内容。不要为已有失败或不确定请求改写正文或换 ID 重试。
 
 同一 request ID 和相同正文只对应一个意图；正文不同会冲突。已有 `attempt_recorded`、`failed`、`indeterminate` 或其他未决状态时，命令只报告未决，不会再次点击。保留原 request ID 并核对 outbox 与授权接收端，禁止自动重试或生成替代 ID。
 

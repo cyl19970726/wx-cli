@@ -219,6 +219,42 @@ class ConversationTests(unittest.TestCase):
             conv.send(self.settings, "same", "hello")
         self.assertEqual(len(self.fake.sent), 1)
 
+    def test_stdin_terminal_newline_refused_before_queue_and_multiline_stays_exact(self):
+        self.choose(2)
+        state = conv.registry(self.settings)["entries"][self.fake.metadata[2]["conversation_id"]]["state_dir"]
+
+        def invoke(raw):
+            stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.object(conv.sys, "stdin", stdin), \
+                 mock.patch.object(conv, "config", return_value=self.settings), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = conv.main(["--config", "/synthetic/config.json", "send",
+                                  "--request-id", "same-multiline", "--text-stdin"])
+            return code, stdout.getvalue(), stderr.getvalue()
+
+        for raw in ("你好 😊\n第二行\n".encode(), "你好 😊\n第二行\r\n".encode()):
+            with mock.patch.object(conv, "coordinated", side_effect=AssertionError("invalid text reached coordination")):
+                code, _, stderr = invoke(raw)
+            self.assertEqual(code, 1)
+            self.assertIn("trailing line break", stderr)
+            self.assertNotIn("same-multiline", self.fake.outboxes.get(state, {}))
+            self.assertEqual(self.fake.sent, [])
+
+        exact = "你好 😊\n第二行".encode()
+        code, stdout, _ = invoke(exact)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout)["status"], "ui_observed")
+        self.assertEqual(self.fake.outboxes[state]["same-multiline"]["text"], exact.decode())
+        code, stdout, _ = invoke(exact)
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(stdout)["already_completed"])
+        self.assertEqual(len(self.fake.sent), 1)
+        code, _, stderr = invoke("你好 😊\n不同正文".encode())
+        self.assertEqual(code, 1)
+        self.assertIn("different text", stderr)
+        self.assertEqual(len(self.fake.sent), 1)
+
     def test_selection_change_after_queue_refuses_desktop_effect(self):
         self.choose()
         def change_selection():

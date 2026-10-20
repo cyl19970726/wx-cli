@@ -1,8 +1,6 @@
 # Conversation reliability candidate · 2026-10-17
 
-For the later installed-version check and live acceptance outcome, see the
-[2026-10-20 acceptance record](CONVERSATIONS_ACCEPTANCE_20261020.md). The deployment
-statements below describe the original 2026-10-17 proposal and preparation.
+> Historical preparation record. Candidate d8f4910 was subsequently deployed and completed a bounded private-to-group round trip on 2026-10-20 with independent receipt. Its private terminal-LF mismatch retains the original `indeterminate` record; the input guard now rejects terminal LF/CR before queueing. Later native candidates and rollback have separate acceptance status in the [acceptance record](CONVERSATIONS_ACCEPTANCE_20261020.md). The deployment claims below describe the original preparation time.
 
 The private chat → test group → paginated read → reply flow now has additional
 offline regression coverage and a candidate fix based on `bfe335e`. This is a

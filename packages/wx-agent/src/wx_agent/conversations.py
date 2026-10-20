@@ -461,6 +461,7 @@ def send_intent(settings, entry, request_id, text, snapshot=None):
 
 
 def send(settings, request_id, text, id=None):
+    sender.validate_text(text)
     snapshot, entry = selected(settings, id)
     fresh(settings, entry["conversation_id"], entry, unique_name=True)
     with coordinated(settings, entry):

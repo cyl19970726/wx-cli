@@ -104,6 +104,10 @@ def executable(value):
 def validate_text(text):
     if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16000 or len(text) > 2000:
         raise Refused("unsupported message text")
+    # The observed WeChat flow dropped a terminal line break from the bubble.
+    # Refuse it before queueing rather than weakening exact event matching.
+    if text.endswith(("\r", "\n")):
+        raise Refused("trailing line break is not supported; remove it from message input")
     if any((ord(ch) < 32 and ch not in "\t\r\n") or ord(ch) == 127 for ch in text):
         raise Refused("unsupported message control character")
 
