@@ -4,6 +4,7 @@
 A private, explicit WX_SENDER_CONFIG binds one channel, one helper binary and
 one calibrated window. A UI click alone is never reported as ui_observed.
 """
+import errno
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ import re
 import selectors
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,10 @@ from datetime import datetime, timezone
 MAX_INPUT = 70 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 BUDGET = 48.0
+# Native focus performs guarded search setup before its six-second result
+# polling budget, then reconfirms the row and selected header. Allow that whole
+# action to finish; an eight-second wait can orphan a still-running helper.
+FOCUS_SECONDS = 18.0
 
 
 class Refused(Exception):
@@ -99,8 +105,42 @@ def executable(value):
 def validate_text(text):
     if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 16000 or len(text) > 2000:
         raise Refused("unsupported message text")
+    # The observed WeChat flow dropped a terminal line break from the bubble.
+    # Refuse it before queueing rather than weakening exact event matching.
+    if text.endswith(("\r", "\n")):
+        raise Refused("trailing line break is not supported; remove it from message input")
     if any((ord(ch) < 32 and ch not in "\t\r\n") or ord(ch) == 127 for ch in text):
         raise Refused("unsupported message control character")
+
+
+def validate_empty_composer_reference(config):
+    reference = config.get("empty_composer_reference")
+    if reference is None:
+        return
+    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+        raise Refused("invalid empty composer reference")
+    path = abs_path(reference["path"])
+    if path.parent != config["ui_dir"] or path.suffix != ".png":
+        raise Refused("empty composer reference must be a private UI PNG")
+    private(path)
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise Refused("unsafe empty composer reference")
+        raw = stream.read(2 * 1024 * 1024 + 1)
+    rect = config["composer_rect"]
+    if (any(rect[k] != int(rect[k]) for k in ("x", "y", "width", "height"))
+            or rect["width"] <= 0 or rect["height"] <= 0
+            or rect["width"] * rect["height"] > 1048576
+            or len(raw) > 2 * 1024 * 1024 or len(raw) < 24
+            or raw[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            or struct.unpack(">II", raw[16:24]) != (rect["width"], rect["height"])
+            or not isinstance(reference["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", reference["sha256"])
+            or hashlib.sha256(raw).hexdigest() != reference["sha256"]):
+        raise Refused("empty composer reference hash or dimensions differ")
 
 
 def safe_config(config):
@@ -171,6 +211,7 @@ def safe_config(config):
     draft = config.get("expected_draft", "")
     if not isinstance(draft, str) or (draft and (len(draft.encode("utf-8")) > 16000 or len(draft) > 2000)):
         raise Refused("invalid expected draft")
+    validate_empty_composer_reference(config)
     return config
 
 
@@ -192,7 +233,12 @@ def call(argv, deadline, limit=MAX_OUTPUT):
             if remaining <= 0:
                 raise Uncertain("command timeout")
             for key, _ in selector.select(min(remaining, 0.2)):
-                chunk = os.read(key.fileobj.fileno(), min(65536, limit + 1 - len(output)))
+                try:
+                    chunk = os.read(key.fileobj.fileno(), min(65536, limit + 1 - len(output)))
+                except BlockingIOError as exc:
+                    if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        raise
+                    continue
                 if not chunk:
                     selector.unregister(key.fileobj)
                 else:
@@ -287,13 +333,16 @@ def _read_artifact(path):
 
 
 def _prepare_command(request, config, window_id=None, frame=None, focus_id=None):
-    return {"targetGroup": config["target_group"], "expectedDraft": config.get("expected_draft", ""),
+    command = {"targetGroup": config["target_group"], "expectedDraft": config.get("expected_draft", ""),
             "targetKind": config.get("conversation_kind", "group"),
             "focusEvidenceID": focus_id,
             "text": request["text"], "expectedPID": config["expected_pid"],
             "expectedWindowID": window_id if window_id is not None else config.get("expected_window_id"),
             "expectedFrame": frame if frame is not None else config.get("expected_frame"),
             "composerRect": config["composer_rect"], "buttonPoint": config["button_point"]}
+    if config.get("empty_composer_reference") is not None:
+        command["emptyComposerReference"] = config["empty_composer_reference"]
+    return command
 
 
 def focus_result_ok(result, config, focus_id, window_id, frame):
@@ -356,9 +405,12 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
     if (job.get("id") != old_tid or job.get("action") != "prepare-visual"
             or state.get("id") != old_tid or state.get("stage") != "prepare-attempted"):
         raise Refused("prior prepare evidence is inconsistent")
+    prior_pid = job.get("expectedPID")
+    if type(prior_pid) is not int or prior_pid <= 0:
+        raise Refused("prior prepare PID is invalid")
     expected_base = {"targetGroup": config["target_group"],
                      "expectedDraft": config.get("expected_draft", ""),
-                     "text": request.get("text"), "expectedPID": config["expected_pid"],
+                     "text": request.get("text"), "expectedPID": prior_pid,
                      "composerRect": config["composer_rect"],
                      "buttonPoint": config["button_point"]}
     for evidence in (job, state):
@@ -366,8 +418,13 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
             raise Refused("prior attempt text or binding differs")
     if any(state.get(key) != job.get(key) for key in
            ("id", "text", "targetGroup", "expectedDraft", "expectedPID", "expectedWindowID",
-            "expectedFrame", "composerRect", "buttonPoint")):
+            "expectedFrame", "composerRect", "buttonPoint", "emptyComposerReference")):
         raise Refused("prior prepare state differs from its job")
+    # A reviewed upgrade may add calibration to an old attempt. Once an attempt
+    # used a reference, recovery must retain that exact immutable reference.
+    if (job.get("emptyComposerReference") is not None
+            and job["emptyComposerReference"] != config.get("empty_composer_reference")):
+        raise Refused("prior empty composer reference differs")
     # Inspect and focus must be complete, and every launched job must have a terminal result.
     expected_jobs = {old_tid + ".prepare-visual.job.json",
                      old_tid + "-inspect.inspect.job.json",
@@ -388,8 +445,32 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
                 or prior_result.get("id") != prefix or prior_result.get("ok") is not True):
             raise Refused("prior attempt helper stages are inconsistent")
         prior_stages[action] = (prior_job, prior_result)
+    if prior_pid != config["expected_pid"]:
+        # A normal WeChat restart changes the live PID, not the original
+        # attempt. Prove the old PID/window from its own terminal inspect;
+        # the new action still requires fresh inspect/focus for the current PID.
+        inspected = prior_stages["inspect"][1]
+        windows = inspected.get("windows")
+        permissions = inspected.get("permissions")
+        session = inspected.get("session")
+        if (inspected.get("weChatPID") != prior_pid
+                or not isinstance(windows, list) or len(windows) != 1
+                or not isinstance(windows[0], dict)
+                or windows[0].get("id") != job.get("expectedWindowID")
+                or windows[0].get("frame") != job.get("expectedFrame")
+                or not isinstance(permissions, dict)
+                or any(permissions.get(k) is not True for k in
+                       ("accessibility", "screenRecording", "postEvents"))
+                or not isinstance(session, dict) or session.get("onConsole") is not True
+                or session.get("locked") is True):
+            raise Refused("prior inspect does not prove the original PID and window")
     focus_id = old_tid + "-focus"
     focus_job, focus_result = prior_stages["focus-group"]
+    if (focus_job.get("targetGroup") != config["target_group"]
+            or focus_job.get("expectedPID") != prior_pid
+            or focus_job.get("expectedWindowID") != job.get("expectedWindowID")
+            or focus_job.get("expectedFrame") != job.get("expectedFrame")):
+        raise Refused("prior focus request differs from visual transaction")
     focus_evidence_path = ui / (focus_id + ".focus-evidence.json")
     category_fields_present = any(key in item for item in (job, state, focus_job, focus_result)
                                   for key in ("targetKind", "focusEvidenceID", "category"))
@@ -410,7 +491,7 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
         if (evidence.get("id") != focus_id
                 or evidence.get("targetGroup") != config["target_group"]
                 or evidence.get("targetKind") != config.get("conversation_kind", "group")
-                or evidence.get("expectedPID") != config["expected_pid"]
+                or evidence.get("expectedPID") != prior_pid
                 or evidence.get("expectedWindowID") != job.get("expectedWindowID")
                 or evidence.get("expectedFrame") != job.get("expectedFrame")
                 or evidence.get("source") != "search"
@@ -419,11 +500,6 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
                                              config.get("conversation_kind", "group"))
                 or type(evidence.get("selectedAt")) not in (int, float)):
             raise Refused("prior native focus evidence differs from the prepared conversation")
-        if (focus_job.get("targetGroup") != config["target_group"]
-                or focus_job.get("expectedPID") != config["expected_pid"]
-                or focus_job.get("expectedWindowID") != job.get("expectedWindowID")
-                or focus_job.get("expectedFrame") != job.get("expectedFrame")):
-            raise Refused("prior focus request differs from visual transaction")
         prior_focus_mode = "kind-aware"
     else:
         if _exists(focus_evidence_path):
@@ -654,7 +730,7 @@ def observe(config, request, after, deadline, details=None):
 
 def focus_only(config):
     """Select the configured group without reading stdin or touching the outbox."""
-    deadline = time.monotonic() + 18.0
+    deadline = time.monotonic() + BUDGET
     ui = config["ui_dir"]
     lock_path = ui / "sender.lock"
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -664,19 +740,20 @@ def focus_only(config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
+        if _helper_is_live(None, deadline):
+            raise Refused("prior helper process is still live or cannot be inspected")
         status(config, deadline)
         verify_target(config, deadline)
         tid = "focus-" + uuid.uuid4().hex
         inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
         window_id, frame = inspect_ok(inspected, config)
-        call(["/usr/bin/open", "-a", "/Applications/WeChat.app"], deadline, limit=65536)
         command = {"targetGroup": config["target_group"],
                    "targetKind": config.get("conversation_kind", "group"),
                    "expectedPID": config["expected_pid"],
                    "expectedWindowID": window_id, "expectedFrame": frame,
                    "conversationListRect": config["conversation_list_rect"],
                    "searchPoint": config["search_point"]}
-        result = bridge(config, tid, "focus-group", command, deadline, 8.0)
+        result = bridge(config, tid, "focus-group", command, deadline, FOCUS_SECONDS)
         focus_proof = focus_result_ok(result, config, tid, window_id, frame)
         return {"focused": True, "already_selected": False, "source": "search",
                 "target_kind": config.get("conversation_kind", "group"), "focus_evidence_id": tid,
@@ -698,6 +775,8 @@ def run(request, config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
+        if _helper_is_live(None, deadline):
+            raise Refused("prior helper process is still live or cannot be inspected")
         report_path = ui / (tid + ".client-result.json")
         report = {"id": tid, "attempt_number": attempt_number,
                   "request_id": request["request_id"], "stage": "started", "status": "indeterminate",
@@ -717,7 +796,6 @@ def run(request, config):
             window_id, frame = inspect_ok(inspected, config)
             report["stage"] = "inspected"
             private_update(report_path, report)
-            call(["/usr/bin/open", "-a", "/Applications/WeChat.app"], deadline, limit=65536)
             focus_id = tid + "-focus"
             focus_command = {"targetGroup": config["target_group"],
                              "targetKind": config.get("conversation_kind", "group"),
@@ -725,7 +803,7 @@ def run(request, config):
                              "expectedWindowID": window_id, "expectedFrame": frame,
                              "conversationListRect": config["conversation_list_rect"],
                              "searchPoint": config["search_point"]}
-            focused = bridge(config, focus_id, "focus-group", focus_command, deadline, 8.0)
+            focused = bridge(config, focus_id, "focus-group", focus_command, deadline, FOCUS_SECONDS)
             focus_proof = focus_result_ok(focused, config, focus_id, window_id, frame)
             command = _prepare_command(request, config, window_id, frame, focus_id)
             report["target_kind"] = config.get("conversation_kind", "group")

@@ -160,6 +160,8 @@ export WX_SENDER_CONFIG=/ABS/private/wx-agent/sender-config.json
   --cursor 121 --text-stdin < /ABS/private/wx-agent/reply.txt
 ```
 
+输入正文不能以 LF、CR 或 CRLF 结束；文件或 stdin 中多出的末尾换行会在创建发送意图前被拒绝。正文内部换行与空格保持不变。写测试文件时可用不自动附加换行的 `printf`；不要自动删除用户正文中的重要空白。
+
 命令要求 `--cursor` 是下一条可处理的入站文本；若更早还有未处理入站，会以 `earlier_incoming` 拒绝，不发送也不推进。它以源消息 ID 派生稳定 request ID，先持久化发送意图和 attempt，再执行一次桌面动作，最终用比较式确认推进原 consumer。相同游标和相同正文可用于恢复本地完成记录；不同正文会冲突。
 
 若不需要回复，只对已完整阅读且确实处理过的下一条入站标记原因：

@@ -12,6 +12,8 @@ wx-agent chat --config "$CONFIG" select --talker "$EXACT_ROOM_ID"
 wx-agent chat --config "$CONFIG" status
 ```
 
+`--text-stdin` 原样读取标准输入；`< "$PRIVATE_REPLY_FILE"` 是 shell 重定向。正文内部换行保留，末尾 LF、CR 或 CRLF 在创建 pending/outbox 前被拒绝；不会静默裁剪或改写原回复。已有不确定请求仍按原 request ID 和原文保留，不可用修改文件的方式重发。
+
 `groups` 只复制联系人和会话加密库及 WAL，在临时副本中读取群元数据；不读取消息分片。返回 `matches: [{name, talker}]` 和 `match_kind`。多个同名群全部返回，不擅自选第一个。未找到也是成功的空结果，不等于读取失败。
 
 `select` 校验完整群 ID 必须等于配置对应的已有绑定；持久保存选中的频道和配置指纹。选择其他群会报错，不修改绑定或消费位置。这个选择是 CLI 的操作对象；读取不需要让微信窗口保持在该群，发送驱动才会核验并切换桌面群聊。

@@ -193,6 +193,16 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(conflict.exception.details,
                          {"request_id": done["request_id"], "status": "ui_observed"})
 
+    def test_terminal_line_break_refused_before_manual_reply_state(self):
+        self.fake.events = [event(1, 101)]
+        self.taken()
+        before = runner.load(self.state / chat.LEASE_NAME)
+        with self.assertRaisesRegex(chat.ChatError, "trailing line break"):
+            chat.reply(self.settings, 1, "中文 😊\n第二行\n")
+        self.assertEqual(runner.load(self.state / chat.LEASE_NAME), before)
+        self.assertEqual(self.fake.outbox, {})
+        self.assertEqual(self.fake.sends, 0)
+
     def test_recover_unsent_reply_uses_retained_intent_and_acks_only_terminal_result(self):
         self.taken()
         request_id = chat._request_id(self.fake.binding, 101)

@@ -3,7 +3,9 @@ import contextlib
 import io
 import json
 import fcntl
+import hashlib
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +30,98 @@ class SenderTests(unittest.TestCase):
                         "channel_id": "channel-one", "session_id": "session-one",
                         "account": "local-account", "talker": "group@chatroom", "text": "Hello 😊"}
 
+    def test_empty_composer_reference_is_private_pinned_and_geometry_bound(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            path = ui / "empty.png"
+            # The Python boundary checks the pinned PNG header; Swift must also
+            # decode and compare the entire image before accepting any pixels.
+            raw = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 400, 80)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            reference = {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+            config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_pid=42,
+                          composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                          button_point={"x": 800, "y": 610}, empty_composer_reference=reference)
+            driver.validate_empty_composer_reference(config)
+            self.assertEqual(driver._prepare_command(self.request, config)["emptyComposerReference"], reference)
+            self.assertNotIn("emptyComposerReference", driver._prepare_command(
+                self.request, dict(config, empty_composer_reference=None)))
+            for changed in ({"path": str(path), "sha256": "0" * 64},
+                            dict(reference, unexpected=True),
+                            dict(reference, path=str(ui / ".." / path.name)),
+                            dict(reference, path=str(ui.parent / path.name))):
+                with self.subTest(reference=changed), self.assertRaises(driver.Refused):
+                    driver.validate_empty_composer_reference(dict(config, empty_composer_reference=changed))
+            with self.assertRaises(driver.Refused):
+                driver.validate_empty_composer_reference(dict(config, composer_rect={
+                    "x": 320, "y": 500, "width": 401, "height": 80}))
+            path.chmod(0o644)
+            with self.assertRaises(driver.Refused):
+                driver.validate_empty_composer_reference(config)
+            path.chmod(0o600)
+            link = ui / "link.png"
+            link.symlink_to(path)
+            with self.assertRaises(driver.Refused):
+                driver.validate_empty_composer_reference(dict(config, empty_composer_reference=dict(reference, path=str(link))))
+            link.unlink()
+            os.link(path, link)
+            with self.assertRaises(driver.Refused):
+                driver.validate_empty_composer_reference(config)
+
+    def test_recovery_preserves_reference_and_allows_reviewed_addition(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_unsent_artifacts(root, modern=True)
+            reference = {"path": str(Path(root) / "empty.png"), "sha256": "1" * 64}
+            config["empty_composer_reference"] = reference
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                for suffix in (".prepare-visual.job.json", ".visual-state.json"):
+                    path = Path(root) / (tid + suffix)
+                    driver.private_update(path, dict(driver.private_read(path), emptyComposerReference=reference))
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                for replacement in (None, dict(reference, sha256="2" * 64)):
+                    with self.assertRaisesRegex(driver.Refused, "prior empty composer reference differs"):
+                        driver.prove_unsent(recovery, dict(config, empty_composer_reference=replacement),
+                                            2, driver.time.monotonic() + 3, persist=False)
+                job = Path(root) / (tid + ".prepare-visual.job.json")
+                driver.private_update(job, dict(driver.private_read(job), emptyComposerReference=None))
+                with self.assertRaisesRegex(driver.Refused, "prior prepare state differs"):
+                    driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+
+    def test_recovery_after_restart_binds_old_pid_to_its_original_evidence(self):
+        for modern in (False, True):
+            with self.subTest(modern=modern), tempfile.TemporaryDirectory() as root:
+                request, config, tid = self._prior_unsent_artifacts(root, modern=modern)
+                config["expected_pid"] = 43
+                recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+                path = Path(root) / (tid + "-inspect.result.json")
+                original = driver.private_read(path)
+                with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                    with self.assertRaisesRegex(driver.Refused, "prior inspect"):
+                        driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                    inspected = dict(original, weChatPID=42,
+                        windows=[{"id": 20, "frame": {"x": 0, "y": 0, "width": 900, "height": 650}}],
+                        permissions={"accessibility": True, "screenRecording": True, "postEvents": True},
+                        session={"onConsole": True, "locked": False})
+                    driver.private_update(path, inspected)
+                    before = {f.name: f.read_bytes() for f in Path(root).iterdir()}
+                    driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                    self.assertEqual(before, {f.name: f.read_bytes() for f in Path(root).iterdir()})
+                    for changed in (dict(inspected, weChatPID=43), dict(inspected, windows=[]),
+                                    dict(inspected, windows=[{"id": 21, "frame": inspected["windows"][0]["frame"]}]),
+                                    dict(inspected, permissions={}), dict(inspected, session={"onConsole": False})):
+                        driver.private_update(path, changed)
+                        with self.assertRaisesRegex(driver.Refused, "prior inspect"):
+                            driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                    driver.private_update(path, inspected)
+                    focus = Path(root) / (tid + "-focus.focus-group.job.json")
+                    driver.private_update(focus, dict(driver.private_read(focus), expectedPID=43))
+                    with self.assertRaisesRegex(driver.Refused, "prior focus request"):
+                        driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+
     def test_request_binding_and_stable_safe_transaction(self):
         tid = driver.request_ok(self.request, self.config)
         self.assertRegex(tid, r"^send-[0-9a-f]{48}$")
@@ -46,9 +140,12 @@ class SenderTests(unittest.TestCase):
                 driver.request_ok(bad, self.config)
 
     def test_reject_invalid_text(self):
-        for text in ("", " \n", "bad\x00text", "x" * 2001):
+        for text in ("", " \n", "bad\x00text", "x" * 2001,
+                     "你好 😊\n第二行\n", "你好 😊\n第二行\r\n"):
             with self.subTest(text=repr(text)[:15]), self.assertRaises(driver.Refused):
                 driver.request_ok(dict(self.request, text=text), self.config)
+        self.assertRegex(driver.request_ok(dict(self.request, text="你好 😊\n第二行"), self.config),
+                         r"^send-[0-9a-f]{48}$")
 
     def test_generic_transaction_is_scoped_to_conversation(self):
         first = dict(self.config, target_name="Contact A")
@@ -152,6 +249,29 @@ class SenderTests(unittest.TestCase):
             driver.private_create(ui / (prefix + ".result.json"),
                                   focus_result if action == "focus-group" else {"id": prefix, "ok": True})
         return request, config, tid
+
+    def test_prior_helper_blocks_new_desktop_actions_even_after_lock_release(self):
+        # A timed-out helper launched by `open` can outlive its Python driver
+        # and the driver's UI lock. A different request must not overlap it.
+        for listing in ("42 /private/WeChatTestBridge --input /private/prior.job.json",
+                        driver.Refused("process inspection unavailable")):
+            with self.subTest(listing=type(listing).__name__), tempfile.TemporaryDirectory() as root:
+                ui = Path(root)
+                ui.chmod(0o700)
+                config = dict(self.config, ui_dir=ui)
+                driver.private_create(ui / "previous.client-result.json", {"status": "indeterminate"})
+                fd = os.open(ui / "sender.lock", os.O_CREAT | os.O_RDWR, 0o600)
+                os.close(fd)
+                before = {path.name: path.read_bytes() for path in ui.iterdir()}
+                with mock.patch.object(driver, "call", side_effect=(listing if isinstance(listing, Exception)
+                                                                    else None), return_value=listing), \
+                     mock.patch.object(driver, "status", return_value=0), \
+                     mock.patch.object(driver, "bridge") as bridge:
+                    for action in (lambda: driver.focus_only(config), lambda: driver.run(self.request, config)):
+                        with self.assertRaisesRegex(driver.Refused, "prior helper process"):
+                            action()
+                    bridge.assert_not_called()
+                self.assertEqual(before, {path.name: path.read_bytes() for path in ui.iterdir()})
 
     def test_unsent_proof_requires_exact_prepare_failure_and_rejects_replay(self):
         with tempfile.TemporaryDirectory() as root:
@@ -279,6 +399,8 @@ class SenderTests(unittest.TestCase):
             self.assertFalse(driver.matching_event(altered, self.request, "wxid-self", 10))
         self.assertFalse(driver.matching_event(dict(event, message=dict(event["message"], sender="other")), self.request, "wxid-self", 10))
         self.assertFalse(driver.matching_event(dict(event, message=dict(event["message"], content={"Text": "other"})), self.request, "wxid-self", 10))
+        trailing = dict(self.request, text="Hello 😊\n")
+        self.assertFalse(driver.matching_event(event, trailing, "wxid-self", 10))
 
     def test_observation_retries_transient_snapshot_failure_without_resend(self):
         event = {"cursor": 18, "kind": "message_observed", "channel_id": "channel-one",
@@ -361,6 +483,131 @@ class SenderTests(unittest.TestCase):
                 with self.assertRaisesRegex(driver.Uncertain, "^bridge permissions missing$"):
                     driver.bridge({"ui_dir": ui, "helper_app": "/private/bridge.app"}, tid,
                                   "inspect", {}, driver.time.monotonic() + 2, 1)
+
+    def test_slow_focus_completion_or_failure_preserves_single_attempt(self):
+        # Native search has a six-second polling budget *after* search setup.
+        # Exercise the real bridge wait, including a result later than eight
+        # seconds, without operating the desktop or sleeping in real time.
+        for focus_only, focus_ok in ((True, True), (False, True), (True, False), (False, False)):
+            with self.subTest(focus_only=focus_only, focus_ok=focus_ok), tempfile.TemporaryDirectory() as root:
+                ui = Path(root)
+                ui.chmod(0o700)
+                config = dict(self.config, ui_dir=ui, target_group="Synthetic Group",
+                              helper_app="/private/bridge.app", expected_pid=42,
+                              window_size={"width": 880, "height": 640},
+                              composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                              button_point={"x": 800, "y": 610},
+                              conversation_list_rect={"x": 60, "y": 55, "width": 240, "height": 500},
+                              search_point={"x": 155, "y": 28})
+                frame = {"x": 0, "y": 0, "width": 880, "height": 640}
+                clock = [0.0]
+                pending = []
+                actions = []
+
+                def advance(seconds):
+                    clock[0] += seconds
+                    if pending and clock[0] >= pending[0][0]:
+                        _, tid, command = pending.pop()
+                        if not focus_ok:
+                            driver.private_create(ui / (tid + ".result.json"), {
+                                "id": tid, "ok": False, "error": "Selected chat header is not exact target and kind"})
+                            return
+                        evidence = {key: command[key] for key in
+                                    ("targetGroup", "targetKind", "expectedPID", "expectedWindowID", "expectedFrame")}
+                        evidence.update(id=tid, source="search", category="group-chats", selectedAt=1234.5)
+                        driver.private_create(ui / (tid + ".focus-evidence.json"), evidence)
+                        driver.private_create(ui / (tid + ".result.json"), {
+                            "id": tid, "ok": True, "focused": True, "alreadySelected": False,
+                            "source": "search", "category": "group-chats", "targetKind": "group",
+                            "focusEvidenceID": tid})
+
+                def fake_open(argv, _deadline, limit=driver.MAX_OUTPUT):
+                    self.assertNotEqual(argv[:2], ["/usr/bin/open", "-a"],
+                                        "focus must not reopen the WeChat app")
+                    if "--input" not in argv:
+                        return ""
+                    command = driver.private_read(Path(argv[-1]))
+                    tid, action = command["id"], command["action"]
+                    actions.append(action)
+                    result = {"id": tid, "ok": True}
+                    suffix = ".result.json"
+                    if action == "inspect":
+                        result.update(weChatPID=42, windows=[{"id": 20, "frame": frame}],
+                                      session={"onConsole": True, "locked": False},
+                                      permissions={"accessibility": True, "screenRecording": True,
+                                                   "postEvents": True})
+                    elif action == "focus-group":
+                        pending.append((clock[0] + 9, tid, command))
+                        return ""
+                    else:
+                        self.assertFalse(pending)
+                        result["prepared" if action == "prepare-visual" else "submitted"] = True
+                        suffix = "." + action + ".result.json"
+                    driver.private_create(ui / (tid + suffix), result)
+                    return ""
+
+                with mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                     mock.patch.object(driver.time, "sleep", side_effect=advance), \
+                     mock.patch.object(driver, "call", side_effect=fake_open), \
+                     mock.patch.object(driver, "status", side_effect=lambda *_: (advance(4), 0)[1]), \
+                     mock.patch.object(driver, "verify_target", side_effect=lambda *_: advance(5)), \
+                     mock.patch.object(driver, "channel", return_value="{}"), \
+                     mock.patch.object(driver, "observe", return_value=1):
+                    if focus_only:
+                        if focus_ok:
+                            self.assertTrue(driver.focus_only(config)["focused"])
+                        else:
+                            with self.assertRaisesRegex(driver.Uncertain, "header mismatch"):
+                                driver.focus_only(config)
+                        self.assertEqual(actions, ["inspect", "focus-group"])
+                    else:
+                        result = driver.run(self.request, config)
+                        self.assertEqual(result["status"], "ui_observed" if focus_ok else "indeterminate")
+                        self.assertEqual(actions, ["inspect", "focus-group"] +
+                                         (["prepare-visual", "submit-visual"] if focus_ok else []))
+                        artifacts = {path.name: path.read_bytes() for path in ui.iterdir()}
+                        with self.assertRaisesRegex(driver.Uncertain, "already attempted"):
+                            driver.run(self.request, config)
+                        self.assertEqual(artifacts, {path.name: path.read_bytes() for path in ui.iterdir()})
+
+    def test_activation_refusal_stops_before_draft_and_keeps_original_attempt(self):
+        for focus_only in (True, False):
+            with self.subTest(focus_only=focus_only), tempfile.TemporaryDirectory() as root:
+                ui = Path(root)
+                ui.chmod(0o700)
+                config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_pid=42,
+                              window_size={"width": 880, "height": 640},
+                              conversation_list_rect={"x": 60, "y": 55, "width": 240, "height": 500},
+                              search_point={"x": 155, "y": 28})
+                frame = {"x": 10, "y": 20, "width": 880, "height": 640}
+                actions = []
+                def fake_bridge(_config, _tid, action, command, _deadline, _seconds):
+                    actions.append(action)
+                    if action == "inspect":
+                        return {"weChatPID": 42, "windows": [{"id": 20, "frame": frame}],
+                                "session": {"onConsole": True, "locked": False},
+                                "permissions": {"accessibility": True, "screenRecording": True,
+                                                "postEvents": True}}
+                    self.assertEqual(action, "focus-group")
+                    self.assertEqual(command["expectedPID"], 42)
+                    self.assertEqual(command["expectedWindowID"], 20)
+                    self.assertEqual(command["expectedFrame"], frame)
+                    raise driver.Uncertain("WeChat focus changed")
+                with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+                     mock.patch.object(driver, "status", return_value=0), \
+                     mock.patch.object(driver, "verify_target"), \
+                     mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
+                     mock.patch.object(driver, "call", side_effect=AssertionError("unexpected app launch")):
+                    if focus_only:
+                        with self.assertRaisesRegex(driver.Uncertain, "focus changed"):
+                            driver.focus_only(config)
+                    else:
+                        self.assertEqual(driver.run(self.request, config)["status"], "indeterminate")
+                        before = {path.name: path.read_bytes() for path in ui.iterdir()}
+                        with self.assertRaisesRegex(driver.Uncertain, "already attempted"):
+                            driver.run(self.request, config)
+                        self.assertEqual(before, {path.name: path.read_bytes() for path in ui.iterdir()})
+                self.assertEqual(actions, ["inspect", "focus-group"])
 
     def test_focus_group_runs_before_draft_or_submit(self):
         with tempfile.TemporaryDirectory() as root:
@@ -470,6 +717,7 @@ class SenderTests(unittest.TestCase):
             with mock.patch.object(driver, "bridge", side_effect=fake_bridge), \
                  mock.patch.object(driver, "verify_target"), \
                  mock.patch.object(driver, "status", return_value=0), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False), \
                  mock.patch.object(driver, "call", return_value="") as activate:
                 with self.assertRaisesRegex(driver.Refused, "permissions"):
                     driver.focus_only(config)

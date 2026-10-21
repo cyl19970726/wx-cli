@@ -39,6 +39,22 @@ conversation list/search control; these coordinates are examples, not defaults:
  "searchPoint":{"x":100,"y":30}}
 ```
 
+The helper checks permissions, console state, the expected running PID and
+window ID/frame before requesting activation of that same process. If it is
+already frontmost, no activation is requested. Otherwise it makes one
+`NSRunningApplication.activate(options: [])` request, waits at most two seconds,
+then re-enumerates and rechecks the PID, window and actual foreground before
+capturing or entering search text. It does not open an application by name or
+path. A denied request, changed process/window or unavailable foreground stops
+the operation. macOS may decline an activation request; see
+[Apple's activation documentation](https://developer.apple.com/documentation/appkit/nsrunningapplication/activate%28options%3A%29).
+The focus attempt marker is created before activation or input.
+
+The Python driver delegates activation to this action. Deploy the matching
+Python and native candidates together through the controlled upgrade process;
+an older helper still requires WeChat to be frontmost and may refuse. Building
+either component alone does not upgrade the live runtime.
+
 The helper pastes and copies back the exact title in the calibrated search box.
 Search may create one additional WeChat-owned popup beside the expected main
 window. Navigation captures that popup separately and accepts its bounded search
@@ -48,7 +64,12 @@ exact result below Contacts for `private`, Group Chats for
 `group`, or Most used for either kind (including Chinese labels). Most used
 does not establish the conversation kind; the exact postclick header does.
 Duplicate exact names across conversation categories are refused. Internet
-search results and web suggestions are never selectable. It
+search results and web suggestions are never selectable. Unrecognized text
+aligned with a section heading closes the preceding category; it cannot open
+an eligible category. Alignment uses half the smaller text height around the
+recognized heading's left edge. This prevents a misread history heading from
+assigning history rows to Contacts or Group Chats. Exact-label recognition,
+the 80px row distance limit and duplicate-result refusal remain required. It
 checks the popup ID, frame and row again immediately before clicking, then
 requires the sole expected main window and kind-aware exact chat header afterward.
 Group headers must show the exact name followed by a numeric member count;
@@ -64,6 +85,10 @@ records each probe's elapsed time, WeChat window IDs and frames, and whether a
 popup and eligible result were seen. It contains no OCR text, chat titles or
 message content. Timeout errors distinguish an unseen popup from a visible
 popup without a unique eligible result.
+The search budget uses monotonic time. During read-only discovery, a popup
+that resizes, disappears, or changes ID during capture causes those pixels to
+be discarded and another observation within the same budget. Any such change
+during the final pre-click confirmation still stops navigation.
 Title matching depends
 on fresh OCR and is not proof of delivery or account identity.
 
@@ -93,6 +118,28 @@ category-verified `focusEvidenceID` less than 120 seconds old. The example PID, 
 composer rect, and button point are not defaults: obtain them from a fresh
 `inspect` and `capture` immediately before use. Rects/points are image-relative;
 the frame is in global screen coordinates.
+
+An empty composer can display input guidance that is detected as text. An
+optional `emptyComposerReference` object with `path` and `sha256` permits an
+explicitly calibrated empty-state PNG. The path must be a direct child of the
+private output directory, owned, mode `0600`, not a symlink or hard link; its
+pinned SHA-256 and decoded dimensions must match the integral composer rect.
+Calibrate only after establishing that no user draft exists. Keep this image
+private. The helper compares every composer pixel in sRGB without tolerance,
+masked regions or a text whitelist. It checks up to three fresh observations
+to accommodate a blinking caret. Target/window/focus checks and the unchanged
+clipboard sentinel are still required throughout; copied nonempty text never
+uses this fallback. Both visual stages must retain the same reference. Without
+the option, the existing blank-image check applies. Recalibrate after any UI
+appearance or geometry change; do not capture an unknown draft as a reference.
+
+The Send-button OCR accepts the exact labels `Send` or `发送`. There must be
+exactly one accepted label in the lower conversation pane, and the 68×34 crop
+centered on the calibrated button point must contain that label alone. The
+tight crop excludes adjacent toolbar glyphs that can otherwise become extra
+OCR text. The label's recognized center must also be within 16px horizontally
+and 10px vertically of the click point. Duplicate labels, mixed-language
+duplicates, extended labels and labels outside the button crop still refuse.
 
 The app requires its output directory and parent to be owned by the current
 user, non-symlinks, and mode `0700`. Runtime output stays in
@@ -179,3 +226,12 @@ was seen; independent receipt is still a separate check. It keeps a private
 attempt report and refuses to replay a request. Any uncertain stage returns
 `indeterminate`, which the outbox and channel runner must not automatically
 retry. See the linked validation scope for the historical evidence and limitations.
+
+The Python driver waits up to 18 seconds for the complete native focus action,
+including setup and result reconfirmation, within its 48-second total budget.
+After acquiring the shared UI lock, both focus-only and sending refuse to
+launch a helper if any earlier helper remains live or process inspection fails.
+A timeout can outlive the driver lock; acquiring that lock alone is insufficient
+evidence that the desktop is idle. These source changes have offline coverage;
+their deployment and live acceptance status are recorded in
+[the reliability candidate record](../../../docs/CONVERSATIONS_RELIABILITY_20261017.md).

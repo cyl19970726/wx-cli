@@ -31,8 +31,10 @@ class FakeCLI:
         self.sent = []
         self.recoveries = []
         self.on_queue = None
+        self.calls = []
 
     def __call__(self, argv, data=None, timeout=60, limit=None):
+        self.calls.append(list(argv))
         if argv[1:3] == ["conversations", "find"]:
             if "--id" in argv:
                 query = argv[argv.index("--id") + 1]
@@ -217,6 +219,42 @@ class ConversationTests(unittest.TestCase):
             conv.send(self.settings, "same", "hello")
         self.assertEqual(len(self.fake.sent), 1)
 
+    def test_stdin_terminal_newline_refused_before_queue_and_multiline_stays_exact(self):
+        self.choose(2)
+        state = conv.registry(self.settings)["entries"][self.fake.metadata[2]["conversation_id"]]["state_dir"]
+
+        def invoke(raw):
+            stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.object(conv.sys, "stdin", stdin), \
+                 mock.patch.object(conv, "config", return_value=self.settings), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = conv.main(["--config", "/synthetic/config.json", "send",
+                                  "--request-id", "same-multiline", "--text-stdin"])
+            return code, stdout.getvalue(), stderr.getvalue()
+
+        for raw in ("你好 😊\n第二行\n".encode(), "你好 😊\n第二行\r\n".encode()):
+            with mock.patch.object(conv, "coordinated", side_effect=AssertionError("invalid text reached coordination")):
+                code, _, stderr = invoke(raw)
+            self.assertEqual(code, 1)
+            self.assertIn("trailing line break", stderr)
+            self.assertNotIn("same-multiline", self.fake.outboxes.get(state, {}))
+            self.assertEqual(self.fake.sent, [])
+
+        exact = "你好 😊\n第二行".encode()
+        code, stdout, _ = invoke(exact)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout)["status"], "ui_observed")
+        self.assertEqual(self.fake.outboxes[state]["same-multiline"]["text"], exact.decode())
+        code, stdout, _ = invoke(exact)
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(stdout)["already_completed"])
+        self.assertEqual(len(self.fake.sent), 1)
+        code, _, stderr = invoke("你好 😊\n不同正文".encode())
+        self.assertEqual(code, 1)
+        self.assertIn("different text", stderr)
+        self.assertEqual(len(self.fake.sent), 1)
+
     def test_selection_change_after_queue_refuses_desktop_effect(self):
         self.choose()
         def change_selection():
@@ -252,6 +290,54 @@ class ConversationTests(unittest.TestCase):
         self.fake.events[entry["state_dir"]][0]["direction"] = "outgoing"
         with self.assertRaisesRegex(conv.ConversationError, "not an incoming"):
             conv.reply(self.settings, 1, "different")
+
+    def test_private_to_group_paginated_read_and_reply_preserves_failed_requests(self):
+        entries = []
+        for index in (2, 0):
+            self.choose(index)
+            entry = conv.selected(self.settings)[1]
+            entries.append(entry)
+            self.fake.events[entry["state_dir"]] = [
+                {"cursor": cursor, "channel_id": entry["channel_id"], "session_id": entry["session_id"],
+                 "account": self.settings["account"], "talker": entry["talker"],
+                 "kind": "message_observed", "direction": "incoming", "server_id": 10 + cursor,
+                 "message": {"talker": entry["talker"], "server_id": 10 + cursor,
+                             "sender": "synthetic_peer", "content": {"Text": "question " + str(cursor)}}}
+                for cursor in (1, 2)]
+        private, group = entries
+        failed = {"request_id": "historical-failed", "text": "previous independent intent",
+                  "status": "indeterminate", "attempt_number": 1,
+                  "attempts": [{"attempt_number": 1, "status": "indeterminate", "evidence": "retained"}]}
+        state = group["state_dir"]
+        self.fake.outboxes[state] = {failed["request_id"]: failed.copy()}
+        original = json.dumps(self.fake.outboxes[state], sort_keys=True)
+        # Model/runner coordination is not needed for a manual channel read or reply.
+        with mock.patch.object(conv.interactive, "takeover", side_effect=AssertionError("runner started")), \
+             mock.patch.object(conv.interactive, "handback", side_effect=AssertionError("runner started")):
+            for entry in (private, group):
+                conv.select(self.settings, entry["conversation_id"])
+                self.assertTrue(conv.focus_conversation(self.settings)["focused"])
+                first = conv.read(self.settings, limit=1)
+                self.assertEqual(first["conversation"]["conversation_id"], entry["conversation_id"])
+                self.assertTrue(first["has_more"])
+                second = conv.read(self.settings, after=first["next_cursor"], limit=1)
+                self.assertFalse(second["has_more"])
+                self.assertEqual([first["events"][0]["cursor"], second["events"][0]["cursor"]], [1, 2])
+                reply = conv.reply(self.settings, 2, "answer to " + entry["kind"])
+                self.assertEqual(reply["request_id"], conv.runner.reply_request_id(entry["channel_id"], 12))
+                self.assertTrue(conv.reply(self.settings, 2, "answer to " + entry["kind"])["already_completed"])
+                self.assertEqual(conv.read(self.settings, after=1)["events"], second["events"])
+        self.assertEqual(len(self.fake.sent), 2)
+        self.assertNotEqual(self.fake.sent[0][1], self.fake.sent[1][1])
+        self.assertEqual(self.fake.recoveries, [])
+        self.assertFalse(any("ack" in call for call in self.fake.calls))
+        self.assertEqual(json.dumps({failed["request_id"]: self.fake.outboxes[state][failed["request_id"]]},
+                                    sort_keys=True), original)
+        sent_before = list(self.fake.sent)
+        with self.assertRaisesRegex(conv.ConversationError, "unresolved"):
+            conv.send(self.settings, failed["request_id"], failed["text"])
+        self.assertEqual(self.fake.sent, sent_before)
+        self.assertEqual(conv.selected(self.settings)[1], group)
 
     def test_recover_unsent_send_requires_stable_conversation_and_reuses_exact_intent(self):
         self.choose(2)

@@ -2,7 +2,7 @@
 
 `wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。已配置的单群 controller 可以导入复用，涉及它时 CLI 会协调原 writer 并在完成后交还。当前不提供多常驻 Agent 调度或 MCP。
 
-**现场状态（2026-10-16）：v5 权限、私人/群定向导航和分页读取已通过有限探测；v5 发送和长期稳定性未验证。v4 原群请求在发送准备前失败，必须保留且不得重试。** 当前证据、历史异常与运行状态集中记录在[验证记录](CONVERSATIONS_VALIDATION_20261016.md)；每次桌面写操作前核对当前权限和验证门槛。
+**现场状态：** 2026-10-21 统一修复版 `de15fde` 已安装并通过授权私聊、测试群的新消息发送及自动切回；两条均有独立收件确认，各出现一次。运行器仍停止，按需读取不自动回复。终止 LF/CR/CRLF 在入队前拒绝；内部换行、中文、emoji 已实测。此前失败或不确定意图与 attempt 保持原样，不因新验证成功而重放。安装、耗时和具体边界见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)；10 月 20 日历史基线与更早证据见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。这次有界验证不等于长期无人值守或其他客户环境可用性证明。
 
 ## 配置一次
 
@@ -16,6 +16,8 @@ chmod 700 /ABS/private/wx-agent/conversations
 ```
 
 把现有、已校准的 sender 私有配置复制为 `sender-template.json`，保持 `0600`，不要使用公开模板或示意坐标。模板应包含现有 helper 要求的 `protocol_version`、`helper_app`、`helper_sha256`、固定 `ui_dir`、`expected_pid`、`window_size`、`composer_rect`、`button_point`、`conversation_list_rect` 和 `search_point`。窗口值以当前微信桌面检查和校准结果为准。会话 CLI 会为每个绑定生成私有 sender 配置，并通过 `target_name` 与 `conversation_kind` 让现有 driver/helper 定位该会话；它沿用 helper 的 `targetGroup` 兼容字段。通常复用现有 helper；只有发现具体缺陷并完成审查时才更新，更新与现场验证状态见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
+
+若已确认空输入框中的系统提示会被视觉检查识别为文字，可为支持该功能的 helper 显式校准 `empty_composer_reference`，值为仅含 `path`、`sha256` 的对象。它必须指向 `ui_dir` 直属的私有 `0600` PNG，尺寸等于整数 `composer_rect` 的宽高。必须先确认没有用户草稿；不得把未知草稿截为“空框”。助手要求完整输入区域像素精确匹配，且复制操作保留原 sentinel 和剪贴板计数；不按提示文字放行。未配置时仍用原空白检查。界面、主题或尺寸变化后可能拒绝，需要重新校准，详见[原生助手](../native/macos/wechat-bridge/README.md)。
 
 创建 `0600` 的会话配置，路径全部使用绝对路径，不要包含 `..`。`registry_dir` 必须预先创建，且和微信来源目录互不嵌套；`account` 必须等于 `source` 的目录末级名称。`controller_configs` 可省略；填入要导入并协调的既有单群 controller 配置路径：
 
@@ -63,7 +65,7 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 ## 可选桌面聚焦与发送
 
-只有任务已明确授权向该测试会话发送时才操作桌面。操作前 fresh inspect 当前 helper 的 Accessibility、Screen Recording、Post Events 权限，三项全部启用后才继续；按[验证记录](CONVERSATIONS_VALIDATION_20261016.md)确认当前 build 已允许现场测试。`focus` 只定位目标，不创建消息。出现窗口/标题保护错误时停止，不绕过或重复尝试：
+只有任务已明确授权向该测试会话发送时才操作桌面。操作前 fresh inspect 当前 helper 的 Accessibility、Screen Recording、Post Events 权限，三项全部启用后才继续；当前 build 的现场验收状态以[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)为准。`focus` 只定位目标，不创建消息。出现窗口/标题保护错误时停止，不绕过或重复尝试：
 
 ```sh
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json focus
@@ -77,6 +79,8 @@ chmod 700 /ABS/private/wx-agent/conversations
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json send \
   --request-id synthetic-message-001 --text-stdin < /ABS/private/wx-agent/message.txt
 ```
+
+本入口只有 `--text-stdin`；`< 文件` 是 shell 重定向，不是 `--text-file` 参数，也没有 `--text` 正文参数。统一 Python 修复将标准输入的 UTF-8 正文按原样绑定 request ID，不做 `strip` 或换行归一化。正文内部换行、中文和 emoji 保留；若正文以 LF、CR 或 CRLF 结束，会在入队和桌面操作前拒绝，并提示去掉末尾换行。集成测试已确认此拒绝行为，安装和现场状态见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)。微信可能不保留这个末尾字符，继续发送会使严格出站核验无法确认实际已发消息；文件生成工具若自动附加换行，先检查其内容。不要为已有失败或不确定请求改写正文或换 ID 重试。
 
 同一 request ID 和相同正文只对应一个意图；正文不同会冲突。已有 `attempt_recorded`、`failed`、`indeterminate` 或其他未决状态时，命令只报告未决，不会再次点击。保留原 request ID 并核对 outbox 与授权接收端，禁止自动重试或生成替代 ID。
 
@@ -103,8 +107,8 @@ chmod 700 /ABS/private/wx-agent/conversations
   --request-id synthetic-request-001 --expected-attempt 1
 ```
 
-`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。若该会话导入单群 controller，命令复用原 lease 与 reply pending；不会创建新的 channel/consumer。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态只以[验证记录](CONVERSATIONS_VALIDATION_20261016.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
+`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。若该会话导入单群 controller，命令复用原 lease 与 reply pending；不会创建新的 channel/consumer。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态以[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
 
 ## 现有单群入口与功能状态
 
-已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。当前部署状态见[现场验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
+已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。当前部署状态见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)。

@@ -19,6 +19,7 @@ private struct Command: Decodable {
     let targetKind: TargetKind?
     let focusEvidenceID: String?
     let expectedDraft: String?
+    let emptyComposerReference: EmptyComposerReference?
     let expectedPID: Int32?
     let expectedWindowID: UInt32?
     let expectedFrame: RectInput?
@@ -245,6 +246,7 @@ private struct VisualStage: Codable {
     let targetKind: TargetKind
     let focusEvidenceID: String
     let expectedDraft: String
+    let emptyComposerReference: EmptyComposerReference?
     let expectedPID: Int32
     let expectedWindowID: UInt32
     let expectedFrame: RectInput
@@ -332,6 +334,7 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
                        text: VisualParameters.canonicalNewlines(text), targetGroup: targetGroup,
                        targetKind: targetKind, focusEvidenceID: focusEvidenceID,
                        expectedDraft: VisualParameters.canonicalNewlines(expectedDraft),
+                       emptyComposerReference: command.emptyComposerReference,
                        expectedPID: pid, expectedWindowID: windowID,
                        expectedFrame: frame, composerRect: composer, buttonPoint: button)
 }
@@ -343,7 +346,8 @@ private func sameVisualInputs(_ a: VisualStage, _ b: VisualStage) -> Bool {
     a.expectedPID == b.expectedPID &&
     a.targetKind == b.targetKind && a.focusEvidenceID == b.focusEvidenceID &&
     a.expectedWindowID == b.expectedWindowID && a.expectedFrame == b.expectedFrame &&
-    a.composerRect == b.composerRect && a.buttonPoint == b.buttonPoint
+    a.composerRect == b.composerRect && a.buttonPoint == b.buttonPoint &&
+    a.emptyComposerReference == b.emptyComposerReference
 }
 
 private func screenshotText(_ image: CGImage, rect: CGRect) throws -> [String] {
@@ -352,7 +356,7 @@ private func screenshotText(_ image: CGImage, rect: CGRect) throws -> [String] {
           let cropped = image.cropping(to: rect.integral) else { throw Failure("OCR crop is outside captured window") }
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
-    request.recognitionLanguages = ["en-US"]
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
     request.usesLanguageCorrection = false
     try VNImageRequestHandler(cgImage: cropped).perform([request])
     return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
@@ -386,22 +390,46 @@ private func requireSendButton(_ image: CGImage, point: CGPoint) throws {
                            width: CGFloat(image.width) * 0.70,
                            height: CGFloat(image.height) * 0.16).integral
     let allLabels = try screenshotText(image, rect: lowerPane).map(normalizedDraft)
-    guard allLabels.filter({ $0 == "Send" }).count == 1 else {
+    guard VisualParameters.uniqueSendLabel(allLabels, atButton: false) else {
         throw Failure("Expected exactly one visible Send label in lower conversation pane")
     }
-    let crop = CGRect(x: point.x - 48, y: point.y - 23, width: 96, height: 46)
-    let words = try screenshotText(image, rect: crop).map(normalizedDraft)
-    guard words.count == 1, words[0] == "Send" else { throw Failure("Unique Send label not confirmed at button point") }
+    guard let crop = VisualParameters.sendButtonCrop(at: point,
+        imageWidth: image.width, imageHeight: image.height) else {
+        throw Failure("Calibrated Send button point is outside captured window")
+    }
+    guard let buttonImage = image.cropping(to: crop) else {
+        throw Failure("Calibrated Send button crop is unavailable")
+    }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
+    request.usesLanguageCorrection = false
+    try VNImageRequestHandler(cgImage: buttonImage).perform([request])
+    let candidates = (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
+        guard let text = result.topCandidates(1).first?.string else { return nil }
+        let bounds = result.boundingBox
+        return HeaderOCRCandidate(text: normalizedDraft(text), bounds: CGRect(
+            x: crop.minX + bounds.minX * crop.width,
+            y: crop.minY + (1 - bounds.maxY) * crop.height,
+            width: bounds.width * crop.width, height: bounds.height * crop.height))
+    }
+    guard VisualParameters.sendLabelAtButton(candidates, point: point, crop: crop) else {
+        throw Failure("Unique Send label not confirmed at button point")
+    }
+}
+
+private func consoleStatus() throws -> String {
+    let session = sessionSummary()
+    guard session["onConsole"] as? Bool == true else { throw Failure("Session is not on the console") }
+    guard session["locked"] as? Bool != true else { throw Failure("Console is explicitly locked") }
+    return (session["lockFlagPresent"] as? Bool == true) ? "reported-unlocked" : "unknown"
 }
 
 private func consoleAndFocus(_ app: NSRunningApplication) throws -> String {
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
         throw Failure("WeChat is not frontmost")
     }
-    let session = sessionSummary()
-    guard session["onConsole"] as? Bool == true else { throw Failure("Session is not on the console") }
-    guard session["locked"] as? Bool != true else { throw Failure("Console is explicitly locked") }
-    return (session["lockFlagPresent"] as? Bool == true) ? "reported-unlocked" : "unknown"
+    return try consoleStatus()
 }
 
 private func freshVisual(_ state: VisualStage, step: String, draft: String?) async throws -> (SCWindow, CGImage, String) {
@@ -459,6 +487,7 @@ private func key(_ code: CGKeyCode, command: Bool = false) throws {
 }
 
 private func readSelectedDraft(_ state: VisualStage, step: String, expected: String) async throws -> String {
+    let reference = try state.emptyComposerReference?.load(in: outputDirectory, rect: state.composerRect.rect)
     let (window, _, _) = try await freshVisual(state, step: "\(step)-before-click", draft: nil)
     let clickPoint = CGPoint(x: state.composerRect.x + 25, y: state.composerRect.y + 20)
     try mouseClick(globalPoint(clickPoint, window: window))
@@ -482,8 +511,23 @@ private func readSelectedDraft(_ state: VisualStage, step: String, expected: Str
         let copied = board.string(forType: .string)
         var visuallyBlank = false
         if expected.isEmpty && afterCount == ownedCount {
-            let (_, image, _) = try await freshVisual(state, step: "\(step)-empty-check", draft: nil)
-            visuallyBlank = (try? requireDraft(image, rect: state.composerRect.rect, expected: "")) != nil
+            for observation in 0..<(reference == nil ? 1 : 3) {
+                guard board.changeCount == ownedCount, board.string(forType: .string) == sentinel else {
+                    throw Failure("Clipboard changed during empty draft verification")
+                }
+                let suffix = observation == 0 ? "" : "-\(observation)"
+                let (_, image, _) = try await freshVisual(state, step: "\(step)-empty-check\(suffix)", draft: nil)
+                visuallyBlank = (try? requireDraft(image, rect: state.composerRect.rect, expected: "")) != nil
+                if let reference, !visuallyBlank {
+                    visuallyBlank = VisualParameters.matchesEmptyComposer(image, rect: state.composerRect.rect,
+                                                                         reference: reference)
+                }
+                guard board.changeCount == ownedCount, board.string(forType: .string) == sentinel else {
+                    throw Failure("Clipboard changed during empty draft verification")
+                }
+                if visuallyBlank { break }
+                if reference != nil && observation < 2 { try await Task.sleep(nanoseconds: 300_000_000) }
+            }
         }
         guard VisualParameters.copyIsExpected(expected: expected, sentinel: sentinel,
                                               beforeCount: ownedCount, afterCount: afterCount,
@@ -558,7 +602,8 @@ private func focusInputs(_ command: Command) throws -> FocusInputs {
 }
 
 private func freshFocus(_ input: FocusInputs, step: String,
-                        allowSearchPopup: Bool = false) async throws -> (SCWindow, CGImage, SCWindow?) {
+                        allowSearchPopup: Bool = false,
+                        activateTarget: Bool = false) async throws -> (SCWindow, CGImage, SCWindow?) {
     guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(), CGPreflightPostEventAccess() else {
         throw Failure("Accessibility, Screen Recording and Post Events access required")
     }
@@ -583,6 +628,24 @@ private func freshFocus(_ input: FocusInputs, step: String,
                                                     search: input.searchPoint.point) else {
             throw Failure("Unexpected WeChat window during navigation")
         }
+    }
+    if activateTarget && NSWorkspace.shared.frontmostApplication?.processIdentifier != input.expectedPID {
+        _ = try consoleStatus()
+        guard !app.isTerminated, app.processIdentifier == input.expectedPID else {
+            throw Failure("WeChat PID changed before activation")
+        }
+        // Activate this verified running instance once. Never launch an app by
+        // name/path or send it a reopen event to establish desktop focus.
+        guard app.activate(options: []) else { throw Failure("Expected WeChat PID could not become frontmost") }
+        let started = ProcessInfo.processInfo.systemUptime
+        while NSWorkspace.shared.frontmostApplication?.processIdentifier != input.expectedPID &&
+                ProcessInfo.processInfo.systemUptime - started < 2 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // Activation is asynchronous and may change window state. Re-enumerate
+        // and recheck PID, window ID/frame and foreground before any UI input.
+        // The default activateTarget=false prevents another activation attempt.
+        return try await freshFocus(input, step: step, allowSearchPopup: allowSearchPopup)
     }
     _ = try consoleAndFocus(app)
     let image = try await capture(window, destination: outputDirectory.appendingPathComponent("\(input.id).\(step).png"))
@@ -739,12 +802,17 @@ private func searchPopupResult(_ input: FocusInputs, step: String,
         throw Failure("Search popup screenshot geometry changed")
     }
     let (_, _, currentPopup) = try await freshFocus(input, step: "\(step)-confirm", allowSearchPopup: true)
-    guard let currentPopup, currentPopup.windowID == popup.windowID,
-          abs(currentPopup.frame.minX - popup.frame.minX) <= 3,
-          abs(currentPopup.frame.minY - popup.frame.minY) <= 3,
-          abs(currentPopup.frame.width - popup.frame.width) <= 3,
-          abs(currentPopup.frame.height - popup.frame.height) <= 3 else {
+    switch VisualParameters.searchPopupDisposition(capturedID: popup.windowID,
+        capturedFrame: popup.frame, currentID: currentPopup?.windowID,
+        currentFrame: currentPopup?.frame, beforeClick: expectedPopupID != nil) {
+    case .pollAgain:
+        // Discard stale pixels without clicking. The next bounded observation
+        // must independently resolve a unique category-eligible exact result.
+        return SearchProbe(windows: [main] + (currentPopup.map { [$0] } ?? []), selection: nil)
+    case .refuse:
         throw Failure("Search popup changed during capture")
+    case .stable:
+        break
     }
     let candidates = try popupCandidates(image)
     let selection = VisualParameters.uniqueSearchResult(candidates, target: input.targetGroup,
@@ -767,15 +835,15 @@ private func focusWindowDiagnostic(_ window: SCWindow) -> FocusWindowDiagnostic 
 
 private func runFocus(_ command: Command) async throws -> [String: Any] {
     let input = try focusInputs(command)
-    _ = try await freshFocus(input, step: "focus-initial")
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(input.id).focus-attempted.json"))
+    _ = try await freshFocus(input, step: "focus-initial", activateTarget: true)
     try await pasteSearch(input)
-    let searchStarted = Date()
+    let searchStarted = ProcessInfo.processInfo.systemUptime
     var polls: [FocusPollDiagnostic] = []
-    while VisualParameters.withinFocusSearchBudget(Date().timeIntervalSince(searchStarted)) {
+    while VisualParameters.withinFocusSearchBudget(ProcessInfo.processInfo.systemUptime - searchStarted) {
         let probe = try await searchPopupResult(input, step: "focus-search-result")
         polls.append(FocusPollDiagnostic(
-            elapsedMs: Int(Date().timeIntervalSince(searchStarted) * 1_000),
+            elapsedMs: Int((ProcessInfo.processInfo.systemUptime - searchStarted) * 1_000),
             windowCount: probe.windows.count,
             windows: probe.windows.map(focusWindowDiagnostic),
             popupPresent: probe.windows.count == 2,

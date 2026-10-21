@@ -1396,6 +1396,9 @@ mod tests {
         );
         let state_for_thread = state.clone();
         let binding_for_thread = binding.clone();
+        // This test exercises the CAS race, not the probe deadline. Parallel
+        // tests can delay both short-lived driver subprocesses.
+        let fixture_probe_timeout = Duration::from_secs(10);
         let worker = std::thread::spawn(move || {
             recover_unsent_with_timeout(
                 &state_for_thread,
@@ -1403,18 +1406,29 @@ mod tests {
                 "preflight_race",
                 1,
                 &driver,
-                Duration::from_secs(3),
+                fixture_probe_timeout,
             )
-            .is_err()
+            .map_err(|error| error.to_string())
         });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !ready.exists() && Instant::now() < deadline {
+        let deadline = Instant::now() + fixture_probe_timeout * 2 + Duration::from_secs(2);
+        while !ready.exists() && !worker.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(ready.exists());
+        if !ready.exists() {
+            // Release a late preflight before joining, so a failed readiness
+            // assertion cannot leave a child waiting behind the test.
+            fs::write(&release, "go").unwrap();
+            let result = worker.join().unwrap();
+            panic!("preflight did not signal readiness before deadline; worker result: {result:?}");
+        }
         claim_recovery(&state, "preflight_race", 1).unwrap();
         fs::write(&release, "go").unwrap();
-        assert!(worker.join().unwrap());
+        let result = worker.join().unwrap();
+        let error = result.expect_err("stale recovery claim must be rejected");
+        assert!(
+            error.contains("recovery requires the current failed or indeterminate attempt"),
+            "unexpected recovery failure: {error}"
+        );
         assert!(!normal.exists());
         let conn = open_journal(&state).unwrap();
         let shown = show_intent(&conn, &binding, "preflight_race").unwrap();

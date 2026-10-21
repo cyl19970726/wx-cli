@@ -1,8 +1,50 @@
 import AppKit
 import Foundation
+import CryptoKit
+import ImageIO
 
 @main struct ParameterTests {
     static func main() {
+        emptyComposerChecks()
+        for label in ["Send", "发送"] {
+            precondition(VisualParameters.uniqueSendLabel([label], atButton: true))
+            precondition(VisualParameters.uniqueSendLabel(["Toolbar", label], atButton: false))
+            precondition(!VisualParameters.uniqueSendLabel(["Toolbar", label], atButton: true))
+            precondition(!VisualParameters.uniqueSendLabel([label, label], atButton: false))
+        }
+        precondition(!VisualParameters.uniqueSendLabel(["Send", "发送"], atButton: false))
+        precondition(!VisualParameters.uniqueSendLabel([], atButton: true))
+        precondition(!VisualParameters.uniqueSendLabel(["发送文件"], atButton: true))
+        precondition(!VisualParameters.uniqueSendLabel(["Send now"], atButton: true))
+        // The calibrated click stays in the crop, while a nearby toolbar glyph
+        // that was OCR text in a 96px crop stays outside it.
+        let sendCrop = VisualParameters.sendButtonCrop(at: CGPoint(x: 829, y: 606),
+                                                        imageWidth: 880, imageHeight: 640)
+        precondition(sendCrop!.contains(CGPoint(x: 829, y: 606)))
+        precondition(sendCrop!.contains(CGPoint(x: 817, y: 605)))
+        precondition(!sendCrop!.intersects(CGRect(x: 781, y: 599, width: 10, height: 16)))
+        precondition(sendCrop == CGRect(x: 795, y: 589, width: 68, height: 34))
+        let centeredSend = HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 819, y: 601, width: 26, height: 12))
+        precondition(VisualParameters.sendLabelAtButton([centeredSend],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([
+            HeaderOCRCandidate(text: "⑨）", bounds: CGRect(x: 781, y: 599, width: 10, height: 16)),
+            centeredSend], point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([centeredSend, centeredSend],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([
+            HeaderOCRCandidate(text: "发送文件", bounds: centeredSend.bounds)],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([centeredSend],
+            point: CGPoint(x: 803, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([
+            HeaderOCRCandidate(text: "发送", bounds: CGRect(x: 859, y: 601, width: 20, height: 12))],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(VisualParameters.sendButtonCrop(at: CGPoint(x: 10, y: 606),
+                                                     imageWidth: 880, imageHeight: 640) == nil)
+        precondition(VisualParameters.sendButtonCrop(at: CGPoint(x: 829, y: 632),
+                                                     imageWidth: 880, imageHeight: 640) == nil)
         precondition(VisualParameters.acceptsText("中文，标点 😊\n第二行", allowEmpty: false))
         precondition(VisualParameters.acceptsText("", allowEmpty: true))
         precondition(!VisualParameters.acceptsText("", allowEmpty: false))
@@ -20,6 +62,25 @@ import Foundation
         precondition(!VisualParameters.withinFocusSearchBudget(6))
         precondition(!VisualParameters.withinFocusSearchBudget(-0.001))
         precondition(!VisualParameters.withinFocusSearchBudget(.infinity))
+        let shortPopup = CGRect(x: 229, y: 306, width: 368, height: 194)
+        let loadedPopup = CGRect(x: 229, y: 306, width: 368, height: 500)
+        for beforeClick in [false, true] {
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 7, currentFrame: loadedPopup, beforeClick: beforeClick) == .stable)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 7, currentFrame: loadedPopup.offsetBy(dx: 3, dy: -3),
+                beforeClick: beforeClick) == .stable)
+            let expected: SearchPopupDisposition = beforeClick ? .refuse : .pollAgain
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: shortPopup,
+                currentID: 7, currentFrame: loadedPopup, beforeClick: beforeClick) == expected)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 8, currentFrame: loadedPopup, beforeClick: beforeClick) == expected)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: nil, currentFrame: nil, beforeClick: beforeClick) == expected)
+            precondition(VisualParameters.searchPopupDisposition(capturedID: 7, capturedFrame: loadedPopup,
+                currentID: 7, currentFrame: loadedPopup.offsetBy(dx: 4, dy: 0),
+                beforeClick: beforeClick) == expected)
+        }
         let poll = FocusPollDiagnostic(elapsedMs: 451, windowCount: 1,
             windows: [FocusWindowDiagnostic(id: 7, x: 10, y: 20, width: 880, height: 640)],
             popupPresent: false, popupSelected: false)
@@ -132,6 +193,34 @@ import Foundation
         precondition(VisualParameters.uniqueSearchResult(
             [groupHeading, groupRow, distantRow], target: "合成测试群", kind: .group,
             popupSize: popupSize) == nil)
+        // An unrecognized section heading closes the previous category. It
+        // cannot authorize a result, including when OCR misreads a history heading.
+        let unknownHeading = SearchOCRCandidate(text: "Unrecognized section",
+            bounds: CGRect(x: 15, y: 210, width: 150, height: 18))
+        for kind in [TargetKind.group, .private] {
+            precondition(VisualParameters.uniqueSearchResult(
+                [mostUsedHeading, recentRow, unknownHeading, distantRow],
+                target: "合成测试群", kind: kind, popupSize: popupSize) ==
+                SearchSelection(row: recentRow, category: .mostUsed))
+            precondition(VisualParameters.uniqueSearchResult(
+                [mostUsedHeading, unknownHeading, distantRow],
+                target: "合成测试群", kind: kind, popupSize: popupSize) == nil)
+        }
+        let indentedText = SearchOCRCandidate(text: "Unrecognized section",
+            bounds: CGRect(x: 65, y: 210, width: 150, height: 18))
+        precondition(VisualParameters.uniqueSearchResult(
+            [mostUsedHeading, recentRow, indentedText, distantRow],
+            target: "合成测试群", kind: .private, popupSize: popupSize) == nil)
+        precondition(VisualParameters.uniqueSearchResult(
+            [unknownHeading, distantRow], target: "合成测试群", kind: .private,
+            popupSize: popupSize) == nil)
+        let nearbyUnknownHeading = SearchOCRCandidate(text: "Unrecognized section",
+            bounds: CGRect(x: 15, y: 92, width: 150, height: 18))
+        let nearbyUnknownRow = SearchOCRCandidate(text: "合成测试群",
+            bounds: CGRect(x: 65, y: 120, width: 120, height: 18))
+        precondition(VisualParameters.uniqueSearchResult(
+            [mostUsedHeading, nearbyUnknownHeading, nearbyUnknownRow],
+            target: "合成测试群", kind: .private, popupSize: popupSize) == nil)
         let title = HeaderOCRCandidate(text: "测试群 (3)", bounds: CGRect(x: 315, y: 19, width: 120, height: 16))
         let sender = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 320, y: 68, width: 90, height: 15))
         let privateTitle = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 315, y: 19, width: 100, height: 16))
@@ -183,6 +272,15 @@ import Foundation
         precondition(!VisualParameters.copyIsExpected(expected: "", sentinel: token,
                                                       beforeCount: 10, afterCount: 10,
                                                       clipboardText: token, visualBlank: false))
+        for copied in ["Hold mouse to input by voice", "user draft", token] {
+            precondition(!VisualParameters.copyIsExpected(expected: "", sentinel: token,
+                beforeCount: 10, afterCount: 11, clipboardText: copied,
+                visualBlank: true))
+        }
+        precondition(!VisualParameters.copyIsExpected(expected: "user draft", sentinel: token,
+            beforeCount: 10, afterCount: 10, clipboardText: token, visualBlank: true))
+        precondition(!VisualParameters.copyIsExpected(expected: "", sentinel: token,
+            beforeCount: 10, afterCount: 12, clipboardText: token, visualBlank: true))
         precondition(VisualParameters.mayRestoreClipboard(ownedCount: 12, currentCount: 12))
         precondition(!VisualParameters.mayRestoreClipboard(ownedCount: 12, currentCount: 13))
         let board = NSPasteboard(name: NSPasteboard.Name("codex-bridge-tests-" + UUID().uuidString))
@@ -208,5 +306,58 @@ import Foundation
         } catch {}
         precondition(board.string(forType: .string) == "external")
         print("Parameter checks and named-pasteboard restoration checks passed")
+    }
+
+    static func emptyComposerChecks() {
+        func image(_ changed: Bool = false) -> CGImage {
+            var bytes = [UInt8](repeating: 255, count: 4 * 3 * 4)
+            if changed { bytes[0] = 254 }
+            let provider = CGDataProvider(data: Data(bytes) as CFData)!
+            return CGImage(width: 4, height: 3, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: 16, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        }
+        let original = image(), rect = CGRect(x: 0, y: 0, width: 4, height: 3)
+        precondition(VisualParameters.matchesEmptyComposer(original, rect: rect, reference: original))
+        precondition(!VisualParameters.matchesEmptyComposer(image(true), rect: rect, reference: original))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 1, dy: 0), reference: original))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: CGRect(x: 0, y: 0, width: 3, height: 3), reference: original))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 0.1, dy: 0), reference: original))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("empty.png")
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, original, nil)
+        precondition(CGImageDestinationFinalize(destination))
+        try! (data as Data).write(to: path)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let hash = SHA256.hash(data: data as Data).map { String(format: "%02x", $0) }.joined()
+        let reference = EmptyComposerReference(path: path.path, sha256: hash)
+        let decoded = try! reference.load(in: directory, rect: rect)
+        precondition(VisualParameters.matchesEmptyComposer(original, rect: rect, reference: decoded))
+        func refused(_ candidate: EmptyComposerReference, _ crop: CGRect = rect) {
+            do { _ = try candidate.load(in: directory, rect: crop); preconditionFailure("unsafe reference accepted") }
+            catch {}
+        }
+        refused(EmptyComposerReference(path: path.path, sha256: String(repeating: "0", count: 64)))
+        refused(reference, CGRect(x: 0, y: 0, width: 3, height: 3))
+        refused(EmptyComposerReference(path: directory.appendingPathComponent("../empty.png").path, sha256: hash))
+        try! FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path)
+        refused(reference)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let link = directory.appendingPathComponent("link.png")
+        try! FileManager.default.createSymbolicLink(at: link, withDestinationURL: path)
+        refused(EmptyComposerReference(path: link.path, sha256: hash))
+        try! FileManager.default.removeItem(at: link)
+        try! FileManager.default.linkItem(at: path, to: link)
+        refused(reference)
+        try! FileManager.default.removeItem(at: link)
+        try! Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: path)
+        refused(EmptyComposerReference(path: path.path,
+            sha256: SHA256.hash(data: try! Data(contentsOf: path)).map { String(format: "%02x", $0) }.joined()))
     }
 }

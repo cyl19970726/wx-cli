@@ -125,19 +125,37 @@ class ProbeTests(unittest.TestCase):
             driver.safe_config = lambda c: dict(c, ui_dir=Path(c["ui_dir"]))
             driver.status = lambda *_: 0
             driver.inspect_ok = lambda *_: (20, {"x": 0, "y": 0, "width": 880, "height": 640})
-            driver.call = lambda *_args, **_kwargs: ""
+            driver.call = lambda *_args, **_kwargs: self.fail("draft probe must not launch an app")
             actions = []
             def bridge(_cfg, _tid, action, _data, _deadline, _seconds):
                 actions.append(action)
                 if action == "prepare-visual":
                     raise driver.Uncertain("composer draft mismatch")
-                return {"ok": True}
+                return {"ok": True, "frontmost": True}
             driver.bridge = bridge
             with mock.patch.object(probe, "load_driver", return_value=driver):
                 result = probe.draft_probe(config, PATH.with_name("macos_sender_driver.py"))
             self.assertEqual(actions, ["inspect", "capture", "prepare-visual", "capture"])
             self.assertTrue(result["prepare_refused"])
             self.assertFalse(result["submit_called"])
+
+    def test_draft_probe_refuses_background_app_without_ui_input(self):
+        with tempfile.TemporaryDirectory() as name:
+            ui = Path(name)
+            ui.chmod(0o700)
+            driver = types.SimpleNamespace()
+            driver.status = lambda *_: 0
+            driver.inspect_ok = lambda *_: (20, {"x": 0, "y": 0, "width": 880, "height": 640})
+            driver.call = lambda *_args, **_kwargs: self.fail("draft probe must not launch an app")
+            actions = []
+            def bridge(_cfg, _tid, action, _data, _deadline, _seconds):
+                actions.append(action)
+                self.assertEqual(action, "inspect")
+                return {"ok": True, "frontmost": False}
+            driver.bridge = bridge
+            with self.assertRaisesRegex(probe.ProbeFailure, "already be frontmost"):
+                probe._draft_probe_locked({"ui_dir": ui}, driver)
+            self.assertEqual(actions, ["inspect"])
 
 
 if __name__ == "__main__":

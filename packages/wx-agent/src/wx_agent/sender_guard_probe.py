@@ -204,7 +204,8 @@ def _draft_probe_locked(validated, driver):
     tid = "draft-probe-" + uuid.uuid4().hex
     inspected = driver.bridge(validated, tid + "-inspect", "inspect", {}, deadline, 6)
     window_id, frame = driver.inspect_ok(inspected, validated)
-    driver.call(["/usr/bin/open", "-a", "/Applications/WeChat.app"], deadline, limit=65536)
+    if inspected.get("frontmost") is not True:
+        raise ProbeFailure("WeChat must already be frontmost for a draft probe")
     # Capture before and after privately. Do not emit the image or draft content.
     driver.bridge(validated, tid + "-before", "capture", {}, deadline, 4)
     sentinel = "PROBE-EXPECTED-" + uuid.uuid4().hex + uuid.uuid4().hex
