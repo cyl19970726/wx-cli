@@ -2,7 +2,7 @@
 
 `wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。已配置的单群 controller 可以导入复用，涉及它时 CLI 会协调原 writer 并在完成后交还。当前不提供多常驻 Agent 调度或 MCP。
 
-**已完成基线：** 2026-10-20 的 `d8f4910` 已完成授权私聊→测试群的有界往返及独立收件确认；末尾换行导致的一条私聊 `indeterminate` 原记录保留，不可重发。当前源码拒绝终止 LF/CR。**后续候选：** 10 月 21 日新增激活/草稿/中文按钮/搜索分类修复，离线通过；最近聚焦试验未通过并已回退，新分类补丁尚待现场验收。见[验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)与[历史记录](CONVERSATIONS_VALIDATION_20261016.md)。
+**已完成基线：** 2026-10-20 的 `d8f4910` 已完成授权私聊→测试群的有界往返及独立收件确认，这一历史基线仍然有效；末尾换行导致的一条私聊 `indeterminate` 原记录保留，不可重发。统一 Python 修复已安装；集成测试确认终止 LF/CR/CRLF 会在入队前被拒绝。**现场状态：** 10 月 21 日统一候选已通过私聊聚焦和正文准备，完整发送验收仍未完成。随时间变化的安装和现场状态见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)；不能据此声称新候选已完成收发验收或可用于生产。历史细节见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
 
 ## 配置一次
 
@@ -65,7 +65,7 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 ## 可选桌面聚焦与发送
 
-只有任务已明确授权向该测试会话发送时才操作桌面。操作前 fresh inspect 当前 helper 的 Accessibility、Screen Recording、Post Events 权限，三项全部启用后才继续；按[验证记录](CONVERSATIONS_VALIDATION_20261016.md)确认当前 build 已允许现场测试。`focus` 只定位目标，不创建消息。出现窗口/标题保护错误时停止，不绕过或重复尝试：
+只有任务已明确授权向该测试会话发送时才操作桌面。操作前 fresh inspect 当前 helper 的 Accessibility、Screen Recording、Post Events 权限，三项全部启用后才继续；当前 build 的现场验收状态以[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)为准。`focus` 只定位目标，不创建消息。出现窗口/标题保护错误时停止，不绕过或重复尝试：
 
 ```sh
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json focus
@@ -80,7 +80,7 @@ chmod 700 /ABS/private/wx-agent/conversations
   --request-id synthetic-message-001 --text-stdin < /ABS/private/wx-agent/message.txt
 ```
 
-本入口只有 `--text-stdin`；`< 文件` 是 shell 重定向，不是 `--text-file` 参数，也没有 `--text` 正文参数。本分支源码将标准输入的 UTF-8 正文按原样绑定 request ID，不做 `strip` 或换行归一化。正文内部换行、中文和 emoji 保留；若正文以 LF、CR 或 CRLF 结束，会在入队和桌面操作前拒绝，并提示去掉末尾换行。微信可能不保留这个末尾字符，继续发送会使严格出站核验无法确认实际已发消息。该修复尚未装入现场运行时；文件生成工具若自动附加换行，先检查其内容。不要为已有失败或不确定请求改写正文或换 ID 重试。
+本入口只有 `--text-stdin`；`< 文件` 是 shell 重定向，不是 `--text-file` 参数，也没有 `--text` 正文参数。统一 Python 修复将标准输入的 UTF-8 正文按原样绑定 request ID，不做 `strip` 或换行归一化。正文内部换行、中文和 emoji 保留；若正文以 LF、CR 或 CRLF 结束，会在入队和桌面操作前拒绝，并提示去掉末尾换行。集成测试已确认此拒绝行为，安装和现场状态见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)。微信可能不保留这个末尾字符，继续发送会使严格出站核验无法确认实际已发消息；文件生成工具若自动附加换行，先检查其内容。不要为已有失败或不确定请求改写正文或换 ID 重试。
 
 同一 request ID 和相同正文只对应一个意图；正文不同会冲突。已有 `attempt_recorded`、`failed`、`indeterminate` 或其他未决状态时，命令只报告未决，不会再次点击。保留原 request ID 并核对 outbox 与授权接收端，禁止自动重试或生成替代 ID。
 
@@ -107,8 +107,8 @@ chmod 700 /ABS/private/wx-agent/conversations
   --request-id synthetic-request-001 --expected-attempt 1
 ```
 
-`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。若该会话导入单群 controller，命令复用原 lease 与 reply pending；不会创建新的 channel/consumer。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态只以[验证记录](CONVERSATIONS_VALIDATION_20261016.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
+`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。若该会话导入单群 controller，命令复用原 lease 与 reply pending；不会创建新的 channel/consumer。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态以[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
 
 ## 现有单群入口与功能状态
 
-已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。当前部署状态见[现场验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
+已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。当前部署状态见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)。

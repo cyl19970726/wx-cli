@@ -16,6 +16,35 @@ import ImageIO
         precondition(!VisualParameters.uniqueSendLabel([], atButton: true))
         precondition(!VisualParameters.uniqueSendLabel(["发送文件"], atButton: true))
         precondition(!VisualParameters.uniqueSendLabel(["Send now"], atButton: true))
+        // The calibrated click stays in the crop, while a nearby toolbar glyph
+        // that was OCR text in a 96px crop stays outside it.
+        let sendCrop = VisualParameters.sendButtonCrop(at: CGPoint(x: 829, y: 606),
+                                                        imageWidth: 880, imageHeight: 640)
+        precondition(sendCrop!.contains(CGPoint(x: 829, y: 606)))
+        precondition(sendCrop!.contains(CGPoint(x: 817, y: 605)))
+        precondition(!sendCrop!.intersects(CGRect(x: 781, y: 599, width: 10, height: 16)))
+        precondition(sendCrop == CGRect(x: 795, y: 589, width: 68, height: 34))
+        let centeredSend = HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 819, y: 601, width: 26, height: 12))
+        precondition(VisualParameters.sendLabelAtButton([centeredSend],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([
+            HeaderOCRCandidate(text: "⑨）", bounds: CGRect(x: 781, y: 599, width: 10, height: 16)),
+            centeredSend], point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([centeredSend, centeredSend],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([
+            HeaderOCRCandidate(text: "发送文件", bounds: centeredSend.bounds)],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([centeredSend],
+            point: CGPoint(x: 803, y: 606), crop: sendCrop!))
+        precondition(!VisualParameters.sendLabelAtButton([
+            HeaderOCRCandidate(text: "发送", bounds: CGRect(x: 859, y: 601, width: 20, height: 12))],
+            point: CGPoint(x: 829, y: 606), crop: sendCrop!))
+        precondition(VisualParameters.sendButtonCrop(at: CGPoint(x: 10, y: 606),
+                                                     imageWidth: 880, imageHeight: 640) == nil)
+        precondition(VisualParameters.sendButtonCrop(at: CGPoint(x: 829, y: 632),
+                                                     imageWidth: 880, imageHeight: 640) == nil)
         precondition(VisualParameters.acceptsText("中文，标点 😊\n第二行", allowEmpty: false))
         precondition(VisualParameters.acceptsText("", allowEmpty: true))
         precondition(!VisualParameters.acceptsText("", allowEmpty: false))

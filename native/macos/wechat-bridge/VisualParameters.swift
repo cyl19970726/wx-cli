@@ -102,9 +102,26 @@ struct FocusPollDiagnostic: Codable {
 }
 
 enum VisualParameters {
+    static func sendButtonCrop(at point: CGPoint, imageWidth: Int, imageHeight: Int) -> CGRect? {
+        guard point.x.isFinite, point.y.isFinite else { return nil }
+        let crop = CGRect(x: point.x - 34, y: point.y - 17, width: 68, height: 34)
+        guard crop == crop.integral, crop.minX >= 0, crop.minY >= 0,
+              crop.maxX <= CGFloat(imageWidth), crop.maxY <= CGFloat(imageHeight) else { return nil }
+        return crop
+    }
+
     static func uniqueSendLabel(_ labels: [String], atButton: Bool) -> Bool {
         let matches = labels.filter { ["Send", "发送"].contains($0) }
         return matches.count == 1 && (!atButton || labels.count == 1)
+    }
+
+    static func sendLabelAtButton(_ labels: [HeaderOCRCandidate], point: CGPoint,
+                                  crop: CGRect) -> Bool {
+        guard labels.count == 1, uniqueSendLabel(labels.map(\.text), atButton: true),
+              crop.contains(point), crop.contains(labels[0].bounds),
+              labels[0].bounds.width > 0, labels[0].bounds.height > 0 else { return false }
+        let center = CGPoint(x: labels[0].bounds.midX, y: labels[0].bounds.midY)
+        return abs(center.x - point.x) <= 16 && abs(center.y - point.y) <= 10
     }
 
     // Compare every calibrated composer pixel, including guidance and any draft.

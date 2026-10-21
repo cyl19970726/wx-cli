@@ -2,7 +2,7 @@
 
 让现有 Agent 通过 CLI 按需读取授权的群聊或个人会话、确认需求并回复；已验证的自动运行基线仍是单个绑定群。**结构化读取 + 持久消费进度 + 一次性发送 + 会话需求笔记**由共享 channel/outbox 契约连接起来。
 
-本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。CLI 已支持群聊和个人会话的选择、读取与手动回复；单群接管和交还后台已实测。2026-10-20 的 `d8f4910` 完成一次私聊到测试群的有界往返，两条消息有独立收件确认；其中私聊末尾换行造成结果误判，当前源码已在入队前拒绝该输入。10 月 21 日后续原生候选的激活、空框及搜索修复另行验收，不能覆盖此前已完成的证据。长期无人值守、其他客户环境和多常驻 Agent 尚未验证。见[验收记录](docs/CONVERSATIONS_ACCEPTANCE_20261020.md)。
+本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。CLI 已支持群聊和个人会话的选择、读取与手动回复；单群接管和交还后台已实测。2026-10-20 的 `d8f4910` 完成一次私聊到测试群的有界往返，两条消息有独立收件确认，这一历史基线仍然有效。终止换行保护已纳入并安装的统一 Python 修复，集成测试确认末尾换行会在入队前被拒绝。10 月 21 日统一候选已通过私聊聚焦和正文准备，完整发送验收仍未完成；候选安装和最新现场状态见[验收记录](docs/CONVERSATIONS_ACCEPTANCE_20261020.md)。长期无人值守、其他客户环境和多常驻 Agent 尚未验证。
 
 [远端开发与本地验收](docs/REMOTE_DEVELOPMENT.md) · [完整操作指南](docs/OPERATING_GUIDE.md) · [群/个人会话 CLI](docs/CONVERSATIONS_CLI.md) · [会话验证状态](docs/CONVERSATIONS_VALIDATION_20261016.md) · [单群开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [会话能力图](docs/diagrams/conversation-capabilities.html) · [消息契约](docs/contracts.md) · [既有验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
 

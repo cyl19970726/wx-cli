@@ -16,7 +16,21 @@
 
 统一候选随后已受控安装：复用下文 `5c7db616…` 原生构建，不重新编译或重签；Python wheel SHA-256 为 `3db1e5a1c4175811a2b221139affcfc6bc65216ec0571ea7c0ffa6df8e18a50c`，11 个安装模块与集成源码相同。四锁内保留 app/路由备份并演练代码回退，全部 26 条 outbox、绑定和消费进度保留，未用状态备份覆盖运行状态。已安装新版的私聊/群读取分别为 0.280/0.279 秒，两个入口均在入队前拒绝末尾换行，outbox 没有增加；runner 保持停止，无 pending/lease。安装后的 fresh inspect 三权限仍为 false，因此未进行新聚焦或发送；固定该二进制等待正常系统权限恢复，不能将本次读取成功写成新版收发验收通过。
 
-通过 Mac mini 本机 Computer Use 正常移除并重新加入录屏条目后，fresh inspect 已为 Screen Recording=true，Accessibility/Post Events=false；可见一个窗口、onConsole=true，配置中的旧 PID 尚未刷新。辅助功能移除需要系统认证。用户明确允许使用现有凭据后，工具仍以安全原因拒绝访问 `com.apple.LocalAuthenticationRemoteService`，没有完成认证或绕过该限制。当前唯一的人工前置动作是账户持有人在系统窗口完成辅助功能旧条目移除及固定 app 重新添加；随后需再次检查三权限、原账号来源、当前 PID 和窗口，才可进行候选的有界切换/发送验收。录屏恢复不是发送通过，历史意图没有重放。
+通过 Mac mini 本机 Computer Use 正常移除并重新加入录屏条目后，fresh inspect 曾为 Screen Recording=true、Accessibility/Post Events=false；可见一个窗口、onConsole=true，配置中的旧 PID 尚未刷新。辅助功能移除需要系统认证。用户明确允许使用现有凭据后，工具仍以安全原因拒绝访问 `com.apple.LocalAuthenticationRemoteService`，没有绕过该限制。这是当时的工具阻断，不是当前仍缺业务授权。
+
+### 权限恢复后的新候选实测
+
+用户随后完成认证；重新检查正常系统设置，发现当前 helper 的辅助功能条目已存在但开关关闭。只打开一次现有开关后，fresh inspect 的 Accessibility、Post Events、Screen Recording 均为 true，没有再次移除重加或触发认证。核对原安装路径、原账号 source 和唯一 880×640 窗口后，仅更新三份私有 sender 配置的当前 PID。权限状态必须以 fresh inspect 为准，不能规定所有 false 都必须移除重加。
+
+统一候选的私聊选择/聚焦分别用时 0.198/2.940 秒，成功取得 kind-aware 搜索证据。首个新测试意图在 `prepare-attempted` 阶段以 `Copied composer text does not exactly match expected draft` 停止，未提交。新截图证实空输入框显示微信的语音输入提示，运行配置未启用已有的空框参考功能。校准整块输入区域的私有 PNG 并固定 SHA-256 后，按既有 `recover-unsent-send` 契约保留原 request ID、正文和 attempt 1；只读 preflight 与 UI 锁内二次核验证实无 submit，才领取 attempt 2。
+
+attempt 2 成功准备中文、内部换行和 emoji，复制回读与原文完全相同；随后在点击前以 `Unique Send label not confirmed at button point` 停止。原生 state 保持 `prepared`，未写入点击提交标记。outbox 仍按保守契约保留 `indeterminate`，且因已进入 submit 作业不允许再次恢复、换 ID 重放或手动发送这份草稿。该结果证明输入准备通过，不证明消息送达；原 26 条历史记录未重放。
+
+之后通过正常 CLI 从私聊切回测试群，选择/聚焦分别为 0.191/3.466 秒；结构化增量读取 0.279 秒，返回 cursor 41–45 共 5 条事件且无更多分页，其中 cursor 45 是入站确认消息。读取不推进 consumer，不为确认消息另发回复；私聊测试草稿保留。
+
+缓存截图的离线 Vision OCR 定位按钮误拒绝：旧 96×46 区域同时读出邻近语音图标的字符和精确的发送标签，故唯一性检查拒绝；不是点击点落在错误按钮。修复为以原校准点为中心的 68×34 区域，保留下方面板与按钮区域两层唯一精确标签要求，并检查标签中心距点击点水平不超过 16px、垂直不超过 10px。没有放宽为文字包含或模糊匹配。
+
+合成回归覆盖邻近图标、重复标签、扩展标签、错位与越界；在隔离副本中仅恢复旧裁剪几何后，源码成功编译，但邻近图标不得进入区域的断言实际运行失败，修复版通过。Swift 完整 typecheck、隔离构建与严格签名通过，新 helper SHA-256 为 `e94a36bd3f89a7821a54c9e4f021e8fd375705c64b9ded6dd47fdf70d6e017e9`。完整 Rust/Python 矩阵也再次通过，计数同下文；此次证据在 `.local/takeover-ci/send-button-20261021/` 与 `.local/takeover-deploy/send-button-candidate/`。这些离线证据尚不证明修复版实际发送成功；后续安装与实测另记。
 
 ### 2026-10-21 集成源码离线验证
 
@@ -24,7 +38,7 @@
 
 修复后默认并行 `cargo test --locked` 的 46 个 suite 共 842 通过、0 失败、11 项原有忽略；Rust 格式、全目标 Clippy（警告拒绝）、build、合成 channel（含 1,100 条积压）与编译后 sender 契约均通过。初次无 HTTP 响应的底层触发原因未单独证明，不将测试夹具修复推断为微信客户端故障修复。
 
-Python 3.9.6 与 3.12.8 的脚本测试各 82 通过；两版重新构建 wheel 后，源码外独立安装的包测试各 54 通过，均无失败或跳过。Swift 原生参数测试及主源码 typecheck、公有源码检查和 `git diff --check` 通过。实际命令、版本、首次失败与修复后日志保存在忽略目录 `.local/takeover-ci/`。PR 的首轮远程 Python 两版、Rust 和 Swift 四项也已通过；最终提交的远程状态以 PR 检查为准。工程验证不证明 GUI 送达；受控安装、已恢复录屏和剩余辅助功能认证按上文现场记录判断。
+Python 3.9.6 与 3.12.8 的脚本测试各 82 通过；两版重新构建 wheel 后，源码外独立安装的包测试各 54 通过，均无失败或跳过。Swift 原生参数测试及主源码 typecheck、公有源码检查和 `git diff --check` 通过。实际命令、版本、首次失败与修复后日志保存在忽略目录 `.local/takeover-ci/`。提交 `bd07749` 的远程 run `39575523323` 已核验 Python 两版、Rust 和 Swift 四项全部通过；后续提交的远程状态以相应 PR 检查为准。工程验证不证明 GUI 送达；权限恢复和后续实测按上文记录判断。
 
 以下是各次试验的历史记录。“未完成往返”均限定当次候选，不抹掉 10 月 20 日已经完成的基线。
 

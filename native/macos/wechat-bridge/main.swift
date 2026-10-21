@@ -393,9 +393,29 @@ private func requireSendButton(_ image: CGImage, point: CGPoint) throws {
     guard VisualParameters.uniqueSendLabel(allLabels, atButton: false) else {
         throw Failure("Expected exactly one visible Send label in lower conversation pane")
     }
-    let crop = CGRect(x: point.x - 48, y: point.y - 23, width: 96, height: 46)
-    let words = try screenshotText(image, rect: crop).map(normalizedDraft)
-    guard VisualParameters.uniqueSendLabel(words, atButton: true) else { throw Failure("Unique Send label not confirmed at button point") }
+    guard let crop = VisualParameters.sendButtonCrop(at: point,
+        imageWidth: image.width, imageHeight: image.height) else {
+        throw Failure("Calibrated Send button point is outside captured window")
+    }
+    guard let buttonImage = image.cropping(to: crop) else {
+        throw Failure("Calibrated Send button crop is unavailable")
+    }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
+    request.usesLanguageCorrection = false
+    try VNImageRequestHandler(cgImage: buttonImage).perform([request])
+    let candidates = (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
+        guard let text = result.topCandidates(1).first?.string else { return nil }
+        let bounds = result.boundingBox
+        return HeaderOCRCandidate(text: normalizedDraft(text), bounds: CGRect(
+            x: crop.minX + bounds.minX * crop.width,
+            y: crop.minY + (1 - bounds.maxY) * crop.height,
+            width: bounds.width * crop.width, height: bounds.height * crop.height))
+    }
+    guard VisualParameters.sendLabelAtButton(candidates, point: point, crop: crop) else {
+        throw Failure("Unique Send label not confirmed at button point")
+    }
 }
 
 private func consoleStatus() throws -> String {
