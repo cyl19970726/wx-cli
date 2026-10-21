@@ -39,6 +39,20 @@ impl Drop for TestServer {
 }
 
 #[test]
+fn health_probe_deadline_bounds_nonresponsive_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind health fixture");
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).expect("connect fixture");
+    let (_server, _) = listener.accept().expect("accept health fixture");
+    let started = Instant::now();
+    let result = read_health_status(&mut client, started + Duration::from_millis(100));
+    assert!(result.is_err(), "nonresponsive health socket was accepted");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "health read exceeded deadline"
+    );
+}
+
+#[test]
 fn serve_media_missing_server_id_returns_400() {
     let server = spawn_test_server();
     let response = http_get(&server.base_url, "/api/v1/media?talker=wxid_alice");
@@ -341,6 +355,7 @@ fn spawn_test_server_with_setup(envs: &[(&str, &str)], hidden_contacts: &[&str])
     }
     let account_dir = fixture.path().join(TEST_ACCOUNT_ID);
     let runtime_root = fixture.path().join("runtime");
+    let stderr_path = fixture.path().join("server-stderr.log");
     // Keep ephemeral-port selection and worker binding atomic across parallel tests.
     let _start_guard = SERVER_START_LOCK
         .lock()
@@ -367,13 +382,15 @@ fn spawn_test_server_with_setup(envs: &[(&str, &str)], hidden_contacts: &[&str])
         ])
         .env("HOME", fixture.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::from(
+            fs::File::create(&stderr_path).expect("create server stderr log"),
+        ));
     for (key, value) in envs {
         command.env(key, value);
     }
     let mut child = command.spawn().expect("spawn wx-cli server worker");
 
-    wait_for_server(port, &mut child);
+    wait_for_server(port, &mut child, &stderr_path);
 
     TestServer {
         _fixture: fixture,
@@ -382,40 +399,96 @@ fn spawn_test_server_with_setup(envs: &[(&str, &str)], hidden_contacts: &[&str])
     }
 }
 
-fn wait_for_server(port: u16, child: &mut Child) {
+fn wait_for_server(port: u16, child: &mut Child, stderr_path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_error = String::new();
 
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().expect("poll child") {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            panic!("server worker exited early with {status}: {stderr}");
+            fail_server_start(
+                child,
+                stderr_path,
+                &format!("server worker exited early with {status}"),
+            );
         }
 
         match TcpStream::connect(("127.0.0.1", port)) {
             Ok(mut stream) => {
-                let _ = stream.write_all(
-                    b"GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-                );
-                let mut buf = String::new();
-                let _ = stream.read_to_string(&mut buf);
-                if buf.starts_with("HTTP/1.1") || buf.starts_with("HTTP/1.0") {
-                    return;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
                 }
-                last_error = format!("unexpected health response: {buf}");
+                stream
+                    .set_write_timeout(Some(remaining))
+                    .expect("set health write timeout");
+                if let Err(err) = stream.write_all(
+                    b"GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                ) {
+                    last_error = format!("health request failed: {err}");
+                } else {
+                    match read_health_status(&mut stream, deadline) {
+                        Ok(status)
+                            if status.starts_with("HTTP/1.1 200 ")
+                                || status.starts_with("HTTP/1.0 200 ") =>
+                        {
+                            return
+                        }
+                        Ok(status) => last_error = format!("unexpected health status: {status}"),
+                        Err(err) => last_error = err,
+                    }
+                }
             }
             Err(err) => {
                 last_error = err.to_string();
             }
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(
+            Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 
-    panic!("server worker did not start on port {port}: {last_error}");
+    fail_server_start(
+        child,
+        stderr_path,
+        &format!("server worker did not start on port {port}: {last_error}"),
+    );
+}
+
+fn read_health_status(stream: &mut TcpStream, deadline: Instant) -> Result<String, String> {
+    let mut status = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("health response timed out".into());
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|err| format!("set health read timeout: {err}"))?;
+        let mut byte = [0];
+        match stream.read(&mut byte) {
+            Ok(0) => return Err("health response closed before status line".into()),
+            Ok(_) if byte[0] == b'\n' => {
+                return Ok(String::from_utf8_lossy(&status).trim_end().to_owned())
+            }
+            Ok(_) if status.len() < 255 => status.push(byte[0]),
+            Ok(_) => return Err("health status line exceeded 255 bytes".into()),
+            Err(err) => return Err(format!("health response read failed: {err}")),
+        }
+    }
+}
+
+fn fail_server_start(child: &mut Child, stderr_path: &Path, reason: &str) -> ! {
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr = fs::File::open(stderr_path)
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(4096).read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|err| format!("unavailable: {err}"));
+    panic!("{reason}; server stderr (first 4096 bytes): {stderr}");
 }
 
 #[derive(Debug)]
