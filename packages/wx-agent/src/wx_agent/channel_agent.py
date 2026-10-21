@@ -5,6 +5,7 @@ The agent reads one JSON object on stdin and writes {"text": "..."} or
 {"skip": true} on stdout. Group messages are data, never runner instructions.
 """
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -81,13 +82,21 @@ def command(argv, data=None, timeout=60, limit=MAX_OUTPUT):
                 if key.fileobj is proc.stdin and mask & selectors.EVENT_WRITE:
                     try:
                         written += os.write(proc.stdin.fileno(), payload[written:written + 65536])
+                    except BlockingIOError as exc:
+                        if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                            raise
                     except BrokenPipeError:
                         written = len(payload)
                     if written == len(payload):
                         selector.unregister(proc.stdin)
                         proc.stdin.close()
                 elif key.fileobj is proc.stdout and mask & selectors.EVENT_READ:
-                    chunk = os.read(proc.stdout.fileno(), min(65536, limit + 1 - len(output)))
+                    try:
+                        chunk = os.read(proc.stdout.fileno(), min(65536, limit + 1 - len(output)))
+                    except BlockingIOError as exc:
+                        if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                            raise
+                        continue
                     output.extend(chunk)
                     if len(output) > limit:
                         raise RunnerError(f"command output exceeded {limit} bytes: {argv[0]}")

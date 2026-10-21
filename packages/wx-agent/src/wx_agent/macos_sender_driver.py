@@ -4,6 +4,7 @@
 A private, explicit WX_SENDER_CONFIG binds one channel, one helper binary and
 one calibrated window. A UI click alone is never reported as ui_observed.
 """
+import errno
 import fcntl
 import hashlib
 import json
@@ -232,7 +233,12 @@ def call(argv, deadline, limit=MAX_OUTPUT):
             if remaining <= 0:
                 raise Uncertain("command timeout")
             for key, _ in selector.select(min(remaining, 0.2)):
-                chunk = os.read(key.fileobj.fileno(), min(65536, limit + 1 - len(output)))
+                try:
+                    chunk = os.read(key.fileobj.fileno(), min(65536, limit + 1 - len(output)))
+                except BlockingIOError as exc:
+                    if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        raise
+                    continue
                 if not chunk:
                     selector.unregister(key.fileobj)
                 else:
