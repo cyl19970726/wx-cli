@@ -2,7 +2,7 @@
 
 让现有 Agent 通过 CLI 按需读取授权的群聊或个人会话、确认需求并回复；已验证的自动运行基线仍是单个绑定群。**结构化读取 + 持久消费进度 + 一次性发送 + 会话需求笔记**由共享 channel/outbox 契约连接起来。
 
-本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。群/个人会话 CLI 支持按需选择、读取与手动发送；v3 私人及群消息各有一条经用户确认收到。v5 有限导航与分页读取已通过现场探测；v5 写入、完整往返和长期稳定性未验证，运行器当前停止。单群历史测试不代表客户环境、媒体发送、多常驻 Agent 或全天无人值守已获验证。详见[会话验证记录](docs/CONVERSATIONS_VALIDATION_20261016.md)。
+本仓库基于 [pandorafuture/wx-cli](https://github.com/pandorafuture/wx-cli)，保留上游历史与 MIT 许可证。群/个人会话 CLI 支持按需选择、读取与手动发送；v3 私人及群消息各有一条历史收件确认。2026-10-20 私聊 focus 和三页只读读取通过；原请求前三次准备失败、第四次 focus 被白屏保护拒绝，四个 attempt 保留且不再恢复。空框、重启 PID 和中文按钮候选通过完整离线矩阵，但现场未验收。2026-10-21 仅聚焦试验因搜索分类歧义停止，候选运行时已回退，全部状态保留；缓存截图定位的分类边界修复已通过完整离线矩阵，尚未现场验收。完整往返和长期稳定性尚未验收。单群历史测试不代表客户环境、媒体发送、多常驻 Agent 或全天无人值守已获验证。详见[最新验收记录](docs/CONVERSATIONS_ACCEPTANCE_20261020.md)。
 
 [远端开发与本地验收](docs/REMOTE_DEVELOPMENT.md) · [完整操作指南](docs/OPERATING_GUIDE.md) · [群/个人会话 CLI](docs/CONVERSATIONS_CLI.md) · [会话验证状态](docs/CONVERSATIONS_VALIDATION_20261016.md) · [单群开始使用](docs/quickstart.md) · [架构](docs/architecture.md) · [会话能力图](docs/diagrams/conversation-capabilities.html) · [消息契约](docs/contracts.md) · [既有验证范围](docs/REAL_READ_VALIDATION_20261015.md) · [安全边界](SECURITY.md)
 
@@ -48,7 +48,7 @@ python3 -m venv .local/venv
 
 0.2.0 已在授权测试端隔离部署，实测选群、分页、按需读取、人工回复与交还后台；本轮两条回复有用户提供的收件端截图和确认。会话笔记与故障分支另有合成数据验证。窗口锁定、微信退出、权限变化或不可读剪贴板仍可能停止图形发送。最新证据见 [交互 CLI 验证](docs/INTERACTIVE_VALIDATION_20261016.md)，早期证据见 [读取与发送验证](docs/REAL_READ_VALIDATION_20261015.md)。
 
-通用 `wx-agent conversations` 的当前现场状态：v3 私人及群消息各有一条经用户确认收到；v5 有限导航与只读分页读取已通过，v5 写入、完整往返和长期稳定性未验证；运行器停止。事故时间线、未重试请求及精确证据见[会话验证记录](docs/CONVERSATIONS_VALIDATION_20261016.md)。
+通用 `wx-agent conversations` 的现场验收、日常操作和停止条件见[最新记录](docs/CONVERSATIONS_ACCEPTANCE_20261020.md)。运行器保持停止；本轮未决意图与历史失败请求均保留。早先事故时间线及历史收件范围见[会话验证记录](docs/CONVERSATIONS_VALIDATION_20261016.md)。
 
 ## 开发
 

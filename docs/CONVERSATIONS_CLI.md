@@ -2,7 +2,7 @@
 
 `wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。已配置的单群 controller 可以导入复用，涉及它时 CLI 会协调原 writer 并在完成后交还。当前不提供多常驻 Agent 调度或 MCP。
 
-**现场状态（2026-10-16）：v5 权限、私人/群定向导航和分页读取已通过有限探测；v5 发送和长期稳定性未验证。v4 原群请求在发送准备前失败，必须保留且不得重试。** 当前证据、历史异常与运行状态集中记录在[验证记录](CONVERSATIONS_VALIDATION_20261016.md)；每次桌面写操作前核对当前权限和验证门槛。
+**现场状态（2026-10-21）：用户完成认证后的仅聚焦试验因搜索分类歧义停止，候选运行时已回退，状态完整保留。原意图保留四个 attempt，第四次 focus 失败不可恢复。私聊 focus 和三页只读读取曾通过，完整往返尚未验收。** 激活、草稿、中文按钮及分类边界修复已通过离线矩阵；新的分类边界候选尚未安装或现场验收；当前版本、停止条件和日常检查见[最新验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)，历史异常见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。v4 原群请求仍不得重试；每次桌面写操作前核对当前权限和验证门槛。
 
 ## 配置一次
 
@@ -16,6 +16,8 @@ chmod 700 /ABS/private/wx-agent/conversations
 ```
 
 把现有、已校准的 sender 私有配置复制为 `sender-template.json`，保持 `0600`，不要使用公开模板或示意坐标。模板应包含现有 helper 要求的 `protocol_version`、`helper_app`、`helper_sha256`、固定 `ui_dir`、`expected_pid`、`window_size`、`composer_rect`、`button_point`、`conversation_list_rect` 和 `search_point`。窗口值以当前微信桌面检查和校准结果为准。会话 CLI 会为每个绑定生成私有 sender 配置，并通过 `target_name` 与 `conversation_kind` 让现有 driver/helper 定位该会话；它沿用 helper 的 `targetGroup` 兼容字段。通常复用现有 helper；只有发现具体缺陷并完成审查时才更新，更新与现场验证状态见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。
+
+若已确认空输入框中的系统提示会被视觉检查识别为文字，可为支持该功能的 helper 显式校准 `empty_composer_reference`，值为仅含 `path`、`sha256` 的对象。它必须指向 `ui_dir` 直属的私有 `0600` PNG，尺寸等于整数 `composer_rect` 的宽高。必须先确认没有用户草稿；不得把未知草稿截为“空框”。助手要求完整输入区域像素精确匹配，且复制操作保留原 sentinel 和剪贴板计数；不按提示文字放行。未配置时仍用原空白检查。界面、主题或尺寸变化后可能拒绝，需要重新校准，详见[原生助手](../native/macos/wechat-bridge/README.md)。
 
 创建 `0600` 的会话配置，路径全部使用绝对路径，不要包含 `..`。`registry_dir` 必须预先创建，且和微信来源目录互不嵌套；`account` 必须等于 `source` 的目录末级名称。`controller_configs` 可省略；填入要导入并协调的既有单群 controller 配置路径：
 

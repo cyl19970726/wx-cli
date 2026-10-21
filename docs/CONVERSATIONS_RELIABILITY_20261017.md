@@ -1,5 +1,9 @@
 # Conversation reliability candidate · 2026-10-17
 
+For the later installed-version check and live acceptance outcome, see the
+[2026-10-20 acceptance record](CONVERSATIONS_ACCEPTANCE_20261020.md). The deployment
+statements below describe the original 2026-10-17 proposal and preparation.
+
 The private chat → test group → paginated read → reply flow now has additional
 offline regression coverage and a candidate fix based on `bfe335e`. This is a
 proposal for independent review, not a live deployment or recipient-confirmed round trip.

@@ -53,6 +53,10 @@ Codex 适配器匿名化成员标签，并只把笔记文案加入提示，不�
 
 恢复保留原 request ID、正文、绑定和不可变历史尝试，并要求调用者指定与 outbox 当前状态完全匹配的 `expected_attempt`。驱动必须先报告受支持的 recovery capability；只读 preflight 在不领取新 attempt 的情况下核对原 request/channel/session/account/talker/text、指定 attempt、完整的 inspect/focus/prepare 作业与结果、原准备阶段错误、已记录的权限、无提交痕迹及无存活 helper。任何证据缺失、重复、悬空或不匹配，或发现 submit 证据/存活 helper，均拒绝恢复。Rust 只有在 preflight 明确证明未提交后，才以事务比较领取下一 attempt；驱动随后在共用 UI 锁内重新核验证据并保存恢复证明，然后最多执行一次发送尝试。缺少能力握手或 positive proof 时失败关闭，不自动退回普通 `send`。
 
+若原 prepare 作业使用过 `emptyComposerReference`，其作业、持久 visual state 与当前配置中的引用必须完全一致，恢复时不得替换或移除。经过审查的升级可以为未配置过参考图的旧尝试新增校准，但不改变原失败证据、正文、绑定或无 submit 的证明要求。参考图自身不能授权恢复。
+
+微信正常重启后 PID 可以变化。旧 prepare、state、focus 仍须匹配旧 PID；若与当前校准 PID 不同，还必须由原 inspect 结果证明当时的唯一窗口 ID/frame、PID、权限及 console 状态，不能把当前 PID 写回旧证据。下一次动作仍对当前配置重新执行 inspect、唯一目标元数据与 focus 检查；旧 inspect 不能证明当前会话身份或授权切换账号。
+
 单群 `chat recover-unsent-reply` 只接受与现有 lease、来源游标和 outbox 意图一致的待回复；通用 `conversations recover-unsent-send` 必须指定稳定 conversation ID、原 request ID 与 expected attempt，导入 controller 时复用其保留 lease。命令失败或结果再次不明时保留全部证据，停止并人工检查；不可连续重试来“试通”。该协议是显式人工恢复的窄例外，不改变未知发送禁止自动重试的总则。
 
 ## 会话笔记
