@@ -28,3 +28,5 @@ pub(crate) mod channel_snapshot;
 pub mod conversations;
 pub mod groups;
 pub mod outgoing;
+mod outgoing_media;
+mod outgoing_verify;

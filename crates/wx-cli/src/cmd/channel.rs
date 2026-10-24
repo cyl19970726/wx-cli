@@ -580,6 +580,28 @@ fn event_lines(
         .collect())
 }
 
+/// Read one exact cursor from the owned channel journal without syncing or acknowledging it.
+pub(crate) fn event_at_cursor(
+    state_dir: &Path,
+    cursor: i64,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    if cursor <= 0 {
+        return Err(invalid("event cursor must be positive"));
+    }
+    let conn = open_state(state_dir, false)?;
+    let binding = read_binding(&conn)?;
+    let lines = event_lines(&conn, &binding, cursor - 1, 1)?;
+    let line = lines
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid("event cursor is absent"))?;
+    let event: serde_json::Value = serde_json::from_str(&line)?;
+    if event["cursor"].as_i64() != Some(cursor) {
+        return Err(invalid("event cursor is absent"));
+    }
+    Ok(event)
+}
+
 fn consumer_cursor(conn: &Connection, consumer: &str) -> Result<i64, Box<dyn Error>> {
     Ok(conn
         .query_row(
