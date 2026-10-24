@@ -70,3 +70,10 @@ Codex 适配器匿名化成员标签，并只把笔记文案加入提示，不�
 ## 兼容性
 
 Rust 协议版本与 Python 包版本分别管理。脚本兼容入口依赖完整源码树或已安装包，不再支持只复制几个旧 launcher 就部署。原来的独立运行版保持原样，升级必须停一个、启动一个并核验原状态；不删除 channel/outbox 来绕过命令变化。
+
+
+## 单图片意图与协议 2
+
+`outbox queue-image --request-id ID --channel-id CHANNEL --session-id SESSION --image PATH` 在既有 journal 中建立 `media_queued` 意图；只有新二进制可领取此状态。文字 queue／协议 1 不变。图片完整验证后冻结，绑定媒体真实类型、字节数和 SHA-256，驱动收到协议 2 的 `media:{path,sha256,mime_type,size_bytes}`，不以 `text` 传路径。领取 attempt 前及驱动 GUI 前复核冻结内容。原文件变化不改变已保存意图；冻结内容变化停止。迁移保留旧文本和不可变 attempt；回退仅替换代码，不恢复过时状态快照。
+
+图片同样先持久记录 attempt 后操作 GUI；prepared／submitted 必须附带匹配来源和复制回规范化像素的图片证据。发送后保留绑定本次目标与操作的截图，关联正确 talker／self 的唯一新 Image 事件；微信重编码不要求输入和输出原文件字节相等。`ui_observed` 不代表收件。图片不支持 `recover-unsent`，不能换 ID 或换 GUI 路径重发。尺寸／格式限制、安装和实际验收见[图片记录](IMAGE_SEND_VALIDATION_20261024.md)。

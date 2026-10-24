@@ -6,6 +6,7 @@ import ImageIO
 @main struct ParameterTests {
     static func main() {
         emptyComposerChecks()
+        imageMediaChecks()
         for label in ["Send", "发送"] {
             precondition(VisualParameters.uniqueSendLabel([label], atButton: true))
             precondition(VisualParameters.uniqueSendLabel(["Toolbar", label], atButton: false))
@@ -359,5 +360,132 @@ import ImageIO
         try! Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: path)
         refused(EmptyComposerReference(path: path.path,
             sha256: SHA256.hash(data: try! Data(contentsOf: path)).map { String(format: "%02x", $0) }.joined()))
+    }
+
+    static func imageMediaChecks() {
+        let width = 4, height = 3
+        var bytes = [UInt8](repeating: 255, count: width * height * 4)
+        bytes[0] = 14
+        bytes[4] = 67
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("source.png")
+        let png = try! MediaSupport.pngData(image)
+        try! png.write(to: path)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let input = ImageMedia(path: path.path, sha256: MediaSupport.digest(png),
+                               mimeType: "image/png", sizeBytes: png.count)
+        let loaded = try! MediaSupport.load(input)
+        precondition(loaded.pixels.width == width && loaded.pixels.height == height)
+        precondition(loaded.pixels == (try! MediaSupport.decode(png, allowedTypes: ["public.png"])).1)
+        let jpegBuffer = NSMutableData()
+        let jpegDestination = CGImageDestinationCreateWithData(jpegBuffer, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(jpegDestination, image, nil)
+        precondition(CGImageDestinationFinalize(jpegDestination))
+        let jpeg = jpegBuffer as Data
+        let jpegPath = directory.appendingPathComponent("source.jpg")
+        try! jpeg.write(to: jpegPath)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: jpegPath.path)
+        let jpegInput = ImageMedia(path: jpegPath.path, sha256: MediaSupport.digest(jpeg),
+                                   mimeType: "image/jpeg", sizeBytes: jpeg.count)
+        let loadedJPEG = try! MediaSupport.load(jpegInput)
+        precondition(loadedJPEG.pixels.width == width && loadedJPEG.pixels.height == height)
+        let rotatedBuffer = NSMutableData()
+        let rotatedDestination = CGImageDestinationCreateWithData(rotatedBuffer, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(rotatedDestination, image,
+            [kCGImagePropertyOrientation: 6] as CFDictionary)
+        precondition(CGImageDestinationFinalize(rotatedDestination))
+        let rotatedJPEG = rotatedBuffer as Data
+        let rotatedPath = directory.appendingPathComponent("rotated.jpg")
+        try! rotatedJPEG.write(to: rotatedPath)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: rotatedPath.path)
+        let rotatedInput = ImageMedia(path: rotatedPath.path,
+            sha256: MediaSupport.digest(rotatedJPEG), mimeType: "image/jpeg",
+            sizeBytes: rotatedJPEG.count)
+        let loadedRotated = try! MediaSupport.load(rotatedInput)
+        precondition(loadedRotated.pixels.width == height && loadedRotated.pixels.height == width)
+        let normalizedPNG = try! MediaSupport.pngData(loadedRotated.image)
+        precondition((try! MediaSupport.decode(normalizedPNG, allowedTypes: ["public.png"])).1 ==
+                     loadedRotated.pixels)
+        func refused(_ candidate: ImageMedia) {
+            do { _ = try MediaSupport.load(candidate); preconditionFailure("unsafe image source accepted") }
+            catch {}
+        }
+        refused(ImageMedia(path: input.path, sha256: String(repeating: "0", count: 64),
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes))
+        refused(ImageMedia(path: input.path, sha256: input.sha256,
+                           mimeType: "image/jpeg", sizeBytes: input.sizeBytes))
+        refused(ImageMedia(path: input.path, sha256: input.sha256,
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes + 1))
+        try! FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path)
+        refused(input)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let fifo = directory.appendingPathComponent("blocked-source.png")
+        precondition(mkfifo(fifo.path, 0o600) == 0)
+        refused(ImageMedia(path: fifo.path, sha256: input.sha256,
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes))
+        let link = directory.appendingPathComponent("link.png")
+        try! FileManager.default.createSymbolicLink(at: link, withDestinationURL: path)
+        refused(ImageMedia(path: link.path, sha256: input.sha256,
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes))
+        let board = NSPasteboard(name: NSPasteboard.Name("codex-image-tests-" + UUID().uuidString))
+        board.clearContents()
+        precondition(board.setString("original clipboard", forType: .string))
+        let snapshot = try! ClipboardSnapshot.capture(board: board)
+        let owned = try! setClipboardImage(loaded, snapshot: snapshot)
+        precondition(try! MediaSupport.copiedImage(from: board, expected: loaded.pixels) != "")
+        let wrong = ImagePixels(width: width, height: height, sha256: String(repeating: "0", count: 64))
+        do {
+            _ = try MediaSupport.copiedImage(from: board, expected: wrong)
+            preconditionFailure("wrong composer pixels accepted")
+        } catch {}
+        try! snapshot.restore(ifCurrentCount: owned)
+        precondition(board.string(forType: .string) == "original clipboard")
+        let jpegSnapshot = try! ClipboardSnapshot.capture(board: board)
+        let jpegOwned = try! setClipboardImage(loadedJPEG, snapshot: jpegSnapshot)
+        precondition(try! MediaSupport.copiedImage(from: board, expected: loadedJPEG.pixels) != "")
+        try! jpegSnapshot.restore(ifCurrentCount: jpegOwned)
+        precondition(board.string(forType: .string) == "original clipboard")
+        let textOnly = NSPasteboard(name: NSPasteboard.Name("codex-image-text-" + UUID().uuidString))
+        textOnly.clearContents()
+        precondition(textOnly.setString("image label", forType: .string))
+        do {
+            _ = try MediaSupport.copiedImage(from: textOnly, expected: loaded.pixels)
+            preconditionFailure("text copy accepted as image evidence")
+        } catch {}
+        func rejectMixed(_ type: NSPasteboard.PasteboardType, _ data: Data) {
+            let mixed = NSPasteboard(name: NSPasteboard.Name("codex-image-mixed-" + UUID().uuidString))
+            mixed.clearContents()
+            let item = NSPasteboardItem()
+            precondition(item.setData(png, forType: .png))
+            precondition(item.setData(data, forType: type))
+            precondition(mixed.writeObjects([item]))
+            do {
+                _ = try MediaSupport.copiedImage(from: mixed, expected: loaded.pixels)
+                preconditionFailure("mixed image and attachment payload accepted")
+            } catch {}
+        }
+        rejectMixed(NSPasteboard.PasteboardType("public.file-url"), Data("file:///tmp/other".utf8))
+        rejectMixed(.rtf, Data("{\\rtf1 extra}".utf8))
+        let multipage = NSMutableData()
+        let multipageDestination = CGImageDestinationCreateWithData(multipage, "public.tiff" as CFString, 2, nil)!
+        CGImageDestinationAddImage(multipageDestination, image, nil)
+        CGImageDestinationAddImage(multipageDestination, image, nil)
+        precondition(CGImageDestinationFinalize(multipageDestination))
+        do {
+            _ = try MediaSupport.decode(multipage as Data, allowedTypes: ["public.tiff"])
+            preconditionFailure("multi-frame image accepted")
+        } catch {}
+        try! Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: path)
+        refused(ImageMedia(path: path.path,
+                           sha256: MediaSupport.digest(try! Data(contentsOf: path)),
+                           mimeType: "image/png", sizeBytes: 8))
     }
 }

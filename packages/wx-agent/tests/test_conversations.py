@@ -1,4 +1,5 @@
 """Synthetic conversation registry and guarded outbox tests."""
+import base64
 import contextlib
 import io
 import json
@@ -84,6 +85,14 @@ class FakeCLI:
         if action == "list":
             return json.dumps([{"request_id": key, "status": item["status"]} for key, item in box.items()])
         rid = argv[argv.index("--request-id") + 1]
+        if action == "queue-image":
+            media = conv.sender.image_descriptor(argv[argv.index("--image") + 1])
+            if media["sha256"] != argv[argv.index("--expected-sha256") + 1]:
+                raise conv.runner.RunnerError("source changed before queue")
+            box.setdefault(rid, {"request_id": rid, "text": "", "media": media, "status": "media_queued"})
+            if self.on_queue is not None:
+                self.on_queue()
+            return json.dumps(box[rid])
         if action == "queue":
             box.setdefault(rid, {"request_id": rid, "text": data, "status": "queued"})
             if self.on_queue is not None:
@@ -135,6 +144,70 @@ class ConversationTests(unittest.TestCase):
     def choose(self, index=0):
         id = self.fake.metadata[index]["conversation_id"]
         return conv.select(self.settings, id)
+
+    def make_image(self, name="中文 截图.png"):
+        path = self.registry / name
+        path.write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+        return path
+
+    def test_image_send_identity_conflict_and_restart_never_repeats(self):
+        for kind in (0, 2):
+            self.choose(kind)
+            path = self.make_image()
+            rid = "image-" + str(kind)
+            result = conv.send_image(self.settings, rid, path)
+            self.assertEqual(result["status"], "ui_observed")
+            self.assertTrue(conv.send_image(self.settings, rid, path)["already_completed"])
+            self.assertEqual(sum(r == rid for _, r in self.fake.sent), 1)
+            path.write_bytes(path.read_bytes() + b"changed")
+            with self.assertRaisesRegex(conv.ConversationError, "different image"):
+                conv.send_image(self.settings, rid, path)
+            state = self.fake.sent[-1][0]
+            self.fake.outboxes[state][rid]["status"] = "indeterminate"
+            path = self.make_image()
+            with self.assertRaisesRegex(conv.ConversationError, "unresolved"):
+                conv.send_image(self.settings, rid, path)
+            self.assertEqual(sum(r == rid for _, r in self.fake.sent), 1)
+
+    def test_image_validation_precedes_selection_and_no_path_as_text(self):
+        path = self.registry / "bad.gif"
+        for data in (b"", b"GIF89a", b"plain path"):
+            path.write_bytes(data)
+            with self.assertRaises(conv.sender.Refused):
+                conv.send_image(self.settings, "bad-image", path)
+        self.assertEqual(self.fake.calls, [])
+        self.choose()
+        path = self.make_image()
+        conv.send_image(self.settings, "image-good", path)
+        self.assertEqual(self.fake.outboxes[self.fake.sent[-1][0]]["image-good"]["text"], "")
+        with self.assertRaisesRegex(conv.ConversationError, "different text"):
+            conv.send(self.settings, "image-good", str(path))
+
+    def test_image_changes_between_descriptor_and_queue_creates_no_intent(self):
+        self.choose()
+        path = self.make_image()
+        original = self.fake.__call__
+        def changed(argv, **kwargs):
+            if "queue-image" in argv:
+                path.write_bytes(path.read_bytes() + b"changed")
+            return original(argv, **kwargs)
+        with mock.patch.object(conv.runner, "command", side_effect=changed), self.assertRaises(conv.ConversationError):
+            conv.send_image(self.settings, "race-image", path)
+        self.assertFalse(any("race-image" in box for box in self.fake.outboxes.values()))
+        self.assertEqual(self.fake.sent, [])
+
+    def test_image_selection_drift_during_queue_stops_before_send(self):
+        self.choose()
+        path = self.make_image()
+        def drift():
+            registry = conv.registry(self.settings)
+            registry["selected_id"] = "invalid"
+            conv.save_registry(self.settings, registry)
+        self.fake.on_queue = drift
+        with self.assertRaises(conv.ConversationError):
+            conv.send_image(self.settings, "image-drift", path)
+        self.assertEqual(self.fake.sent, [])
 
     def test_distinct_group_and_private_channels_and_read_without_ack(self):
         selected = [self.choose(index) for index in range(3)]
