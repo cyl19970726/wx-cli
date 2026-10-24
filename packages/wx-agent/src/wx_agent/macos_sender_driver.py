@@ -113,6 +113,54 @@ def validate_text(text):
         raise Refused("unsupported message control character")
 
 
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
+
+
+def image_descriptor(value, require_private=False):
+    """Read a bounded regular file once. Rust/Swift additionally fully decode it."""
+    path = Path(value).expanduser().absolute()
+    if path.is_symlink():
+        raise Refused("image must be a regular local file, not a symlink")
+    if require_private:
+        private(path)
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_IMAGE_BYTES:
+            raise Refused("image must be a nonempty regular file at most 16 MiB")
+        raw = stream.read(MAX_IMAGE_BYTES + 1)
+        final = os.fstat(stream.fileno())
+    if (len(raw) != info.st_size or final.st_size != info.st_size
+            or final.st_mtime_ns != info.st_mtime_ns or final.st_ctime_ns != info.st_ctime_ns):
+        raise Refused("image changed during reading")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif raw.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    else:
+        raise Refused("only PNG and JPEG image bytes are supported")
+    return {"path": str(path.resolve(strict=True)), "sha256": hashlib.sha256(raw).hexdigest(),
+            "mime_type": mime, "size_bytes": len(raw)}
+
+
+def same_media(left, right):
+    return (isinstance(left, dict) and isinstance(right, dict)
+            and all(left.get(key) == right.get(key) for key in ("sha256", "mime_type", "size_bytes")))
+
+
+def validate_media(media):
+    if (not isinstance(media, dict) or set(media) != {"path", "sha256", "mime_type", "size_bytes"}
+            or not isinstance(media.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", media["sha256"])
+            or media.get("mime_type") not in ("image/png", "image/jpeg")
+            or type(media.get("size_bytes")) is not int
+            or not 0 < media["size_bytes"] <= MAX_IMAGE_BYTES):
+        raise Refused("invalid image descriptor")
+    abs_path(media.get("path"))
+    if not same_media(image_descriptor(media["path"], require_private=True), media):
+        raise Refused("frozen image content differs from intent")
+
+
 def validate_empty_composer_reference(config):
     reference = config.get("empty_composer_reference")
     if reference is None:
@@ -281,7 +329,7 @@ def status(config, deadline):
 
 
 def request_ok(request, config, attempt_number=None):
-    if not isinstance(request, dict) or request.get("protocol_version") != 1:
+    if not isinstance(request, dict) or request.get("protocol_version") not in (1, 2):
         raise Refused("unsupported outbox protocol")
     if attempt_number is None:
         attempt_number = request.get("attempt_number", 1)
@@ -297,7 +345,16 @@ def request_ok(request, config, attempt_number=None):
     for key in ("channel_id", "session_id", "account", "talker"):
         if request.get(key) != config["binding"][key]:
             raise Refused("request binding mismatch")
-    validate_text(request.get("text"))
+    if request.get("protocol_version") == 2:
+        if request.get("text") not in (None, "") or recovery_from is not None:
+            raise Refused("image intent cannot carry text or recovery")
+        if config.get("expected_draft", "") != "":
+            raise Refused("image send requires an empty composer")
+        validate_media(request.get("media"))
+    else:
+        if request.get("media") is not None:
+            raise Refused("text protocol cannot carry media")
+        validate_text(request.get("text"))
     identity = (request["channel_id"] + "\0" + rid) if "target_name" in config else rid
     tid = "send-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:48]
     return tid if attempt_number == 1 else tid + "-a" + str(attempt_number)
@@ -336,10 +393,14 @@ def _prepare_command(request, config, window_id=None, frame=None, focus_id=None)
     command = {"targetGroup": config["target_group"], "expectedDraft": config.get("expected_draft", ""),
             "targetKind": config.get("conversation_kind", "group"),
             "focusEvidenceID": focus_id,
-            "text": request["text"], "expectedPID": config["expected_pid"],
+            "expectedPID": config["expected_pid"],
             "expectedWindowID": window_id if window_id is not None else config.get("expected_window_id"),
             "expectedFrame": frame if frame is not None else config.get("expected_frame"),
             "composerRect": config["composer_rect"], "buttonPoint": config["button_point"]}
+    if request.get("media") is not None:
+        command["media"] = request["media"]
+    else:
+        command["text"] = request["text"]
     if config.get("empty_composer_reference") is not None:
         command["emptyComposerReference"] = config["empty_composer_reference"]
     return command
@@ -687,9 +748,27 @@ def matching_event(event, request, self_wxid, after):
     if event.get("kind") != "message_observed" or event.get("direction") != "outgoing":
         return False
     message = event.get("message")
+    if request.get("media") is not None:
+        return (isinstance(message, dict) and message.get("talker") == request["talker"]
+                and message.get("sender") == self_wxid and message.get("msg_type") == 3
+                and isinstance(message.get("content"), dict)
+                and set(message["content"]) == {"Image"}
+                and isinstance(message["content"]["Image"], dict))
     return (isinstance(message, dict) and message.get("talker") == request["talker"]
             and message.get("sender") == self_wxid and message.get("msg_type") == 1
             and message.get("content") == {"Text": request["text"]})
+
+
+def verify_image_event(config, request, cursor, deadline):
+    raw = call([config["wx_cli"], "outbox", "--state-dir", config["channel_state_dir"],
+                "verify-image-event", "--request-id", request["request_id"], "--cursor", str(cursor)], deadline)
+    proof = json.loads(raw)
+    if (not isinstance(proof, dict) or proof.get("verified") is not True
+            or proof.get("request_id") != request["request_id"] or proof.get("cursor") != cursor
+            or proof.get("media_sha256") != request["media"]["sha256"]
+            or proof.get("comparison") not in ("exact-pixels", "bounded-reencode")):
+        raise Uncertain("outgoing image content was not associated with intent")
+    return proof
 
 
 def observe(config, request, after, deadline, details=None):
@@ -697,6 +776,8 @@ def observe(config, request, after, deadline, details=None):
     started = time.monotonic()
     stop = min(deadline, started + 20.0)
     cursor = after
+    image_matches = set()
+    image_first_seen = None
     if details is None:
         details = {}
     details.update(sync_failures=0, events_failures=0, rows_examined=0, start_cursor=after)
@@ -713,12 +794,30 @@ def observe(config, request, after, deadline, details=None):
                         event = json.loads(line)
                         details["rows_examined"] += 1
                         if matching_event(event, request, config["binding"]["self_wxid"], after):
-                            details["matched_cursor"] = event["cursor"]
-                            return event["cursor"]
+                            if request.get("media") is None:
+                                details["matched_cursor"] = event["cursor"]
+                                return event["cursor"]
+                            image_matches.add(event["cursor"])
+                            if image_first_seen is None:
+                                image_first_seen = time.monotonic()
                         if type(event.get("cursor")) is int and event["cursor"] > cursor:
                             cursor = event["cursor"]
                 except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError):
                     details["events_failures"] += 1
+                else:
+                    if len(image_matches) > 1:
+                        raise Uncertain("multiple new outgoing images; association is ambiguous")
+                    if image_first_seen is not None and time.monotonic() - image_first_seen >= 1.5:
+                        matched = next(iter(image_matches))
+                        try:
+                            proof = verify_image_event(config, request, matched, stop)
+                        except (Refused, OSError, ValueError, KeyError, TypeError):
+                            details["content_verification_failures"] = details.get("content_verification_failures", 0) + 1
+                        else:
+                            details["matched_cursor"] = matched
+                            details["association"] = "decoded-image-content-and-single-new-event-under-ui-lock"
+                            details["image_content_proof"] = proof
+                            return matched
             remaining = stop - time.monotonic()
             if remaining > 0:
                 time.sleep(min(0.75, remaining))
@@ -726,6 +825,26 @@ def observe(config, request, after, deadline, details=None):
     finally:
         details["last_cursor"] = cursor
         details["verification_seconds"] = round(time.monotonic() - started, 3)
+
+
+def require_media_proof(result, request, key, config, tid):
+    proof = result.get(key)
+    if (not isinstance(proof, dict) or not same_media(proof, request["media"])
+            or proof.get("exact_pixels") is not True
+            or not isinstance(proof.get("pixel_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", proof["pixel_sha256"])
+            or proof.get("composer_pixel_sha256") != proof["pixel_sha256"]
+            or any(type(proof.get(k)) is not int or not 0 < proof[k] <= 8192 for k in ("width", "height"))
+            or proof["width"] * proof["height"] > 40_000_000):
+        raise Uncertain("native image pixel evidence missing or mismatched")
+    if key == "media_submitted":
+        expected_path = config["ui_dir"] / (tid + ".submit-after-click.png")
+        if (proof.get("post_click_capture") != str(expected_path)
+                or proof.get("post_click_header_verified") is not True):
+            raise Uncertain("native post-click image evidence missing or mismatched")
+        capture = image_descriptor(expected_path, require_private=True)
+        if capture["sha256"] != proof.get("post_click_capture_sha256"):
+            raise Uncertain("native post-click capture digest mismatch")
 
 
 def focus_only(config):
@@ -814,6 +933,10 @@ def run(request, config):
             prepared = bridge(config, tid, "prepare-visual", command, deadline, 18.0)
             if prepared.get("prepared") is not True:
                 raise Uncertain("prepare not confirmed")
+            if request.get("media") is not None:
+                require_media_proof(prepared, request, "media_prepared", config, tid)
+                validate_media(request["media"])
+                report["media_prepared"] = prepared["media_prepared"]
             report["stage"] = "prepared"
             private_update(report_path, report)
             # A fresh encrypted-copy sync establishes the event baseline before Send.
@@ -823,6 +946,9 @@ def run(request, config):
             submitted = bridge(config, tid, "submit-visual", command, deadline, 18.0)
             if submitted.get("submitted") is not True:
                 raise Uncertain("submit not confirmed")
+            if request.get("media") is not None:
+                require_media_proof(submitted, request, "media_submitted", config, tid)
+                report["media_submitted"] = submitted["media_submitted"]
             report["stage"] = "submit_clicked"
             report["ui_submit_seconds"] = round(time.monotonic() - started, 3)
             report["submit_action_seconds"] = round(time.monotonic() - submit_started, 3)

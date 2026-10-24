@@ -84,6 +84,15 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 同一 request ID 和相同正文只对应一个意图；正文不同会冲突。已有 `attempt_recorded`、`failed`、`indeterminate` 或其他未决状态时，命令只报告未决，不会再次点击。保留原 request ID 并核对 outbox 与授权接收端，禁止自动重试或生成替代 ID。
 
+单张本地图片使用显式命令，群聊和私聊沿用已选择的同一会话，也可传稳定 `--id`：
+
+```sh
+/ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json send-image \
+  --request-id synthetic-image-001 --image "/ABS/private/wx-agent/中文 截图.png"
+```
+
+支持单帧 PNG/JPEG，最大 16 MiB、每边 8192 像素、4000 万总像素；不支持动画、其他格式、批量或附加文字。路径按 CLI 执行机器的本地路径解析，不能把控制电脑的路径交给远端运行器。发送前文件内容由 Rust 完整验证并冻结，原文件此后变化不会替换已保存图片；同一 ID 换图会冲突。图片没有自动重试或 `recover-unsent-send`；已尝试／未知立即保留原记录停发。新旧二进制和 helper 必须配套安装；文字路径和读取保持兼容。准备像素、唯一新出站图片及独立收件是不同证据层，详细实现、升级／回退及本轮实际验收状态见[图片验收记录](IMAGE_SEND_VALIDATION_20261024.md)。
+
 `reply` 通过消息 cursor 回复所引用的入站文本，不另造 request ID：
 
 ```sh

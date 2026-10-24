@@ -419,10 +419,11 @@ def coordinated(settings, target_entry):
             raise ConversationError("handback_incomplete", detail) from primary_error
 
 
-def send_intent(settings, entry, request_id, text, snapshot=None):
+def send_intent(settings, entry, request_id, text, snapshot=None, media=None):
     require(isinstance(request_id, str) and bool(REQUEST_ID.fullmatch(request_id)),
             "request_id", "invalid request ID")
-    sender.validate_text(text)
+    if media is None:
+        sender.validate_text(text)
     if snapshot is not None:
         assert_selection(settings, snapshot, entry)
     state = entry["state_dir"]
@@ -433,15 +434,17 @@ def send_intent(settings, entry, request_id, text, snapshot=None):
     require(isinstance(listed, list) and all(isinstance(item, dict) for item in listed),
             "invalid_output", "invalid outbox list")
     if not any(item.get("request_id") == request_id for item in listed):
-        one_json(settings, "outbox", state, "queue", "--request-id", request_id,
+        queue_args = ("queue-image", "--image", media["path"], "--expected-sha256", media["sha256"]) if media else ("queue", "--text-stdin")
+        one_json(settings, "outbox", state, *queue_args, "--request-id", request_id,
                  "--channel-id", entry["channel_id"], "--session-id", entry["session_id"],
-                 "--text-stdin", data=text)
+                 data=None if media else text)
     item = one_json(settings, "outbox", state, "show", "--request-id", request_id)
     require(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
-    require(item.get("text") == text, "text_conflict", "existing request has different text")
+    _same_intent(item, text, media)
     if item.get("status") in TERMINAL:
         return {"request_id": request_id, "status": item["status"], "already_completed": True}
-    require(item.get("status") == "queued", "send_uncertain", "send was attempted or outcome is unresolved")
+    require(item.get("status") == ("media_queued" if media else "queued"),
+            "send_uncertain", "send was attempted or outcome is unresolved")
     # Selection and metadata are checked immediately before the desktop effect.
     fresh(settings, entry["conversation_id"], entry, unique_name=True)
     if snapshot is not None:
@@ -455,13 +458,28 @@ def send_intent(settings, entry, request_id, text, snapshot=None):
         # The durable attempt may already have reached WeChat. Inspect only.
         pass
     item = one_json(settings, "outbox", state, "show", "--request-id", request_id)
-    require(item.get("text") == text, "outbox_drift", "outbox text changed")
+    _same_intent(item, text, media)
     require(item.get("status") in TERMINAL, "send_uncertain", "send outcome needs manual inspection")
     return {"request_id": request_id, "status": item["status"], "already_completed": False}
 
 
-def send(settings, request_id, text, id=None):
-    sender.validate_text(text)
+def _same_intent(item, text, media):
+    if media is None:
+        require(item.get("media") is None and item.get("text") == text,
+                "text_conflict", "existing request has different text or content type")
+    else:
+        require(item.get("text") in (None, "") and sender.same_media(item.get("media"), media),
+                "image_conflict", "existing request has different image content")
+
+
+def send_image(settings, request_id, image, id=None):
+    media = sender.image_descriptor(image)
+    return send(settings, request_id, None, id, media=media)
+
+
+def send(settings, request_id, text, id=None, media=None):
+    if media is None:
+        sender.validate_text(text)
     snapshot, entry = selected(settings, id)
     fresh(settings, entry["conversation_id"], entry, unique_name=True)
     with coordinated(settings, entry):
@@ -471,7 +489,7 @@ def send(settings, request_id, text, id=None):
             interactive._check_outbox_clear(value, status_value["binding"], status_value["consumer_cursor"])
             _, state, _ = interactive._runner_state(value, status_value["binding"])
             require(state.get("pending") is None, "runner_pending", "controller has a pending reply")
-        return send_intent(settings, entry, request_id, text, snapshot)
+        return send_intent(settings, entry, request_id, text, snapshot, media)
 
 
 def reply(settings, cursor, text, id=None):
@@ -532,6 +550,7 @@ def recover_unsent_send(settings, request_id, expected_attempt, id=None):
         item = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
         require(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
         require(isinstance(item.get("text"), str), "outbox_drift", "outbox text is unavailable")
+        require(item.get("media") is None, "image_recovery_unsupported", "image attempts cannot be recovered")
         sender.validate_text(item["text"])
         require(item.get("status") in ("failed", "indeterminate"),
                 "send_uncertain", "only a failed or indeterminate intent can be recovered")
@@ -582,7 +601,7 @@ def main(argv=None):
     choose = commands.add_parser("select")
     choose.add_argument("--id", required=True)
     choose.add_argument("--focus", action="store_true")
-    for name in ("status", "read", "focus", "send", "reply"):
+    for name in ("status", "read", "focus", "send", "send-image", "reply"):
         commands.add_parser(name).add_argument("--id")
     reading = commands.choices["read"]
     reading.add_argument("--after", type=int)
@@ -590,6 +609,10 @@ def main(argv=None):
     sending = commands.choices["send"]
     sending.add_argument("--request-id", required=True)
     sending.add_argument("--text-stdin", action="store_true", required=True)
+    image_sending = commands.choices["send-image"]
+    image_sending.description = "Send one local PNG/JPEG once; max 16 MiB, 8192 px per side, 40M pixels."
+    image_sending.add_argument("--request-id", required=True)
+    image_sending.add_argument("--image", type=Path, required=True)
     replying = commands.choices["reply"]
     replying.add_argument("--cursor", type=int, required=True)
     replying.add_argument("--text-stdin", action="store_true", required=True)
@@ -617,6 +640,8 @@ def main(argv=None):
                 require(args.id is not None, "conversation_id_required",
                         "recovery requires a stable conversation --id")
                 result = recover_unsent_send(settings, args.request_id, args.expected_attempt, args.id)
+            elif args.command == "send-image":
+                result = send_image(settings, args.request_id, args.image, args.id)
             elif args.command == "send":
                 raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
                 require(len(raw) <= runner.MAX_REPLY, "text", "message text too large")

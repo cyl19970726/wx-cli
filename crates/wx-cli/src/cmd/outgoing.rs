@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::json;
 
 use crate::cmd::channel::{load_binding, BindingView};
+use crate::cmd::outgoing_media::{self, Media};
 
 const DB_NAME: &str = "outgoing.sqlite3";
 const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -36,12 +37,33 @@ pub enum OutgoingAction {
         #[arg(long, required = true)]
         text_stdin: bool,
     },
+    /// Save one immutable PNG or JPEG image intent without sending it.
+    QueueImage {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        channel_id: String,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        image: PathBuf,
+        /// Digest observed by the caller before queueing; source drift is refused.
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
     /// List intent IDs and states (message bodies are withheld).
     List,
     /// Show one intent, including its message body.
     Show {
         #[arg(long)]
         request_id: String,
+    },
+    /// Verify that one exact outgoing image event matches a frozen intent.
+    VerifyImageEvent {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        cursor: i64,
     },
     /// Claim one queued intent and pass it to a local executable exactly once.
     Send {
@@ -66,6 +88,7 @@ pub(crate) struct Attempt {
     pub request_id: String,
     pub attempt_number: i64,
     pub text: String,
+    pub media: Option<Media>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +130,25 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             let status = queue_intent(&mut conn, &binding, &request_id, &text)?;
             println!("{}", json!({"request_id": request_id, "status": status}));
         }
+        OutgoingAction::QueueImage {
+            request_id,
+            channel_id,
+            session_id,
+            image,
+            expected_sha256,
+        } => {
+            check_binding(&binding, &channel_id, &session_id)?;
+            check_request_id(&request_id)?;
+            let status = queue_image_checked(
+                &mut conn,
+                state_dir,
+                &binding,
+                &request_id,
+                &image,
+                expected_sha256.as_deref(),
+            )?;
+            println!("{}", json!({"request_id": request_id, "status": status}));
+        }
         OutgoingAction::List => {
             let items = list_intents(&conn, &binding)?;
             println!("{}", serde_json::to_string(&items)?);
@@ -114,6 +156,11 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
         OutgoingAction::Show { request_id } => {
             let item = show_intent(&conn, &binding, &request_id)?;
             println!("{}", item);
+        }
+        OutgoingAction::VerifyImageEvent { request_id, cursor } => {
+            let result =
+                super::outgoing_verify::verify(state_dir, &binding, &conn, &request_id, cursor)?;
+            println!("{}", result);
         }
         OutgoingAction::Send { request_id, driver } => {
             drop(conn);
@@ -231,6 +278,10 @@ fn recover_unsent_with_timeout(
         return Err(invalid("expected attempt must be positive and below i64::MAX").into());
     }
     validate_driver(driver)?;
+    // Media has no recovery protocol. Refuse before invoking even a probe.
+    if is_media_request(state_dir, binding, request_id)? {
+        return Err(invalid("image attempts cannot be recovered").into());
+    }
     check_recovery_capabilities(driver, timeout)?;
     let candidate = load_recovery_candidate(state_dir, binding, request_id, expected_attempt)?;
     let payload = driver_input(binding, &candidate, Some(expected_attempt))?;
@@ -256,7 +307,7 @@ fn load_recovery_candidate(
 ) -> Result<Attempt, Box<dyn Error>> {
     let conn = open_journal(state_dir)?;
     let text: String = conn.query_row(
-        "SELECT text FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND attempt_number=?4 AND status IN ('failed','indeterminate')",
+        "SELECT text FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='text' AND attempt_number=?4 AND status IN ('failed','indeterminate')",
         params![request_id, binding.channel_id, binding.session_id, expected_attempt],
         |r| r.get(0),
     ).optional()?.ok_or_else(|| invalid("recovery requires the current failed or indeterminate attempt and its exact number"))?;
@@ -264,6 +315,7 @@ fn load_recovery_candidate(
         request_id: request_id.to_owned(),
         attempt_number: expected_attempt + 1,
         text,
+        media: None,
     })
 }
 
@@ -387,6 +439,18 @@ fn invoke_claimed_attempt(
     driver: &Path,
     timeout: Duration,
 ) -> Result<AttemptResult, Box<dyn Error>> {
+    if let Some(media) = &attempt.media {
+        if let Err(error) = outgoing_media::verify(media) {
+            record_result(
+                state_dir,
+                &attempt.request_id,
+                attempt.attempt_number,
+                AttemptResult::Indeterminate,
+                "frozen image missing or changed before driver",
+            )?;
+            return Err(error);
+        }
+    }
     let input = driver_input(binding, &attempt, recovery_from_attempt)?;
     let (result, evidence) = invoke_driver(driver, &input, timeout);
     record_result(
@@ -405,7 +469,7 @@ fn driver_input(
     recovery_from_attempt: Option<i64>,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut input = json!({
-        "protocol_version": 1,
+        "protocol_version": if attempt.media.is_some() { 2 } else { 1 },
         "request_id": attempt.request_id,
         "attempt_number": attempt.attempt_number,
         "channel_id": binding.channel_id,
@@ -414,6 +478,9 @@ fn driver_input(
         "talker": binding.talker,
         "text": attempt.text,
     });
+    if let Some(media) = &attempt.media {
+        input["media"] = media.descriptor();
+    }
     if let Some(previous) = recovery_from_attempt {
         input["recovery_from_attempt"] = json!(previous);
     }
@@ -546,20 +613,41 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
     // DELETE mode keeps all state in the private directory without WAL sidecars.
     conn.pragma_update(None, "journal_mode", "DELETE")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS outgoing_intent (
+    let intent_schema = "CREATE TABLE IF NOT EXISTS outgoing_intent (
             request_id TEXT PRIMARY KEY,
             channel_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
             text TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('queued','attempt_recorded','ui_observed','failed','indeterminate','recipient_confirmed')),
+            content_kind TEXT NOT NULL DEFAULT 'text' CHECK(content_kind IN ('text','image')),
+            media_path TEXT,
+            media_sha256 TEXT,
+            media_mime_type TEXT,
+            media_size_bytes INTEGER,
+            status TEXT NOT NULL CHECK(status IN ('queued','media_queued','attempt_recorded','ui_observed','failed','indeterminate','recipient_confirmed')),
             attempt_number INTEGER NOT NULL DEFAULT 0,
             result_evidence TEXT,
             receipt_evidence TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS outgoing_attempt (
+        );";
+    conn.execute_batch(intent_schema)?;
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(outgoing_intent)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<_, _>>()?;
+    if !columns.iter().any(|column| column == "content_kind") {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch("ALTER TABLE outgoing_intent RENAME TO outgoing_intent_legacy")?;
+        tx.execute_batch(intent_schema)?;
+        tx.execute_batch("INSERT INTO outgoing_intent
+            (request_id,channel_id,session_id,text,status,attempt_number,result_evidence,receipt_evidence,created_at,updated_at)
+            SELECT request_id,channel_id,session_id,text,status,attempt_number,result_evidence,receipt_evidence,created_at,updated_at
+            FROM outgoing_intent_legacy;
+            DROP TABLE outgoing_intent_legacy;")?;
+        tx.commit()?;
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS outgoing_attempt (
             request_id TEXT NOT NULL,
             attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
             status TEXT NOT NULL CHECK(status IN ('attempt_recorded','ui_observed','failed','indeterminate')),
@@ -590,15 +678,19 @@ fn queue_intent(
     check_request_id(request_id)?;
     check_text(text)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing: Option<(String, String, String, String)> = tx
+    let existing: Option<(String, String, String, String, String)> = tx
         .query_row(
-            "SELECT channel_id, session_id, text, status FROM outgoing_intent WHERE request_id=?1",
+            "SELECT channel_id, session_id, text, status, content_kind FROM outgoing_intent WHERE request_id=?1",
             [request_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let status = if let Some((channel, session, old_text, status)) = existing {
-        if channel != binding.channel_id || session != binding.session_id || old_text != text {
+    let status = if let Some((channel, session, old_text, status, kind)) = existing {
+        if channel != binding.channel_id
+            || session != binding.session_id
+            || old_text != text
+            || kind != "text"
+        {
             return Err(
                 invalid("request ID already exists with different content or binding").into(),
             );
@@ -616,13 +708,88 @@ fn queue_intent(
     Ok(status)
 }
 
+#[cfg(test)]
+fn queue_image(
+    conn: &mut Connection,
+    state_dir: &Path,
+    binding: &BindingView,
+    request_id: &str,
+    image: &Path,
+) -> Result<String, Box<dyn Error>> {
+    queue_image_checked(conn, state_dir, binding, request_id, image, None)
+}
+
+fn queue_image_checked(
+    conn: &mut Connection,
+    state_dir: &Path,
+    binding: &BindingView,
+    request_id: &str,
+    image: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<String, Box<dyn Error>> {
+    let (bytes, mut media) = outgoing_media::inspect(image)?;
+    if let Some(expected) = expected_sha256 {
+        if expected != media.sha256 {
+            return Err(invalid("image changed since caller inspection").into());
+        }
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing: Option<(String, String, String, String, String, i64, String)> = tx.query_row(
+        "SELECT channel_id,session_id,content_kind,COALESCE(media_sha256,''),COALESCE(media_mime_type,''),COALESCE(media_size_bytes,0),status FROM outgoing_intent WHERE request_id=?1",
+        [request_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    ).optional()?;
+    if let Some((channel, session, kind, sha, mime, size, status)) = existing {
+        if channel != binding.channel_id
+            || session != binding.session_id
+            || kind != "image"
+            || sha != media.sha256
+            || mime != media.mime_type
+            || size != media.size_bytes as i64
+        {
+            return Err(
+                invalid("request ID already exists with different content or binding").into(),
+            );
+        }
+        media.path = outgoing_media::frozen_path(state_dir, request_id)?;
+        outgoing_media::verify(&media)?;
+        tx.commit()?;
+        return Ok(status);
+    }
+    outgoing_media::freeze(state_dir, request_id, &bytes, &mut media)?;
+    let timestamp = now()?;
+    tx.execute(
+        "INSERT INTO outgoing_intent (request_id,channel_id,session_id,text,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes,status,created_at,updated_at) VALUES (?1,?2,?3,'','image',?4,?5,?6,?7,'media_queued',?8,?8)",
+        params![request_id,binding.channel_id,binding.session_id,media.path.to_string_lossy(),media.sha256,media.mime_type,media.size_bytes as i64,timestamp],
+    )?;
+    tx.commit()?;
+    Ok("media_queued".to_owned())
+}
+
+fn is_media_request(
+    state_dir: &Path,
+    binding: &BindingView,
+    request_id: &str,
+) -> Result<bool, Box<dyn Error>> {
+    let conn = open_journal(state_dir)?;
+    Ok(conn.query_row(
+        "SELECT content_kind FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        params![request_id,binding.channel_id,binding.session_id],
+        |r| r.get::<_, String>(0),
+    ).optional()?.is_some_and(|kind| kind == "image"))
+}
+
 fn list_intents(
     conn: &Connection,
     binding: &BindingView,
 ) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
-    let mut stmt = conn.prepare("SELECT request_id,status,attempt_number,created_at,updated_at FROM outgoing_intent WHERE channel_id=?1 AND session_id=?2 ORDER BY created_at,request_id")?;
+    let mut stmt = conn.prepare("SELECT request_id,status,attempt_number,created_at,updated_at,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes FROM outgoing_intent WHERE channel_id=?1 AND session_id=?2 ORDER BY created_at,request_id")?;
     let rows = stmt.query_map(params![binding.channel_id, binding.session_id], |r| {
-        Ok(json!({"request_id": r.get::<_, String>(0)?, "status": r.get::<_, String>(1)?, "attempt_number": r.get::<_, i64>(2)?, "created_at": r.get::<_, i64>(3)?, "updated_at": r.get::<_, i64>(4)?}))
+        let mut item = json!({"request_id": r.get::<_, String>(0)?, "status": r.get::<_, String>(1)?, "attempt_number": r.get::<_, i64>(2)?, "created_at": r.get::<_, i64>(3)?, "updated_at": r.get::<_, i64>(4)?});
+        if r.get::<_, String>(5)? == "image" {
+            item["media"] = json!({"path":r.get::<_, String>(6)?,"sha256":r.get::<_, String>(7)?,"mime_type":r.get::<_, String>(8)?,"size_bytes":r.get::<_, i64>(9)?});
+        }
+        Ok(item)
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -634,9 +801,15 @@ fn show_intent(
 ) -> Result<serde_json::Value, Box<dyn Error>> {
     check_request_id(request_id)?;
     let item = conn.query_row(
-        "SELECT text,status,attempt_number,result_evidence,receipt_evidence,created_at,updated_at FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        "SELECT text,status,attempt_number,result_evidence,receipt_evidence,created_at,updated_at,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
         params![request_id, binding.channel_id, binding.session_id],
-        |r| Ok(json!({"request_id":request_id,"text":r.get::<_, String>(0)?,"status":r.get::<_, String>(1)?,"attempt_number":r.get::<_, i64>(2)?,"result_evidence":r.get::<_, Option<String>>(3)?,"receipt_evidence":r.get::<_, Option<String>>(4)?,"created_at":r.get::<_, i64>(5)?,"updated_at":r.get::<_, i64>(6)?})),
+        |r| {
+            let mut item = json!({"request_id":request_id,"text":r.get::<_, String>(0)?,"status":r.get::<_, String>(1)?,"attempt_number":r.get::<_, i64>(2)?,"result_evidence":r.get::<_, Option<String>>(3)?,"receipt_evidence":r.get::<_, Option<String>>(4)?,"created_at":r.get::<_, i64>(5)?,"updated_at":r.get::<_, i64>(6)?});
+            if r.get::<_, String>(7)? == "image" {
+                item["media"] = json!({"path":r.get::<_, String>(8)?,"sha256":r.get::<_, String>(9)?,"mime_type":r.get::<_, String>(10)?,"size_bytes":r.get::<_, i64>(11)?});
+            }
+            Ok(item)
+        },
     ).optional()?;
     let mut item =
         item.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "outgoing request not found"))?;
@@ -665,10 +838,34 @@ pub(crate) fn claim_attempt(state_dir: &Path, request_id: &str) -> Result<Attemp
     let binding = load_binding(state_dir)?;
     let mut conn = open_journal(state_dir)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let text: String = tx.query_row(
-        "SELECT text FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND status='queued'",
-        params![request_id, binding.channel_id, binding.session_id], |r| r.get(0),
+    let row: (String, String, Option<String>, Option<String>, Option<String>, Option<i64>) = tx.query_row(
+        "SELECT text,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND status IN ('queued','media_queued')",
+        params![request_id, binding.channel_id, binding.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
     ).optional()?.ok_or_else(|| invalid("request is absent, mismatched, or already attempted"))?;
+    let (text, kind, path, sha, mime, size) = row;
+    let media = if kind == "image" {
+        let path = PathBuf::from(path.ok_or_else(|| invalid("image intent lacks path"))?);
+        let expected_path = outgoing_media::frozen_path(state_dir, request_id)?;
+        if path != expected_path {
+            return Err(invalid("image intent has invalid frozen path").into());
+        }
+        let mime_type = match mime.as_deref() {
+            Some("image/png") => "image/png",
+            Some("image/jpeg") => "image/jpeg",
+            _ => return Err(invalid("image intent has invalid media type").into()),
+        };
+        let media = Media {
+            path,
+            sha256: sha.ok_or_else(|| invalid("image intent lacks digest"))?,
+            mime_type,
+            size_bytes: size.ok_or_else(|| invalid("image intent lacks size"))? as u64,
+        };
+        outgoing_media::verify(&media)?;
+        Some(media)
+    } else {
+        None
+    };
     let attempt_number = 1;
     let timestamp = now()?;
     tx.execute("UPDATE outgoing_intent SET status='attempt_recorded',attempt_number=?2,updated_at=?3 WHERE request_id=?1",
@@ -680,6 +877,7 @@ pub(crate) fn claim_attempt(state_dir: &Path, request_id: &str) -> Result<Attemp
         request_id: request_id.to_owned(),
         attempt_number,
         text,
+        media,
     })
 }
 
@@ -698,7 +896,7 @@ fn claim_recovery(
     let mut conn = open_journal(state_dir)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let previous: Option<(String, String)> = tx.query_row(
-        "SELECT text,status FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND attempt_number=?4 AND status IN ('failed','indeterminate')",
+        "SELECT text,status FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='text' AND attempt_number=?4 AND status IN ('failed','indeterminate')",
         params![request_id, binding.channel_id, binding.session_id, expected_attempt],
         |r| Ok((r.get(0)?, r.get(1)?)),
     ).optional()?;
@@ -725,6 +923,7 @@ fn claim_recovery(
         request_id: request_id.to_owned(),
         attempt_number,
         text,
+        media: None,
     })
 }
 
@@ -1474,5 +1673,212 @@ mod tests {
         fs::write(&outside, "outside").unwrap();
         std::os::unix::fs::symlink(&outside, state.join(DB_NAME)).unwrap();
         assert!(open_journal(&state).is_err());
+    }
+
+    fn sample_image(format: image::ImageFormat) -> Vec<u8> {
+        let pixels = image::RgbImage::from_pixel(2, 2, image::Rgb([23, 42, 91]));
+        let mut output = io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(pixels)
+            .write_to(&mut output, format)
+            .unwrap();
+        output.into_inner()
+    }
+
+    #[test]
+    fn image_intents_freeze_original_bytes_and_bind_request_identity() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        for (id, format, mime) in [
+            ("png_image", image::ImageFormat::Png, "image/png"),
+            ("jpeg_image", image::ImageFormat::Jpeg, "image/jpeg"),
+        ] {
+            let source = temp.path().join(format!("中文 图片 {id}"));
+            let original = sample_image(format);
+            fs::write(&source, &original).unwrap();
+            assert_eq!(
+                queue_image(&mut conn, &state, &binding, id, &source).unwrap(),
+                "media_queued"
+            );
+            let shown = show_intent(&conn, &binding, id).unwrap();
+            assert_eq!(shown["media"]["mime_type"], mime);
+            assert_eq!(shown["media"]["size_bytes"], original.len());
+            assert!(shown["media"]["path"].as_str().unwrap().starts_with('/'));
+            assert_eq!(
+                list_intents(&conn, &binding)
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["request_id"] == id)
+                    .unwrap()["media"]["sha256"],
+                shown["media"]["sha256"]
+            );
+            fs::write(&source, b"changed source").unwrap();
+            let attempt = claim_attempt(&state, id).unwrap();
+            let media = attempt.media.as_ref().unwrap();
+            assert_eq!(fs::read(&media.path).unwrap(), original);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&driver_input(&binding, &attempt, None).unwrap()).unwrap();
+            assert_eq!(payload["protocol_version"], 2);
+            assert_eq!(payload["text"], "");
+            assert_eq!(payload["media"]["mime_type"], mime);
+            assert_eq!(payload["media"]["path"], shown["media"]["path"]);
+            assert!(queue_image(&mut conn, &state, &binding, id, &source).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_images_and_changed_frozen_bytes_are_refused_before_attempt() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        let source = temp.path().join("source.png");
+        assert!(queue_image(&mut conn, &state, &binding, "missing", &source).is_err());
+        fs::write(&source, b"not an image").unwrap();
+        assert!(queue_image(&mut conn, &state, &binding, "bad", &source).is_err());
+        let valid = sample_image(image::ImageFormat::Png);
+        let mut animated = valid.clone();
+        let insert_at = animated.len() - 12;
+        let mut actl = Vec::from([
+            0, 0, 0, 8, b'a', b'c', b'T', b'L', 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        animated.splice(insert_at..insert_at, actl.drain(..));
+        fs::write(&source, &animated).unwrap();
+        assert!(queue_image(&mut conn, &state, &binding, "animated", &source).is_err());
+        fs::write(&source, &valid).unwrap();
+        queue_image(&mut conn, &state, &binding, "frozen", &source).unwrap();
+        let path = outgoing_media::frozen_path(&state, "frozen").unwrap();
+        fs::write(path, b"corrupt").unwrap();
+        assert!(claim_attempt(&state, "frozen").is_err());
+        assert_eq!(
+            show_intent(&conn, &binding, "frozen").unwrap()["status"],
+            "media_queued"
+        );
+    }
+
+    #[test]
+    fn expected_digest_mismatch_does_not_create_an_intent_or_frozen_file() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        let source = temp.path().join("source.png");
+        fs::write(&source, sample_image(image::ImageFormat::Png)).unwrap();
+        assert!(queue_image_checked(
+            &mut conn,
+            &state,
+            &binding,
+            "drift",
+            &source,
+            Some(&"0".repeat(64))
+        )
+        .is_err());
+        assert!(show_intent(&conn, &binding, "drift").is_err());
+        assert!(!outgoing_media::frozen_path(&state, "drift")
+            .unwrap()
+            .exists());
+    }
+
+    #[test]
+    fn image_failed_attempt_has_no_recovery_path() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        let source = temp.path().join("source.jpg");
+        fs::write(&source, sample_image(image::ImageFormat::Jpeg)).unwrap();
+        queue_image(&mut conn, &state, &binding, "image_recovery", &source).unwrap();
+        claim_attempt(&state, "image_recovery").unwrap();
+        record_result(
+            &state,
+            "image_recovery",
+            1,
+            AttemptResult::Indeterminate,
+            "synthetic unknown",
+        )
+        .unwrap();
+        assert!(claim_attempt(&state, "image_recovery").is_err());
+        assert!(claim_recovery(&state, "image_recovery", 1).is_err());
+        let driver = fake_driver(&temp, "probe", "touch should-not-run");
+        assert!(recover_unsent_with_timeout(
+            &state,
+            &binding,
+            "image_recovery",
+            1,
+            &driver,
+            Duration::from_secs(1)
+        )
+        .is_err());
+        assert!(!temp.path().join("should-not-run").exists());
+    }
+
+    #[test]
+    fn image_driver_receives_frozen_descriptor_once_after_restart() {
+        let (temp, state, binding) = setup();
+        let mut conn = open_journal(&state).unwrap();
+        let source = temp.path().join("图片 with spaces.jpg");
+        let bytes = sample_image(image::ImageFormat::Jpeg);
+        fs::write(&source, &bytes).unwrap();
+        queue_image(&mut conn, &state, &binding, "driver_image", &source).unwrap();
+        fs::write(&source, b"source replaced").unwrap();
+        let capture = temp.path().join("driver-input.json");
+        let driver = fake_driver(&temp, "image-driver", &format!("cat > '{}'\nprintf '%s\\n' '{{\"status\":\"ui_observed\",\"evidence\":\"synthetic local observation\"}}'", capture.display()));
+        assert_eq!(
+            send_with_timeout(
+                &state,
+                &binding,
+                "driver_image",
+                &driver,
+                Duration::from_secs(5)
+            )
+            .unwrap(),
+            AttemptResult::UiObserved
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(capture).unwrap()).unwrap();
+        assert_eq!(payload["protocol_version"], 2);
+        assert_eq!(payload["media"]["mime_type"], "image/jpeg");
+        assert_eq!(
+            fs::read(payload["media"]["path"].as_str().unwrap()).unwrap(),
+            bytes
+        );
+        assert!(send_with_timeout(
+            &state,
+            &binding,
+            "driver_image",
+            &driver,
+            Duration::from_secs(5)
+        )
+        .is_err());
+        assert_eq!(
+            show_intent(&open_journal(&state).unwrap(), &binding, "driver_image").unwrap()
+                ["attempt_number"],
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_schema_migrates_text_history_and_old_claim_cannot_take_media() {
+        let (temp, state, binding) = setup();
+        let db = state.join(DB_NAME);
+        let old = Connection::open(&db).unwrap();
+        old.execute_batch("CREATE TABLE outgoing_intent (
+            request_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','attempt_recorded','ui_observed','failed','indeterminate','recipient_confirmed')),
+            attempt_number INTEGER NOT NULL DEFAULT 0, result_evidence TEXT, receipt_evidence TEXT,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);").unwrap();
+        old.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,status,created_at,updated_at) VALUES('old',?1,?2,'legacy text','queued',1,1)", params![binding.channel_id,binding.session_id]).unwrap();
+        drop(old);
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut conn = open_journal(&state).unwrap();
+        assert_eq!(
+            show_intent(&conn, &binding, "old").unwrap()["text"],
+            "legacy text"
+        );
+        let source = temp.path().join("fixture.png");
+        fs::write(&source, sample_image(image::ImageFormat::Png)).unwrap();
+        queue_image(&mut conn, &state, &binding, "new", &source).unwrap();
+        let old_binary_claimable: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outgoing_intent WHERE request_id='new' AND status='queued'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_binary_claimable, 0);
+        assert_eq!(claim_attempt(&state, "old").unwrap().text, "legacy text");
     }
 }
