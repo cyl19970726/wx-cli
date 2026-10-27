@@ -106,9 +106,11 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 ## 只对证实未提交的原意图做显式恢复
 
-默认规则仍是 `attempt_recorded`、`failed`、`indeterminate` 或未知结果不得自动重试、换 request ID 或再次点击发送。显式 `recover-unsent-send` 是严格例外，只能使用相同的原 request ID、正文、绑定及 outbox attempt，并要求与现场证据完全匹配。原生 driver 只接受两种已知的准备失败（剪贴板项无法快照；复制的编辑框文字与预期草稿不完全一致），确认无 submit 痕迹、无存活 helper，完成能力握手和只读 preflight，并在共用 UI 锁内重新验证后才可能发送一次。缺少任一证据、状态不同或 preflight 未明确证明未提交时，停止；不存在普通 `send` fallback。错误目标/P3 发送有 submit 证据，不能恢复或重放。
+默认规则仍是 `attempt_recorded`、`failed`、`indeterminate` 或未知结果不得自动重试、换 request ID 或再次点击发送。显式 `recover-unsent-send` 是严格例外，只能使用相同的原 request ID、正文、绑定及 outbox attempt，并要求与现场证据完全匹配。原生 driver 接受两种已知的准备失败（剪贴板项无法快照；复制的编辑框文字与预期草稿不完全一致），以及原 attempt 1 在 inspect 后立即因 `WeChat process or window changed` 失败且 inspect 结果精确为无窗口的极窄特例。后者要求报告和两份 inspect 产物完整匹配，并证明当时权限、PID、console 状态合格且没有 focus/prepare/submit 等任何后续产物。两种路径都要确认无存活 helper，完成能力握手和只读 preflight，并在共用 UI 锁内重新验证后才可能发送一次；新尝试重新 inspect/focus/prepare。缺少任一证据、状态不同或 preflight 未明确证明未提交时，停止；不存在普通 `send` fallback。图片和错误目标/P3 发送不能恢复或重放。
 
 当前 Mac 已安装包含恢复协议的 Python 包，实际 CLI help 已核对。后续更新仍须先核对实际 help，命令形状为：
+
+源代码另支持一条严格的历史链：上述 inspect-only 恢复到 attempt 2 后，focus 超时但随后取得同一作业的终端剪贴板失败结果，且所有证据证明尚未进入消息准备、助手已退出时，可在重新授权后显式请求 attempt 2→3。它不是通用 focus 重试；完整产物集合、旧恢复证明、目标和窗口绑定均由[恢复契约](contracts.md#显式恢复已证实未提交的尝试)限定。图形动作的未解决标记会阻止并发或下一次动作，超时后的额外等待受驱动总预算约束。只读预检不会删除标记；不能手动删除标记或修改旧 outbox。
 
 ```sh
 /ABS/venv/bin/wx-agent conversations --config /ABS/private/wx-agent/conversations/config.json \

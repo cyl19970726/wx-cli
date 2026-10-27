@@ -30,6 +30,8 @@ BUDGET = 48.0
 # polling budget, then reconfirms the row and selected header. Allow that whole
 # action to finish; an eight-second wait can orphan a still-running helper.
 FOCUS_SECONDS = 18.0
+HELPER_SETTLE_SECONDS = 35.0
+HELPER_UNRESOLVED = "helper-unresolved.json"
 
 
 class Refused(Exception):
@@ -427,7 +429,7 @@ def focus_result_ok(result, config, focus_id, window_id, frame):
 
 
 def prove_unsent(request, config, attempt_number, deadline, persist=True):
-    """Require old native prepare failure and a durable, complete no-submit trace."""
+    """Require a complete native no-submit trace before a bounded recovery."""
     if type(attempt_number) is not int or attempt_number < 2:
         raise Refused("recovery requires a later attempt")
     recovery_from = request.get("recovery_from_attempt")
@@ -448,6 +450,11 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
         raise Refused("prior attempt has submit evidence")
 
     report = _read_artifact(report_path)
+    if report.get("stage") == "started":
+        return _prove_empty_inspect_unsent(request, config, recovery_from, attempt_number,
+                                           old_tid, report, deadline, persist)
+    if recovery_from == 2 and attempt_number == 3 and report.get("stage") == "inspected":
+        return _prove_focus_timeout_unsent(request, config, old_tid, report, deadline, persist)
     job = _read_artifact(prep_job_path)
     result = _read_artifact(prep_result_path)
     state = _read_artifact(state_path)
@@ -590,12 +597,249 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
     return str(claim_path)
 
 
+def _prove_empty_inspect_unsent(request, config, recovery_from, attempt_number,
+                                old_tid, report, deadline, persist):
+    """Accept only the terminal no-window inspect, before any focus or prepare."""
+    ui = config["ui_dir"]
+    prefix = old_tid + "-inspect"
+    allowed = {old_tid + ".client-result.json", prefix + ".inspect.job.json",
+               prefix + ".result.json"}
+    # The driver writes the new started report before rechecking under the UI
+    # lock. No other later-attempt artifact is acceptable, even at preflight.
+    if persist:
+        current_tid = old_tid + "-a" + str(attempt_number)
+        current_name = current_tid + ".client-result.json"
+        current = _read_artifact(ui / current_name)
+        if (current.get("id") != current_tid
+                or current.get("request_id") != request["request_id"]
+                or type(current.get("attempt_number")) is not int
+                or current["attempt_number"] != attempt_number
+                or current.get("recovery_from_attempt") != recovery_from
+                or current.get("stage") != "started"
+                or current.get("status") != "indeterminate"):
+            raise Refused("current recovery report is inconsistent")
+        allowed.add(current_name)
+    # Every original or later attempt product must be accounted for.
+    actual = {path.name for path in ui.iterdir()
+              if path.name.startswith(old_tid + ".")
+              or path.name.startswith(old_tid + "-")}
+    if actual != allowed:
+        raise Refused("prior inspect attempt has missing or later artifacts")
+    if (recovery_from != 1 or report.get("id") != old_tid
+            or report.get("request_id") != request["request_id"]
+            or type(report.get("attempt_number")) is not int
+            or report["attempt_number"] != recovery_from
+            or report.get("status") != "failed"
+            or report.get("error") != "WeChat process or window changed"
+            or "recovery_from_attempt" in report):
+        raise Refused("prior inspect report does not prove pre-focus stop")
+    job = _read_artifact(ui / (prefix + ".inspect.job.json"))
+    result = _read_artifact(ui / (prefix + ".result.json"))
+    if (job.get("id") != prefix or job.get("action") != "inspect"
+            or result.get("id") != prefix or result.get("action") != "inspect"
+            or result.get("ok") is not True
+            or result.get("windows") != []
+            or type(result.get("weChatPID")) is not int
+            or result["weChatPID"] <= 0
+            or result["weChatPID"] != config["expected_pid"]):
+        raise Refused("prior inspect does not prove an empty window list for this PID")
+    permissions = result.get("permissions")
+    session = result.get("session")
+    if (not isinstance(permissions, dict)
+            or any(permissions.get(key) is not True for key in
+                   ("accessibility", "screenRecording", "postEvents"))
+            or not isinstance(session, dict) or session.get("onConsole") is not True
+            or (session.get("locked") is not None and session.get("locked") is not False)):
+        raise Refused("prior inspect permissions or console evidence is incomplete")
+    if _helper_is_live(old_tid, deadline):
+        raise Refused("prior helper process is still live")
+    proof = {"request_id": request["request_id"], "from_attempt": recovery_from,
+             "attempt_number": attempt_number, "transaction_id": old_tid,
+             "result_error": report["error"], "report_stage": report["stage"],
+             "report_status": report["status"], "prior_focus_mode": "inspect-only"}
+    if not persist:
+        return proof
+    proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+    claim_path = ui / (old_tid + ".recovery-proof-to-" + str(attempt_number) + ".json")
+    try:
+        private_create(claim_path, proof)
+    except FileExistsError as exc:
+        raise Refused("recovery proof already exists") from exc
+    return str(claim_path)
+
+
+def _prove_focus_timeout_unsent(request, config, old_tid, report, deadline, persist):
+    """One historical attempt-2 focus timeout with terminal clipboard failure."""
+    ui = config["ui_dir"]
+    base_tid = request_ok(dict(request, attempt_number=1, recovery_from_attempt=None), config, 1)
+    if old_tid != base_tid + "-a2" or request.get("media") is not None:
+        raise Refused("focus timeout recovery requires the original text intent")
+    inspect_id = old_tid + "-inspect"
+    focus_id = old_tid + "-focus"
+    prior_proof_path = ui / (base_tid + ".recovery-proof-to-2.json")
+    allowed = {base_tid + ".client-result.json", base_tid + "-inspect.inspect.job.json",
+               base_tid + "-inspect.result.json", prior_proof_path.name,
+               old_tid + ".client-result.json", inspect_id + ".inspect.job.json",
+               inspect_id + ".result.json", focus_id + ".focus-group.job.json",
+               focus_id + ".result.json", focus_id + ".focus-attempted.json"}
+    allowed.update(focus_id + "." + suffix for suffix in
+                   ("before-search-click.png", "before-search-select.png", "focus-initial.png"))
+    if persist:
+        current_tid = base_tid + "-a3"
+        current = _read_artifact(ui / (current_tid + ".client-result.json"))
+        if (current.get("id") != current_tid or current.get("request_id") != request["request_id"]
+                or type(current.get("attempt_number")) is not int or current["attempt_number"] != 3
+                or current.get("recovery_from_attempt") != 2 or current.get("stage") != "started"
+                or current.get("status") != "indeterminate"):
+            raise Refused("current focus recovery report is inconsistent")
+        allowed.add(current_tid + ".client-result.json")
+    actual = {path.name for path in ui.iterdir()
+              if path.name.startswith(base_tid + ".") or path.name.startswith(base_tid + "-")}
+    if actual != allowed:
+        raise Refused("focus timeout trace has missing or later artifacts")
+    for suffix in ("before-search-click.png", "before-search-select.png", "focus-initial.png"):
+        capture = ui / (focus_id + "." + suffix)
+        private(capture)
+        if capture.stat().st_size == 0:
+            raise Refused("focus capture is empty")
+    marker = ui / (focus_id + ".focus-attempted.json")
+    private(marker)
+    if marker.stat().st_size != 0:
+        raise Refused("focus attempted marker is not the observed empty marker")
+    prior_report = _read_artifact(ui / (base_tid + ".client-result.json"))
+    prior_job = _read_artifact(ui / (base_tid + "-inspect.inspect.job.json"))
+    prior_result = _read_artifact(ui / (base_tid + "-inspect.result.json"))
+    prior_proof = _read_artifact(prior_proof_path)
+    if (prior_report.get("id") != base_tid or prior_report.get("request_id") != request["request_id"]
+            or type(prior_report.get("attempt_number")) is not int or prior_report["attempt_number"] != 1
+            or prior_report.get("stage") != "started" or prior_report.get("status") != "failed"
+            or prior_report.get("error") != "WeChat process or window changed"
+            or prior_job.get("id") != base_tid + "-inspect" or prior_job.get("action") != "inspect"
+            or prior_result.get("id") != base_tid + "-inspect" or prior_result.get("action") != "inspect"
+            or prior_result.get("ok") is not True or prior_result.get("windows") != []
+            or prior_proof.get("request_id") != request["request_id"]
+            or prior_proof.get("transaction_id") != base_tid
+            or type(prior_proof.get("from_attempt")) is not int or prior_proof["from_attempt"] != 1
+            or type(prior_proof.get("attempt_number")) is not int or prior_proof["attempt_number"] != 2
+            or prior_proof.get("report_stage") != "started" or prior_proof.get("report_status") != "failed"
+            or prior_proof.get("result_error") != prior_report["error"]
+            or prior_proof.get("prior_focus_mode") != "inspect-only"
+            or set(prior_proof) != {"request_id", "from_attempt", "attempt_number", "transaction_id",
+                                    "result_error", "report_stage", "report_status", "prior_focus_mode",
+                                    "proof_saved_at"}):
+        raise Refused("first attempt or its recovery proof differs")
+    prior_pid = prior_result.get("weChatPID")
+    if (type(prior_pid) is not int or prior_pid <= 0 or prior_pid != config["expected_pid"]
+            or not _inspect_session_permissions_ok(prior_result)):
+        raise Refused("first inspect evidence differs")
+    if (report.get("id") != old_tid or report.get("request_id") != request["request_id"]
+            or type(report.get("attempt_number")) is not int or report["attempt_number"] != 2
+            or report.get("recovery_from_attempt") != 1
+            or report.get("recovery_proof") != str(prior_proof_path)
+            or report.get("status") != "indeterminate"
+            or report.get("error") != "helper action timed out"):
+        raise Refused("focus timeout report differs")
+    inspected_job = _read_artifact(ui / (inspect_id + ".inspect.job.json"))
+    inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+    focus_job = _read_artifact(ui / (focus_id + ".focus-group.job.json"))
+    focused = _read_artifact(ui / (focus_id + ".result.json"))
+    windows = inspected.get("windows")
+    if (inspected_job.get("id") != inspect_id or inspected_job.get("action") != "inspect"
+            or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+            or inspected.get("ok") is not True or inspected.get("weChatPID") != prior_pid
+            or not _inspect_session_permissions_ok(inspected)
+            or not isinstance(windows, list) or len(windows) != 1
+            or not isinstance(windows[0], dict) or type(windows[0].get("id")) is not int
+            or windows[0]["id"] <= 0 or not isinstance(windows[0].get("frame"), dict)):
+        raise Refused("second inspect is not a single usable window")
+    expected_focus = {"id": focus_id, "action": "focus-group",
+                      "targetGroup": config["target_group"],
+                      "targetKind": config.get("conversation_kind", "group"),
+                      "expectedPID": prior_pid, "expectedWindowID": windows[0]["id"],
+                      "expectedFrame": windows[0]["frame"],
+                      "conversationListRect": config["conversation_list_rect"],
+                      "searchPoint": config["search_point"]}
+    if set(focus_job) != set(expected_focus) or any(focus_job.get(key) != value
+                                                    for key, value in expected_focus.items()):
+        raise Refused("focus job differs from inspected window or target")
+    if (focused.get("id") != focus_id or focused.get("ok") is not False
+            or focused.get("error") != "Cannot snapshot a clipboard item"
+            or set(focused) != {"id", "ok", "error", "permissions"}
+            or not _permissions_ok(focused.get("permissions"))):
+        raise Refused("focus result is not the approved terminal failure")
+    if _helper_is_live(old_tid, deadline):
+        raise Refused("prior helper process is still live")
+    proof = {"request_id": request["request_id"], "from_attempt": 2,
+             "attempt_number": 3, "transaction_id": old_tid,
+             "result_error": focused["error"], "report_stage": report["stage"],
+             "report_status": report["status"], "prior_focus_mode": "focus-timeout-unsent"}
+    if not persist:
+        return proof
+    proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+    claim_path = ui / (old_tid + ".recovery-proof-to-3.json")
+    try:
+        private_create(claim_path, proof)
+    except FileExistsError as exc:
+        raise Refused("recovery proof already exists") from exc
+    return str(claim_path)
+
+
+def _permissions_ok(value):
+    return isinstance(value, dict) and all(value.get(key) is True for key in
+                                           ("accessibility", "screenRecording", "postEvents"))
+
+
+def _inspect_session_permissions_ok(value):
+    session = value.get("session")
+    return (_permissions_ok(value.get("permissions")) and isinstance(session, dict)
+            and session.get("onConsole") is True
+            and (session.get("locked") is None or session.get("locked") is False))
+
+
 def _helper_is_live(tid, deadline):
     try:
         listing = call(["/bin/ps", "-axo", "pid=,command="], deadline)
     except (Refused, Uncertain, OSError):
         return True
     return any("WeChatTestBridge" in line for line in listing.splitlines())
+
+
+def _terminal_helper_result(data, tid, action):
+    if not isinstance(data, dict) or data.get("id") != tid:
+        return False
+    if data.get("ok") is True:
+        return data.get("action") == action
+    # Native main.swift's catch path emits no action; the persisted job and
+    # result filename bind this failure to the requested action instead.
+    return (data.get("ok") is False and set(data) == {"id", "ok", "error", "permissions"}
+            and isinstance(data.get("error"), str) and bool(data["error"])
+            and isinstance(data.get("permissions"), dict))
+
+
+def _guard_helper(config, deadline, clear=True):
+    """Hold the UI closed until a timed-out helper has a terminal result and exits."""
+    marker = config["ui_dir"] / HELPER_UNRESOLVED
+    if not _exists(marker):
+        if _helper_is_live(None, deadline):
+            raise Refused("prior helper process is still live or cannot be inspected")
+        return
+    pending = _read_artifact(marker)
+    tid = pending.get("id")
+    action = pending.get("action")
+    if (not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", tid)
+            or action not in ("inspect", "focus-group", "prepare-visual", "submit-visual")):
+        raise Refused("unresolved helper marker is invalid")
+    job = _read_artifact(config["ui_dir"] / (tid + "." + action + ".job.json"))
+    if job.get("id") != tid or job.get("action") != action:
+        raise Refused("unresolved helper job is invalid")
+    result = config["ui_dir"] / (tid + ("." + action if action.endswith("-visual") else "") + ".result.json")
+    if not _exists(result) or _helper_is_live(tid, deadline):
+        raise Refused("prior helper result or exit is unresolved")
+    data = _read_artifact(result)
+    if not _terminal_helper_result(data, tid, action):
+        raise Refused("prior helper terminal result is invalid")
+    if clear:
+        marker.unlink()
 
 
 def recovery_preflight(request, config):
@@ -612,6 +856,7 @@ def recovery_preflight(request, config):
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
         deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
         status(config, deadline)
         prove_unsent(request, config, attempt_number, deadline, persist=False)
     return {"protocol_version": 1, "recovery_protocol_version": 1, "unsent_proven": True}
@@ -704,19 +949,38 @@ def bridge(config, tid, action, command, deadline, seconds):
         raise Uncertain("helper result already exists")
     job = ui / (tid + "." + action + ".job.json")
     private_create(job, dict(command, id=tid, action=action))
+    marker = ui / HELPER_UNRESOLVED
+    private_create(marker, {"id": tid, "action": action})
     try:
         call(["/usr/bin/open", "-g", "-n", config["helper_app"], "--args", "--input", job], deadline, limit=65536)
-    except Refused as exc:
+    except (Refused, Uncertain) as exc:
         raise Uncertain("helper launch result unknown") from exc
-    stop = min(deadline, time.monotonic() + seconds)
-    while time.monotonic() < stop:
-        if result.exists() or result.is_symlink():
+    action_stop = min(deadline, time.monotonic() + seconds)
+    settle_stop = None
+    while True:
+        now = time.monotonic()
+        if settle_stop is None and now >= action_stop:
+            # Keep the UI lock during a bounded grace period for a late native
+            # result. The marker remains if the helper cannot be proved idle.
+            settle_stop = min(deadline, now + HELPER_SETTLE_SECONDS)
+        if _exists(result):
             data = private_read(result)
-            if not isinstance(data, dict) or data.get("id") != tid or data.get("ok") is not True:
-                raise Uncertain(helper_reason(data) if isinstance(data, dict) else "invalid helper result")
-            return data
-        time.sleep(0.05)
-    raise Uncertain("helper action timed out")
+            if not _terminal_helper_result(data, tid, action):
+                raise Uncertain("invalid helper result")
+            if not _helper_is_live(tid, settle_stop if settle_stop is not None else deadline):
+                marker.unlink()
+                if data["ok"] is not True:
+                    reason = helper_reason(data)
+                    if action == "focus-group":
+                        reason = "focus failed before message preparation: " + reason
+                    elif action == "submit-visual":
+                        reason = "submit outcome uncertain: " + reason
+                    raise Uncertain(reason)
+                return data
+        if settle_stop is not None and time.monotonic() >= settle_stop:
+            phase = "focus before message preparation" if action == "focus-group" else action
+            raise Uncertain(phase + " helper result or exit unresolved")
+        time.sleep(0.2 if settle_stop is not None else 0.05)
 
 
 def inspect_ok(data, config):
@@ -859,8 +1123,7 @@ def focus_only(config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
-        if _helper_is_live(None, deadline):
-            raise Refused("prior helper process is still live or cannot be inspected")
+        _guard_helper(config, deadline)
         status(config, deadline)
         verify_target(config, deadline)
         tid = "focus-" + uuid.uuid4().hex
@@ -894,8 +1157,7 @@ def run(request, config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refused("sender busy") from exc
-        if _helper_is_live(None, deadline):
-            raise Refused("prior helper process is still live or cannot be inspected")
+        _guard_helper(config, deadline)
         report_path = ui / (tid + ".client-result.json")
         report = {"id": tid, "attempt_number": attempt_number,
                   "request_id": request["request_id"], "stage": "started", "status": "indeterminate",
