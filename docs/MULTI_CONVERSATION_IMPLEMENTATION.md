@@ -6,11 +6,11 @@
 
 | 批次 | 已有证据 | 未关闭的验收 |
 | --- | --- | --- |
-| P0 图片/文字基线 | 复用图片 `3c7ba2c`、生命周期及恢复 `86c1db3`，没有重写基础收发。原签名助手 SHA 前缀 `9f5f0ec0ba8f`，新鲜检查三项权限均 true。私聊和测试群文字各有一次 `ui_observed`；私聊文字已由用户独立确认。 | 群文字独立收件待确认。图片在 prepare 的 Copy 哨兵检查拒绝，私聊原尝试为 indeterminate、草稿保留。 |
+| P0 图片/文字基线 | 复用图片 `3c7ba2c`、生命周期及恢复 `86c1db3`，没有重写基础收发。原签名助手 SHA 前缀 `9f5f0ec0ba8f`，新鲜检查三项权限均 true。私聊和测试群文字各有一次 `ui_observed`，两次均已由用户独立确认收到。 | 图片在 prepare 的 Copy 哨兵检查拒绝，私聊原尝试为 indeterminate、草稿保留。 |
 | P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现。Mac mini 两个授权目标同时增量读取，合计 0.086 秒，两页均无新事件；原绑定、consumer、attempt、意图元数据及共享配置均未改动。 | 真实 GUI 并发、接管临界区和人工出站的现场复验仍未完成。0.086 秒是两次空增量轮询，不是历史消息或容量成绩。 |
 | P2 共享发送 | 文字/图片/focus 共用 Rust dispatch；包含意图来源代际、补登记、顺序 batch、优先级老化、到期拦截、原 helper 退出保护、未知结果停通道及零 attempt 核查恢复。17 项编译 CLI 合成集成通过。 | 私聊与群文字均一次本地出站；图片不明后停通道。图片成功发送仍未通过。 |
 | P3 inbox/Session | 持久批次、处理租约、skip/defer/draft/reply、持续待办和决定历史已实现。同一受管测试 thread 的模型曾完成合成 Rust inbox 的 skip。Mac mini 两个新受管 Session 各完成只读初始化，并以原 ID 冷续接验证；同 thread 不分配给另一聊天。 | 观察开始后尚无新的微信入站处理证据；桌面 App 持有的业务 Session 推送及跨宿主推送未接入，原业务 Session 继续主动 CLI。 |
-| P4 运行验收 | 最新四任务 CI 通过；Mac mini 独立构建/安装和 Python 3.9.6 矩阵通过。两个测试绑定的 24 小时观察继续，发送保持暂停。 | 24 小时尚未结束；私聊文字已获独立收件确认，群文字待确认；图片和现场回退完整演练仍不能通过。 |
+| P4 运行验收 | 最新四任务 CI 通过；Mac mini 独立构建/安装和 Python 3.9.6 矩阵通过。两个测试绑定的 24 小时观察继续，发送保持暂停。 | 24 小时尚未结束；私聊和群文字均已获独立收件确认；图片和现场回退完整演练仍不能通过。 |
 
 ## 工程验证
 
@@ -38,6 +38,8 @@ GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图�
 
 21:15 使用独立构建的 `5cf1048` 候选重试同一群文字意图。之前两次均在 outbox 建立前停止，现场核对不存在该 request ID；最终原请求仅产生一次 attempt、结果为 `ui_observed`。测试结束后群目标恢复 `push/observe`，桌面通道暂停，观察进程继续使用固定 `7770768`。最新 [CI 41310258219](https://github.com/cyl19970726/wx-cli/actions/runs/41310258219) 四项成功；仓库外 wheel 111 passed。
 
+实机图片失败后新增了保守的原生回退：先执行原键盘复制；只有剪贴板仍为本次哨兵时，才在当前校验窗口内查找“恰好一张、完整位于 composer 内”的 Accessibility 图片，确认位置稳定后点击并再次 Command-C。成功仍要求一次剪贴板变更、单张 PNG/TIFF 和与冻结源相同的规范化像素。Swift 参数测试、arm64 完整构建及签名验证通过；该回退尚未替换当前助手，也未取得实机成功证据。
+
 ## Mac mini 部署与保护
 
 源码按提交直接拉取后在独立候选目录构建，避开不稳定的批量 SCP。当前只为授权测试群与测试私聊启用托管；另一个已登记目标没有被操作。共享 registry、原 controller 配置及三个原稳定入口的字节哈希保持不变。新 CLI 可对已托管、停止的旧 controller 临时使用候选 Rust API，不改写其原命令或 consumer。
@@ -64,7 +66,7 @@ GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图�
 | --- | --- | --- |
 | 授权私聊文字 | attempt 1 为 ui_observed，约 7.25 秒 | 中文、换行、emoji 的本地证据；用户独立确认收到，文字和换行正常。 |
 | 授权私聊四色合成图片 | attempt 1 为 indeterminate | 原生 prepare 报 `Composer Copy did not replace image sentinel exactly once`；没有 submit result，图片草稿仍在。没有点击另一个发送入口、清草稿、重放或替换 ID。 |
-| 授权测试群文字 | 21:15 通过兼容候选完成，attempt 1 为 ui_observed | 中文、换行、emoji 的本地出站证据；独立收件待确认。 |
+| 授权测试群文字 | 21:15 通过兼容候选完成，attempt 1 为 ui_observed | 中文、换行、emoji 的本地出站证据；用户独立确认测试群已收到。 |
 | 授权测试群图片 | 未执行 | 私聊图片仍在准备阶段停止，先用群文字验证迁移后的目标协调。 |
 
 两目标策略已恢复 push/observe，桌面通道暂停，执行器/采集仍存活，无活跃模型回合或 Session attention。原图片的状态继续按 indeterminate 保留；缺少 submit result 不等于独立收件判断，也不授予图片恢复权限。P0–P4 仍未全部验收通过，不能描述为上线就绪。

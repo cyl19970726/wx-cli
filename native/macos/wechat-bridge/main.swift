@@ -596,6 +596,30 @@ private func pasteNativeImage(_ state: VisualStage, image: LoadedImage, step: St
     }
 }
 
+// A staged image may be a separate accessibility element from the editable
+// composer. Only use its center when exactly one image belongs to the guarded
+// window and lies wholly inside the declared composer.
+private func stagedImagePoint(_ state: VisualStage, window: SCWindow) throws -> CGPoint {
+    let app = AXUIElementCreateApplication(state.expectedPID)
+    let composer = state.composerRect.rect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
+    let candidates = traverse(app).compactMap { node -> CGPoint? in
+        guard node.role == kAXImageRole as String,
+              let owner = node.ownerWindow, let ownerFrame = axFrame(owner),
+              abs(ownerFrame.minX - window.frame.minX) <= 3,
+              abs(ownerFrame.minY - window.frame.minY) <= 3,
+              abs(ownerFrame.width - window.frame.width) <= 3,
+              abs(ownerFrame.height - window.frame.height) <= 3,
+              let frame = axFrame(node.element),
+              frame.width >= 16, frame.height >= 16,
+              composer.contains(frame) else { return nil }
+        return CGPoint(x: frame.midX, y: frame.midY)
+    }
+    guard candidates.count == 1, let point = candidates.first else {
+        throw Failure("Cannot uniquely locate staged image inside guarded composer")
+    }
+    return point
+}
+
 private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
                                step: String) async throws -> String {
     let (window, _, _) = try await freshVisual(state, step: "\(step)-before-click", draft: nil)
@@ -609,7 +633,7 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
     let snapshot = try ClipboardSnapshot.capture()
     let sentinel = "CODEX-IMAGE-COPY-\(UUID().uuidString)"
     let owned = try setClipboardString(sentinel, snapshot: snapshot)
-    var restorable = owned
+    var verifiedCopyCount: Int?
     do {
         _ = try await freshVisual(state, step: "\(step)-copy-ready", draft: nil)
         guard NSPasteboard.general.changeCount == owned else {
@@ -618,20 +642,47 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
         try key(8, command: true)
         try await Task.sleep(nanoseconds: 250_000_000)
         let board = NSPasteboard.general
-        restorable = board.changeCount
-        guard restorable == owned + 1 else {
+        var copiedCount = board.changeCount
+        if copiedCount == owned && board.string(forType: .string) == sentinel {
+            let (currentWindow, _, _) = try await freshVisual(state, step: "\(step)-image-fallback-ready", draft: nil)
+            guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
+                throw Failure("Clipboard changed before staged image selection")
+            }
+            let imagePoint = try stagedImagePoint(state, window: currentWindow)
+            let (clickWindow, _, _) = try await freshVisual(state, step: "\(step)-image-fallback-before-click", draft: nil)
+            guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
+                throw Failure("Clipboard changed before staged image click")
+            }
+            guard try stagedImagePoint(state, window: clickWindow) == imagePoint else {
+                throw Failure("Staged image moved before selection")
+            }
+            try mouseClick(imagePoint)
+            try await Task.sleep(nanoseconds: 200_000_000)
+            _ = try await freshVisual(state, step: "\(step)-image-fallback-before-copy", draft: nil)
+            guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
+                throw Failure("Clipboard changed before staged image Copy")
+            }
+            try key(8, command: true)
+            try await Task.sleep(nanoseconds: 250_000_000)
+            copiedCount = board.changeCount
+        }
+        guard copiedCount == owned + 1 else {
             throw Failure("Composer Copy did not replace image sentinel exactly once")
         }
         let type = try MediaSupport.copiedImage(from: board, expected: image.pixels)
+        verifiedCopyCount = copiedCount
         _ = try await freshVisual(state, step: "\(step)-copied", draft: nil)
-        guard board.changeCount == restorable else {
+        guard board.changeCount == copiedCount else {
             throw Failure("Clipboard changed during image evidence capture")
         }
-        try snapshot.restore(ifCurrentCount: restorable)
+        try snapshot.restore(ifCurrentCount: copiedCount)
         return type
     } catch {
-        if NSPasteboard.general.changeCount == restorable {
-            try? snapshot.restore(ifCurrentCount: restorable)
+        let board = NSPasteboard.general
+        if board.changeCount == owned && board.string(forType: .string) == sentinel {
+            try? snapshot.restore(ifCurrentCount: owned)
+        } else if let verifiedCopyCount, board.changeCount == verifiedCopyCount {
+            try? snapshot.restore(ifCurrentCount: verifiedCopyCount)
         }
         throw error
     }
