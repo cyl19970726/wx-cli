@@ -26,6 +26,7 @@ pub mod channel;
 #[path = "channel_snapshot.rs"]
 pub(crate) mod channel_snapshot;
 pub mod conversations;
+pub mod coordinator;
 pub mod groups;
 pub mod outgoing;
 mod outgoing_media;

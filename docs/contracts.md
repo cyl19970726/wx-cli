@@ -81,3 +81,17 @@ Rust 协议版本与 Python 包版本分别管理。脚本兼容入口依赖完�
 `outbox queue-image --request-id ID --channel-id CHANNEL --session-id SESSION --image PATH` 在既有 journal 中建立 `media_queued` 意图；只有新二进制可领取此状态。文字 queue／协议 1 不变。图片完整验证后冻结，绑定媒体真实类型、字节数和 SHA-256，驱动收到协议 2 的 `media:{path,sha256,mime_type,size_bytes}`，不以 `text` 传路径。领取 attempt 前及驱动 GUI 前复核冻结内容。原文件变化不改变已保存意图；冻结内容变化停止。迁移保留旧文本和不可变 attempt；回退仅替换代码，不恢复过时状态快照。
 
 图片同样先持久记录 attempt 后操作 GUI；prepared／submitted 必须附带匹配来源和复制回规范化像素的图片证据。发送后保留绑定本次目标与操作的截图，关联正确 talker／self 的唯一新 Image 事件；微信重编码不要求输入和输出原文件字节相等。`ui_observed` 不代表收件。图片不支持 `recover-unsent`，不能换 ID 或换 GUI 路径重发。尺寸／格式限制、安装和实际验收见[图片记录](IMAGE_SEND_VALIDATION_20261024.md)。
+
+## 托管协调契约
+
+新增 `wx-cli coordinator --state-dir DESKTOP_UI_DIR` 使用私有 SQLite 保存每会话 owner、input、reply_policy、control epoch、cutover、通知水位和处理进度，以及 inbox/持久待办和 dispatch 引用。它不复制原 channel 事件或 outbox 正文。原 consumer、pending、lease、全部 attempts 和图片冻结副本原样保留。新绑定默认 observe；明确既有授权通过迁移参数保留。所有自动路由显式使用 conversation ID，不读取 selected_id。
+
+托管 queue/queue-image 必须携带原 owner 和 expected epoch。Rust 先验证，再冻结意图并保存 `managed_owner/managed_epoch`；冻结与注记间崩溃留下的无来源意图保持隔离，不被对账授予当前 owner 权限。`managed_queued/managed_media_queued` 不能由旧二进制的 queued 领取路径处理；数据库触发器还拒绝旧 attempt/recovery 插入。只有经过当前协调器领取、token/代际校验的 managed-send 能记录尝试。普通 direct send 与 narrow recover 在托管模式拒绝。
+
+事件落盘→inbox、outbox冻结→dispatch引用不是跨库事务。水位与通知在协调器事务中提交；启动/周期 reconcile 从原日志补缺，delivery/request 的幂等键保持不变。owner 迁移与 takeover 使旧 epoch 无效，未决投递显式交接；不能从 cursor 0 重跑历史。defer/draft 是持续待办，保存原事件、负责人、条件与期限；处理前缀前进不关闭待办。待审草稿不会到期自动发送。
+
+唯一执行器先持有桌面所有权，再在原 sender.lock 中检查领取、原 helper、权限与窗口。就绪后才记录 attempt；忙时排队，不消耗 attempt。driver 继承同一打开文件的锁，原 helper 未解决标记阻止父进程退出后的后继 GUI 动作。所有托管 send/reply/send-image/focus 共享该协调；旧 runner 拒绝托管 channel，防止静默 ack 非文本。其他同 OS 用户的任意 shell/原生调用并非此协议能隔离的恶意进程边界。
+
+dispatch完成从原 outbox结果推导。ui_observed 释放干净桌面，不等待每条人工收件确认；未知/环境异常暂停通道且保留原请求。显式检查旧 helper 和桌面后，review可恢复其他合格项，未知项本身不转回队列。不能把租约过期当成没有点击。
+
+Session投递先持久 reserve，再 turn/start，再记录原 thread/turn。busy、离线及结果不明不会新建替身或重复 turn；同 session_ref 的 active reservation 唯一。transport终结与业务处理决定独立；只有 Session 显式调用 inbox complete 才推进处理。模型最终文案/工具日志不转发微信。当前只接受自持的同宿主 Codex app-server Session，桌面 App 持有的 thread 与跨主机推送未接入。详见[操作与恢复](MANAGED_CONVERSATIONS.md)。

@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,37 @@ const MAX_CAPABILITY_OUTPUT_BYTES: u64 = 4096;
 const MAX_EVIDENCE_BYTES: usize = 4096;
 const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(clap::Args, Debug)]
+pub struct QueueOrigin {
+    #[arg(long)]
+    owner: Option<String>,
+    #[arg(long)]
+    expected_epoch: Option<i64>,
+    #[arg(long, requires = "part_index")]
+    batch_id: Option<String>,
+    #[arg(long, requires = "batch_id")]
+    part_index: Option<u16>,
+    /// 0: explicit manual request, 1: ordinary business, 2: proactive notice.
+    #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u8).range(0..=2))]
+    priority: u8,
+    #[arg(long)]
+    expires_at: Option<i64>,
+}
+impl QueueOrigin {
+    fn validate(&self, state: &Path) -> Result<(), Box<dyn Error>> {
+        validate_queue_owner(state, self.owner.as_deref(), self.expected_epoch)?;
+        if let Some(batch) = &self.batch_id {
+            check_request_id(batch)?;
+        }
+        if self.batch_id.is_some() != self.part_index.is_some()
+            || self.expires_at.is_some_and(|x| x <= 0)
+        {
+            return Err(invalid("batch requires part index and expiry must be positive").into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum OutgoingAction {
     /// Save an outgoing text intent without sending it.
@@ -36,6 +68,8 @@ pub enum OutgoingAction {
         /// Read the exact message body from standard input.
         #[arg(long, required = true)]
         text_stdin: bool,
+        #[command(flatten)]
+        origin: QueueOrigin,
     },
     /// Save one immutable PNG or JPEG image intent without sending it.
     QueueImage {
@@ -50,6 +84,8 @@ pub enum OutgoingAction {
         /// Digest observed by the caller before queueing; source drift is refused.
         #[arg(long)]
         expected_sha256: Option<String>,
+        #[command(flatten)]
+        origin: QueueOrigin,
     },
     /// List intent IDs and states (message bodies are withheld).
     List,
@@ -71,6 +107,24 @@ pub enum OutgoingAction {
         request_id: String,
         #[arg(long)]
         driver: std::path::PathBuf,
+    },
+    /// Enroll a channel in the shared desktop coordinator without resetting progress.
+    Manage {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Execute an exact coordinator claim while holding the shared desktop lock.
+    ManagedSend {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        driver: PathBuf,
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        token: String,
     },
     /// Explicitly claim a new attempt after an operator has established the previous send did not submit.
     RecoverUnsent {
@@ -117,17 +171,20 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             channel_id,
             session_id,
             text_stdin,
+            origin,
         } => {
             if !text_stdin {
                 return Err(invalid("queue requires --text-stdin").into());
             }
             check_binding(&binding, &channel_id, &session_id)?;
             check_request_id(&request_id)?;
+            origin.validate(state_dir)?;
             let mut text = String::new();
             io::stdin()
                 .take((MAX_TEXT_BYTES + 1) as u64)
                 .read_to_string(&mut text)?;
             let status = queue_intent(&mut conn, &binding, &request_id, &text)?;
+            stamp_queue_owner(&mut conn, state_dir, &request_id, &origin)?;
             println!("{}", json!({"request_id": request_id, "status": status}));
         }
         OutgoingAction::QueueImage {
@@ -136,9 +193,11 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             session_id,
             image,
             expected_sha256,
+            origin,
         } => {
             check_binding(&binding, &channel_id, &session_id)?;
             check_request_id(&request_id)?;
+            origin.validate(state_dir)?;
             let status = queue_image_checked(
                 &mut conn,
                 state_dir,
@@ -147,6 +206,7 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
                 &image,
                 expected_sha256.as_deref(),
             )?;
+            stamp_queue_owner(&mut conn, state_dir, &request_id, &origin)?;
             println!("{}", json!({"request_id": request_id, "status": status}));
         }
         OutgoingAction::List => {
@@ -169,6 +229,25 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             println!(
                 "{}",
                 json!({"request_id": request_id, "status": result.as_str()})
+            );
+        }
+        OutgoingAction::Manage { root } => {
+            drop(conn);
+            enroll_managed(state_dir, &root)?;
+            println!("{}", json!({"managed":true}));
+        }
+        OutgoingAction::ManagedSend {
+            request_id,
+            driver,
+            root,
+            dispatch_id,
+            token,
+        } => {
+            drop(conn);
+            let result = managed_send(state_dir, &request_id, &driver, &root, dispatch_id, &token)?;
+            println!(
+                "{}",
+                json!({"request_id":request_id,"status":result.as_str()})
             );
         }
         OutgoingAction::RecoverUnsent {
@@ -259,6 +338,9 @@ fn send_with_timeout(
     driver: &Path,
     timeout: Duration,
 ) -> Result<AttemptResult, Box<dyn Error>> {
+    if managed_root(state_dir)?.is_some() {
+        return Err(invalid("managed channel requires coordinator dispatch").into());
+    }
     // Do not consume the intent if the executable is obviously unusable.
     validate_driver(driver)?;
     let attempt = claim_attempt(state_dir, request_id)?;
@@ -273,6 +355,9 @@ fn recover_unsent_with_timeout(
     driver: &Path,
     timeout: Duration,
 ) -> Result<AttemptResult, Box<dyn Error>> {
+    if managed_root(state_dir)?.is_some() {
+        return Err(invalid("managed recovery requires explicit coordinated review").into());
+    }
     check_request_id(request_id)?;
     if !(1..i64::MAX).contains(&expected_attempt) {
         return Err(invalid("expected attempt must be positive and below i64::MAX").into());
@@ -488,7 +573,44 @@ fn driver_input(
 }
 
 fn invoke_driver(driver: &Path, input: &[u8], timeout: Duration) -> (AttemptResult, String) {
-    let mut child = match Command::new(driver)
+    invoke_driver_locked(driver, input, timeout, None)
+}
+
+fn invoke_driver_locked(
+    driver: &Path,
+    input: &[u8],
+    timeout: Duration,
+    lock_fd: Option<i32>,
+) -> (AttemptResult, String) {
+    invoke_driver_mode(driver, input, timeout, lock_fd, false)
+}
+
+fn invoke_driver_mode(
+    driver: &Path,
+    input: &[u8],
+    timeout: Duration,
+    lock_fd: Option<i32>,
+    preflight: bool,
+) -> (AttemptResult, String) {
+    let mut command = Command::new(driver);
+    if preflight {
+        command.arg("--dispatch-preflight");
+    }
+    if let Some(fd) = lock_fd {
+        command.env("WX_DESKTOP_LOCK_FD", fd.to_string());
+        // The driver retains the same open-file description if its parent dies.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        command.env_remove("WX_DESKTOP_LOCK_FD");
+    }
+    let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -550,6 +672,16 @@ fn invoke_driver(driver: &Path, input: &[u8], timeout: Duration) -> (AttemptResu
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return indeterminate("driver returned invalid JSON");
     };
+    if preflight {
+        return if value.get("ready").and_then(|v| v.as_bool()) == Some(true) {
+            (
+                AttemptResult::UiObserved,
+                "desktop readiness checked before attempt".into(),
+            )
+        } else {
+            (AttemptResult::Failed, "desktop readiness refused".into())
+        };
+    }
     let (Some(status), Some(evidence)) = (
         value.get("status").and_then(|v| v.as_str()),
         value.get("evidence").and_then(|v| v.as_str()),
@@ -584,6 +716,141 @@ fn secure_file(path: &Path) -> Result<(), Box<dyn Error>> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn managed_root(state_dir: &Path) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let path = state_dir.join("managed-coordinator.json");
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    secure_file(&path)?;
+    let data: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let root = PathBuf::from(
+        data["root"]
+            .as_str()
+            .ok_or_else(|| invalid("invalid managed root"))?,
+    );
+    if data["version"] != 1 || !root.is_absolute() || root.canonicalize()? != root {
+        return Err(invalid("invalid managed root identity").into());
+    }
+    Ok(Some(root))
+}
+
+pub(crate) fn enroll_managed(state_dir: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
+    if !root.is_absolute() || root.canonicalize()? != root {
+        return Err(invalid("coordinator root must be canonical").into());
+    }
+    let meta = fs::symlink_metadata(root)?;
+    if !meta.is_dir()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid("coordinator directory must be private and owned").into());
+    }
+    if let Some(existing) = managed_root(state_dir)? {
+        if existing != root {
+            return Err(invalid("channel belongs to another coordinator").into());
+        }
+    }
+    let mut conn = open_journal(state_dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS managed_control (singleton INTEGER PRIMARY KEY CHECK(singleton=1),gate INTEGER NOT NULL);
+        INSERT OR IGNORE INTO managed_control VALUES (1,0);
+        UPDATE outgoing_intent SET status=CASE status WHEN 'queued' THEN 'managed_queued' ELSE 'managed_media_queued' END WHERE status IN ('queued','media_queued');
+        CREATE TRIGGER IF NOT EXISTS managed_queue AFTER INSERT ON outgoing_intent WHEN NEW.status IN ('queued','media_queued') BEGIN
+          UPDATE outgoing_intent SET status=CASE NEW.status WHEN 'queued' THEN 'managed_queued' ELSE 'managed_media_queued' END WHERE request_id=NEW.request_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS managed_attempt BEFORE INSERT ON outgoing_attempt WHEN (SELECT gate FROM managed_control WHERE singleton=1)=0 BEGIN
+          SELECT RAISE(ABORT,'managed channel requires coordinator dispatch');
+        END;")?;
+    tx.commit()?;
+    let marker = state_dir.join("managed-coordinator.json");
+    if !marker.try_exists()? {
+        let mut file = tempfile::NamedTempFile::new_in(state_dir)?;
+        file.write_all(&serde_json::to_vec(&json!({"version":1,"root":root}))?)?;
+        file.as_file().sync_all()?;
+        if let Err(error) = file.persist_noclobber(&marker) {
+            if error.error.kind() != io::ErrorKind::AlreadyExists
+                || managed_root(state_dir)?.as_deref() != Some(root)
+            {
+                return Err(error.error.into());
+            }
+        }
+        fs::File::open(state_dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn intent_view(
+    state_dir: &Path,
+    request_id: &str,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    show_intent(
+        &open_journal(state_dir)?,
+        &load_binding(state_dir)?,
+        request_id,
+    )
+}
+
+fn managed_send(
+    state_dir: &Path,
+    request_id: &str,
+    driver: &Path,
+    root: &Path,
+    dispatch_id: i64,
+    token: &str,
+) -> Result<AttemptResult, Box<dyn Error>> {
+    if managed_root(state_dir)?.as_deref() != Some(root) {
+        return Err(invalid("managed root mismatch").into());
+    }
+    validate_driver(driver)?;
+    let path = root.join("sender.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    secure_file(&path)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(invalid("desktop busy; request remains unattempted").into());
+    }
+    super::coordinator::validate_dispatch(root, state_dir, request_id, dispatch_id, token)?;
+    let (ready, _) = invoke_driver_mode(
+        driver,
+        b"{}",
+        Duration::from_secs(20),
+        Some(lock.as_raw_fd()),
+        true,
+    );
+    if ready != AttemptResult::UiObserved {
+        super::coordinator::pause_surface(root, "desktop readiness requires review")?;
+        return Err(invalid("desktop readiness refused; intent remains unattempted").into());
+    }
+    // The preflight could take time; repeat the owner/control fence before claim.
+    let attempt = super::coordinator::with_dispatch_authority(
+        root,
+        state_dir,
+        request_id,
+        dispatch_id,
+        token,
+        || claim_attempt_mode(state_dir, request_id, true),
+    )?;
+    let binding = load_binding(state_dir)?;
+    let payload = driver_input(&binding, &attempt, None)?;
+    let (result, evidence) =
+        invoke_driver_locked(driver, &payload, DRIVER_TIMEOUT, Some(lock.as_raw_fd()));
+    record_result(
+        state_dir,
+        request_id,
+        attempt.attempt_number,
+        result,
+        &evidence,
+    )?;
+    Ok(result)
 }
 
 fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
@@ -623,7 +890,7 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
             media_sha256 TEXT,
             media_mime_type TEXT,
             media_size_bytes INTEGER,
-            status TEXT NOT NULL CHECK(status IN ('queued','media_queued','attempt_recorded','ui_observed','failed','indeterminate','recipient_confirmed')),
+            status TEXT NOT NULL CHECK(status IN ('queued','media_queued','managed_queued','managed_media_queued','attempt_recorded','ui_observed','failed','indeterminate','recipient_confirmed')),
             attempt_number INTEGER NOT NULL DEFAULT 0,
             result_evidence TEXT,
             receipt_evidence TEXT,
@@ -635,15 +902,26 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
         .prepare("PRAGMA table_info(outgoing_intent)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<_, _>>()?;
-    if !columns.iter().any(|column| column == "content_kind") {
+    let old_schema: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE name='outgoing_intent'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !columns.iter().any(|column| column == "content_kind")
+        || !old_schema.contains("managed_queued")
+    {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch("ALTER TABLE outgoing_intent RENAME TO outgoing_intent_legacy")?;
         tx.execute_batch(intent_schema)?;
-        tx.execute_batch("INSERT INTO outgoing_intent
+        if columns.iter().any(|column| column == "content_kind") {
+            tx.execute_batch("INSERT INTO outgoing_intent SELECT * FROM outgoing_intent_legacy; DROP TABLE outgoing_intent_legacy;")?;
+        } else {
+            tx.execute_batch("INSERT INTO outgoing_intent
             (request_id,channel_id,session_id,text,status,attempt_number,result_evidence,receipt_evidence,created_at,updated_at)
             SELECT request_id,channel_id,session_id,text,status,attempt_number,result_evidence,receipt_evidence,created_at,updated_at
             FROM outgoing_intent_legacy;
             DROP TABLE outgoing_intent_legacy;")?;
+        }
         tx.commit()?;
     }
     conn.execute_batch(
@@ -664,9 +942,79 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
             CASE WHEN status='recipient_confirmed' THEN 'ui_observed' ELSE status END,
             result_evidence,created_at,
             CASE WHEN status='attempt_recorded' THEN NULL ELSE updated_at END
-        FROM outgoing_intent WHERE attempt_number > 0;"
+        FROM outgoing_intent WHERE attempt_number > 0 AND NOT EXISTS
+            (SELECT 1 FROM outgoing_attempt a WHERE a.request_id=outgoing_intent.request_id AND a.attempt_number=outgoing_intent.attempt_number);"
     )?;
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(outgoing_intent)")?
+        .query_map([], |r| r.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !columns.iter().any(|c| c == "managed_owner") {
+        conn.execute_batch("ALTER TABLE outgoing_intent ADD COLUMN managed_owner TEXT; ALTER TABLE outgoing_intent ADD COLUMN managed_epoch INTEGER;")?;
+    }
+    if !columns.iter().any(|c| c == "batch_id") {
+        conn.execute_batch("ALTER TABLE outgoing_intent ADD COLUMN batch_id TEXT;
+          ALTER TABLE outgoing_intent ADD COLUMN part_index INTEGER;
+          ALTER TABLE outgoing_intent ADD COLUMN priority INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE outgoing_intent ADD COLUMN expires_at INTEGER;
+          CREATE UNIQUE INDEX IF NOT EXISTS outgoing_batch_parts ON outgoing_intent(batch_id,part_index) WHERE batch_id IS NOT NULL;")?;
+    }
     Ok(conn)
+}
+
+fn validate_queue_owner(
+    state: &Path,
+    owner: Option<&str>,
+    epoch: Option<i64>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(root) = managed_root(state)? {
+        let owner = owner.ok_or_else(|| invalid("managed queue requires originating owner"))?;
+        let epoch = epoch.ok_or_else(|| invalid("managed queue requires expected epoch"))?;
+        super::coordinator::validate_owner(&root, state, owner, epoch)?;
+    }
+    Ok(())
+}
+
+fn stamp_queue_owner(
+    conn: &mut Connection,
+    state: &Path,
+    request: &str,
+    origin: &QueueOrigin,
+) -> Result<(), Box<dyn Error>> {
+    if managed_root(state)?.is_none() {
+        return Ok(());
+    }
+    origin.validate(state)?;
+    let owner = origin.owner.as_deref();
+    let epoch = origin.expected_epoch;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (old_owner, old_epoch): (Option<String>, Option<i64>) = tx.query_row(
+        "SELECT managed_owner,managed_epoch FROM outgoing_intent WHERE request_id=?1",
+        [request],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if old_owner.is_some() && (old_owner.as_deref() != owner || old_epoch != epoch) {
+        return Err(invalid("intent originated under another owner epoch").into());
+    }
+    let saved: (Option<String>, Option<i64>, i64, Option<i64>) = tx.query_row(
+        "SELECT batch_id,part_index,priority,expires_at FROM outgoing_intent WHERE request_id=?1",
+        [request],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    if old_owner.is_some()
+        && saved
+            != (
+                origin.batch_id.clone(),
+                origin.part_index.map(i64::from),
+                i64::from(origin.priority),
+                origin.expires_at,
+            )
+    {
+        return Err(invalid("request already has different scheduling metadata").into());
+    }
+    tx.execute("UPDATE outgoing_intent SET managed_owner=?2,managed_epoch=?3,batch_id=?4,part_index=?5,priority=?6,expires_at=?7 WHERE request_id=?1 AND managed_owner IS NULL AND attempt_number=0",params![request,owner,epoch,origin.batch_id,origin.part_index,origin.priority,origin.expires_at])?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn queue_intent(
@@ -705,7 +1053,17 @@ fn queue_intent(
         "queued".to_owned()
     };
     tx.commit()?;
-    Ok(status)
+    Ok(tx_status(conn, request_id)?.unwrap_or(status))
+}
+
+fn tx_status(conn: &Connection, request_id: &str) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(conn
+        .query_row(
+            "SELECT status FROM outgoing_intent WHERE request_id=?1",
+            [request_id],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 #[cfg(test)]
@@ -763,7 +1121,7 @@ fn queue_image_checked(
         params![request_id,binding.channel_id,binding.session_id,media.path.to_string_lossy(),media.sha256,media.mime_type,media.size_bytes as i64,timestamp],
     )?;
     tx.commit()?;
-    Ok("media_queued".to_owned())
+    Ok(tx_status(conn, request_id)?.unwrap_or_else(|| "media_queued".to_owned()))
 }
 
 fn is_media_request(
@@ -828,19 +1186,48 @@ fn show_intent(
         }))
     })?;
     item["attempts"] = json!(attempts.collect::<rusqlite::Result<Vec<_>>>()?);
+    let (owner, epoch): (Option<String>, Option<i64>) = conn.query_row(
+        "SELECT managed_owner,managed_epoch FROM outgoing_intent WHERE request_id=?1",
+        [request_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    item["managed_owner"] = json!(owner);
+    item["managed_epoch"] = json!(epoch);
+    let scheduling: (Option<String>, Option<i64>, i64, Option<i64>) = conn.query_row(
+        "SELECT batch_id,part_index,priority,expires_at FROM outgoing_intent WHERE request_id=?1",
+        [request_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    item["batch_id"] = json!(scheduling.0);
+    item["part_index"] = json!(scheduling.1);
+    item["priority"] = json!(scheduling.2);
+    item["expires_at"] = json!(scheduling.3);
     Ok(item)
 }
 
 /// Persist a single attempt before any sender touches the UI. Repeated calls fail closed.
 #[allow(dead_code)]
 pub(crate) fn claim_attempt(state_dir: &Path, request_id: &str) -> Result<Attempt, Box<dyn Error>> {
+    claim_attempt_mode(state_dir, request_id, false)
+}
+
+fn claim_attempt_mode(
+    state_dir: &Path,
+    request_id: &str,
+    managed: bool,
+) -> Result<Attempt, Box<dyn Error>> {
     check_request_id(request_id)?;
     let binding = load_binding(state_dir)?;
     let mut conn = open_journal(state_dir)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if managed {
+        tx.execute("UPDATE managed_control SET gate=1 WHERE singleton=1", [])?;
+    } else if managed_root(state_dir)?.is_some() {
+        return Err(invalid("managed channel requires coordinator dispatch").into());
+    }
     let row: (String, String, Option<String>, Option<String>, Option<String>, Option<i64>) = tx.query_row(
-        "SELECT text,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND status IN ('queued','media_queued')",
-        params![request_id, binding.channel_id, binding.session_id],
+        "SELECT text,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND status IN (?4,?5)",
+        params![request_id, binding.channel_id, binding.session_id, if managed {"managed_queued"} else {"queued"}, if managed {"managed_media_queued"} else {"media_queued"}],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
     ).optional()?.ok_or_else(|| invalid("request is absent, mismatched, or already attempted"))?;
     let (text, kind, path, sha, mime, size) = row;
@@ -872,6 +1259,9 @@ pub(crate) fn claim_attempt(state_dir: &Path, request_id: &str) -> Result<Attemp
         params![request_id, attempt_number, timestamp])?;
     tx.execute("INSERT INTO outgoing_attempt (request_id,attempt_number,status,claimed_at) VALUES (?1,?2,'attempt_recorded',?3)",
         params![request_id, attempt_number, timestamp])?;
+    if managed {
+        tx.execute("UPDATE managed_control SET gate=0 WHERE singleton=1", [])?;
+    }
     tx.commit()?;
     Ok(Attempt {
         request_id: request_id.to_owned(),
@@ -1019,6 +1409,92 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[test]
+    fn managed_migration_fences_legacy_clients_and_preserves_attempts() {
+        let (temp, state, binding) = setup();
+        let root = temp.path().join("ui");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut db = open_journal(&state).unwrap();
+        queue_intent(&mut db, &binding, "done", "historical").unwrap();
+        let old = claim_attempt(&state, "done").unwrap();
+        record_result(
+            &state,
+            "done",
+            old.attempt_number,
+            AttemptResult::UiObserved,
+            "historical-evidence",
+        )
+        .unwrap();
+        queue_intent(&mut db, &binding, "pending", "queued").unwrap();
+        drop(db);
+        enroll_managed(&state, &root).unwrap();
+        enroll_managed(&state, &root).unwrap();
+        let mut db = open_journal(&state).unwrap();
+        assert_eq!(
+            show_intent(&db, &binding, "done").unwrap()["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            show_intent(&db, &binding, "pending").unwrap()["status"],
+            "managed_queued"
+        );
+        assert!(claim_attempt(&state, "pending").is_err());
+        // Simulate an old binary inserting its old queued status directly.
+        db.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,status,created_at,updated_at) VALUES('old-new',?1,?2,'body','queued',0,0)",params![binding.channel_id,binding.session_id]).unwrap();
+        assert_eq!(
+            show_intent(&db, &binding, "old-new").unwrap()["status"],
+            "managed_queued"
+        );
+        // Even an old recovery client's unconditional attempt insert is fenced.
+        assert!(db.execute("INSERT INTO outgoing_attempt(request_id,attempt_number,status,claimed_at) VALUES('old-new',1,'attempt_recorded',0)",[]).is_err());
+        queue_intent(&mut db, &binding, "fresh", "new").unwrap();
+        let attempt = claim_attempt_mode(&state, "fresh", true).unwrap();
+        record_result(
+            &state,
+            "fresh",
+            attempt.attempt_number,
+            AttemptResult::Indeterminate,
+            "unknown",
+        )
+        .unwrap();
+        assert!(claim_attempt_mode(&state, "fresh", true).is_err());
+        assert_eq!(intent_view(&state, "fresh").unwrap()["attempt_number"], 1);
+    }
+
+    #[test]
+    fn busy_desktop_does_not_consume_managed_attempt() {
+        let (temp, state, binding) = setup();
+        let root = temp.path().join("ui");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = root.canonicalize().unwrap();
+        enroll_managed(&state, &root).unwrap();
+        queue_intent(&mut open_journal(&state).unwrap(), &binding, "busy", "body").unwrap();
+        let path = root.join("sender.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let driver = fake_driver(&temp, "never-started", "exit 1");
+        let err = managed_send(&state, "busy", &driver, &root, 1, "invalid").unwrap_err();
+        assert!(err.to_string().contains("desktop busy"));
+        let item = intent_view(&state, "busy").unwrap();
+        assert_eq!(item["attempt_number"], 0);
+        assert!(item["attempts"].as_array().unwrap().is_empty());
     }
 
     fn fake_recovery_driver(temp: &TempDir, name: &str, body: &str) -> PathBuf {

@@ -189,6 +189,8 @@ class ControlledStop(Exception):
 
 class Runner:
     def __init__(self, args):
+        if (args.state_dir / "managed-coordinator.json").exists():
+            raise RunnerError("managed channel uses wx-agent inbox run; legacy runner cannot acknowledge its events")
         self.args = args
         self.state_path = args.state_dir / STATE_NAME
         self.channel = [str(args.wx_cli), "channel", "--state-dir", str(args.state_dir)]

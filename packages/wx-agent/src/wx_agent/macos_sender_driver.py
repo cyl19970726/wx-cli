@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 MAX_INPUT = 70 * 1024
@@ -61,6 +62,37 @@ def private_read(path):
     if len(raw) > MAX_OUTPUT:
         raise Refused("private file too large")
     return json.loads(raw.decode("utf-8"))
+
+
+@contextmanager
+def desktop_lock(config):
+    """Share the executor's open-file lock, including if the executor exits."""
+    path = config["ui_dir"] / "sender.lock"
+    inherited = os.environ.get("WX_DESKTOP_LOCK_FD")
+    if inherited is not None:
+        try:
+            source = int(inherited)
+            info = os.fstat(source)
+            private(path)
+            expected = path.stat()
+            if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
+                raise Refused("desktop lock identity differs")
+            fd = os.dup(source)
+        except (OSError, ValueError) as exc:
+            raise Refused("invalid inherited desktop lock") from exc
+    else:
+        # Managed focus and direct sender calls must come through the executor.
+        state = config.get("channel_state_dir")
+        if (state and (Path(state) / "managed-coordinator.json").exists()) or (config["ui_dir"] / "coordinator.sqlite3").exists():
+            raise Refused("managed desktop operation requires coordinator")
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "r+") as lock:
+        private(path)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refused("sender busy") from exc
+        yield lock
 
 
 def private_create(path, value):
@@ -1115,14 +1147,7 @@ def focus_only(config):
     """Select the configured group without reading stdin or touching the outbox."""
     deadline = time.monotonic() + BUDGET
     ui = config["ui_dir"]
-    lock_path = ui / "sender.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "r+") as lock:
-        private(lock_path)
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refused("sender busy") from exc
+    with desktop_lock(config):
         _guard_helper(config, deadline)
         status(config, deadline)
         verify_target(config, deadline)
@@ -1142,6 +1167,18 @@ def focus_only(config):
                 "category": focus_proof["category"]}
 
 
+def dispatch_preflight(config):
+    """Check the existing helper and desktop before Rust records an attempt."""
+    deadline = time.monotonic() + 15
+    with desktop_lock(config):
+        _guard_helper(config, deadline)
+        status(config, deadline)
+        inspected = bridge(config, "dispatch-preflight-" + uuid.uuid4().hex,
+                           "inspect", {}, deadline, 6)
+        inspect_ok(inspected, config)
+    return {"ready": True}
+
+
 def run(request, config):
     started = time.monotonic()
     deadline = started + BUDGET
@@ -1149,18 +1186,12 @@ def run(request, config):
     tid = request_ok(request, config, attempt_number)
     status(config, deadline)
     ui = config["ui_dir"]
-    lock_path = ui / "sender.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "r+") as lock:
-        private(lock_path)
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refused("sender busy") from exc
+    with desktop_lock(config):
         _guard_helper(config, deadline)
         report_path = ui / (tid + ".client-result.json")
         report = {"id": tid, "attempt_number": attempt_number,
                   "request_id": request["request_id"], "stage": "started", "status": "indeterminate",
+                  "channel_id": request["channel_id"], "session_id": request["session_id"],
                   "started_at": datetime.now(timezone.utc).isoformat()}
         if request.get("recovery_from_attempt") is not None:
             report["recovery_from_attempt"] = request["recovery_from_attempt"]
@@ -1244,9 +1275,20 @@ def main(argv=None):
         return 0
     recovery_preflight_mode = argv == ["--recovery-preflight"]
     focus_mode = argv == ["--focus-only"]
-    if argv and not (focus_mode or recovery_preflight_mode):
+    dispatch_mode = argv == ["--dispatch-preflight"]
+    if argv and not (focus_mode or recovery_preflight_mode or dispatch_mode):
         print(json.dumps({"focused": False, "reason": "unsupported command"}))
         return 2
+    if dispatch_mode:
+        try:
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = dispatch_preflight(safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError):
+            result = {"ready": False}
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
     if focus_mode:
         try:
             cfg = os.environ.get("WX_SENDER_CONFIG")

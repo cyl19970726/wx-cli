@@ -1,5 +1,7 @@
 # 每个会话独立状态，共用受控发送入口
 
+本分支的托管扩展使用 `coordinator.rs` 管理 owner/control epoch、通知水位、处理决定/待办、turn reservation 与发送引用；`dispatch.py`、`inbox.py` 编排，`session_adapter.py` 只持有明确受管的长期 Codex 连接。新增运行方法与故障语义见[托管指南](MANAGED_CONVERSATIONS.md)，实际验收见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。以下历史单群/未托管描述继续适用于尚未迁移的会话；不表示旧 runner 可操作托管状态。
+
 本项目把微信作为 Agent 的一个渠道：从本机加密数据库副本获取结构化消息，以持久事件游标订阅；Agent 生成回复后，经一次性发件箱与 macOS 桌面发送。读取正文不依赖截图 OCR。视觉识别主要用于核验目标窗口、群标题、输入框和发送按钮。
 
 按需入口 `wx-agent conversations` 同时支持群聊和个人会话。元数据发现返回由账号与原始 talker 派生的稳定 `conversation_id`，显示名变化不会换 ID。注册表只保存选择与路由；每个新会话仍使用一套不可变 Rust channel/outbox。已有 controller 必须在配置中显式列入，选择对应群时复用其原状态，不能创建第二个消费者来绕过正在运行的后台。完整入口见[通用会话 CLI](CONVERSATIONS_CLI.md)。
@@ -66,7 +68,7 @@ outbox 的未知结果不自动重试。窄范围 `recover-unsent` 只允许操�
 
 Agent 通过 JSON stdin/stdout 调用，可替换 Codex 文本适配器。该适配器禁用 shell、应用和联网工具，只产文案。群消息没有授权本机操作的能力。CLI 才拥有群绑定和状态；skill 解释何时调用、如何处理人工接管和确认需求。
 
-MCP 后续暴露相同契约，不拥有第二份消费进度。按需会话切换已接入共用 UI 锁和已登记 controller 的协调；多个常驻 Agent 的排队调度、模式配置与跨账号切换仍未实现，不能简单复制多个自动回复循环。
+MCP 后续暴露相同契约，不拥有第二份消费进度。托管扩展通过 Rust coordinator 和独立桌面执行器协调多个会话，使用显式模式和 owner；不复制自动回复循环。跨账号切换、跨宿主 Session 投递与桌面 App 持有 thread 的写入仍未接入。
 
 ## 现场与开发版
 

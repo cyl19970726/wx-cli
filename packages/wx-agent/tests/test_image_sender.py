@@ -88,6 +88,12 @@ class ImageSenderTests(unittest.TestCase):
             driver.request_ok(self.request,self.config)
         self.assertEqual(self.actions,[])
 
+    def test_managed_desktop_refuses_unfenced_direct_driver_before_gui(self):
+        (self.ui/"coordinator.sqlite3").write_bytes(b"synthetic marker")
+        with self.assertRaisesRegex(driver.Refused,"requires coordinator"):
+            self.run_driver()
+        self.assertEqual(self.actions,[])
+
     def test_invalid_files_symlinks_and_unreadable_frozen_permissions(self):
         for raw in (b'',b'GIF89a',b'not image'):
             self.path.write_bytes(raw)

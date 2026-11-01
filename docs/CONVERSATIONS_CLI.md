@@ -1,6 +1,6 @@
 # 群聊与个人会话 CLI
 
-`wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。已配置的单群 controller 可以导入复用，涉及它时 CLI 会协调原 writer 并在完成后交还。当前不提供多常驻 Agent 调度或 MCP。
+`wx-agent conversations` 面向按需访问已授权的群聊和可识别个人会话。它使用独立私有注册表与每会话 channel；读取和手动操作不启动模型或常驻 Agent。未迁移的单群 controller 会协调原 writer 并交还；新增 `configure/takeover/handback`、托管发送、inbox 与持久 Session 推送见[多会话指南](MANAGED_CONVERSATIONS.md)。MCP 尚未提供。
 
 **现场状态：** 2026-10-21 统一修复版 `de15fde` 已安装并通过授权私聊、测试群的新消息发送及自动切回；两条均有独立收件确认，各出现一次。运行器仍停止，按需读取不自动回复。终止 LF/CR/CRLF 在入队前拒绝；内部换行、中文、emoji 已实测。此前失败或不确定意图与 attempt 保持原样，不因新验证成功而重放。安装、耗时和具体边界见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)；10 月 20 日历史基线与更早证据见[验证记录](CONVERSATIONS_VALIDATION_20261016.md)。这次有界验证不等于长期无人值守或其他客户环境可用性证明。
 
@@ -84,6 +84,8 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 同一 request ID 和相同正文只对应一个意图；正文不同会冲突。已有 `attempt_recorded`、`failed`、`indeterminate` 或其他未决状态时，命令只报告未决，不会再次点击。保留原 request ID 并核对 outbox 与授权接收端，禁止自动重试或生成替代 ID。
 
+已登记到多会话协调器的会话，`send`、`send-image`、`reply` 必须同时提供原负责 Session 的 `--owner` 和其领取任务时的 `--expected-epoch`。先从协调器状态或领取结果取得这两个值；owner 或 epoch 已变化时，旧 Session 应停止并重新核对，不能取当前新值替旧任务发送。未登记的旧会话保持原命令用法。托管发送排队时返回 `pending`，保留原 request ID 查询结果，不另造 ID 重发。
+
 单张本地图片使用显式命令，群聊和私聊沿用已选择的同一会话，也可传稳定 `--id`：
 
 ```sh
@@ -122,4 +124,4 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 ## 现有单群入口与功能状态
 
-已有单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍可继续按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。`wx-agent conversations` 提供按需群/个人会话注册、分页阅读和手动操作，并可协调导入的单群后台。多常驻 Agent、按会话运行模式表、共享桌面多群调度和 MCP 尚未实现。当前部署状态见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)。
+未迁移单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。托管会话需走[owner、inbox 与共享桌面队列](MANAGED_CONVERSATIONS.md)，旧 runner 不得操作托管状态。MCP 尚未实现；历史部署见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)，新版本状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。

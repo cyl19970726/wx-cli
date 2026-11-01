@@ -8,17 +8,17 @@
 
 ## 一个仓库，三个执行层
 
-多会话扩展的最新设计见[专属 Session、主动 CLI 与消息推送方案](docs/MULTI_CONVERSATION_PLAN.md)：包含现状差距、统一文字／图片发送队列、逐会话接管和验收批次。该文为设计提案，不扩大下述已验证范围。
+多会话扩展的设计见[批准方案](docs/MULTI_CONVERSATION_PLAN.md)，新增入口见[托管会话指南](docs/MANAGED_CONVERSATIONS.md)，实际进度见[实施与验证记录](docs/MULTI_CONVERSATION_IMPLEMENTATION.md)。本分支增加逐会话控制、Rust 持久 inbox/文字图片调度与受管 Codex Session 适配器；新版本的工程验证、实机发送和独立收件分别记录，不扩大下述历史验收范围。
 
 | 层 | 提供什么 | 入口 |
 | --- | --- | --- |
-| Rust / wx-cli | 加密副本读取、稳定群/个人会话身份发现、NDJSON 事件、consumer 确认、持久发件箱 | `wx-cli conversations` / `wx-cli channel` / `wx-cli outbox` |
-| Python / wx-agent | 单群自动运行、按需会话选择/分页/聚焦/发送/回复、启停与健康状态、Codex 适配、带来源的会话笔记 | `wx-agent` |
+| Rust / wx-cli | 加密副本读取、稳定身份、事件/consumer/outbox，以及托管 owner、inbox 与调度引用 | `wx-cli conversations` / `channel` / `outbox` / `coordinator` |
+| Python / wx-agent | 按需 CLI、旧单群兼容、托管采集/Session 分发、独立桌面执行器及派生健康状态 | `wx-agent` |
 | Swift / macOS bridge | 核验目标窗口与草稿，准备文本或单张 PNG/JPEG，单次点击发送 | 独立构建和授权的原生助手 |
 
 项目内 [wechat-group-agent skill](.agents/skills/wechat-group-agent/SKILL.md) 教 Agent 如何操作上述 CLI。skill 不自带后台监听器，也不会为手动会话启动模型；MCP 尚未实现，后续若开发应复用同一套状态和协议。
 
-当前 Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。若选择的群复用已有单群 controller，桌面写操作会协调该原 writer，并在完成后恢复原启停状态。`wx-agent chat` 仍是既有单群入口。多常驻 Agent、逐会话运行模式表、MCP 与共享桌面多群调度尚未实现。
+Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。未迁移会话继续使用原 controller 协调；托管会话通过 `configure` 显式迁移，使用 `wx-agent inbox` 和 `dispatch` 共享处理记录及桌面队列。受管 Session 已有同 thread 跨重启工具调用探针；正在被桌面 App 持有的业务 Session 暂只支持主动 CLI。MCP 尚未实现。
 
 图片发送命令、内容冻结与当前实机状态见[单图片发送记录](docs/IMAGE_SEND_VALIDATION_20261024.md)和[CLI 用法](docs/CONVERSATIONS_CLI.md)。
 

@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -33,6 +34,7 @@ class FakeCLI:
         self.recoveries = []
         self.on_queue = None
         self.calls = []
+        self.managed_states = set()
 
     def __call__(self, argv, data=None, timeout=60, limit=None):
         self.calls.append(list(argv))
@@ -89,12 +91,20 @@ class FakeCLI:
             media = conv.sender.image_descriptor(argv[argv.index("--image") + 1])
             if media["sha256"] != argv[argv.index("--expected-sha256") + 1]:
                 raise conv.runner.RunnerError("source changed before queue")
-            box.setdefault(rid, {"request_id": rid, "text": "", "media": media, "status": "media_queued"})
+            box.setdefault(rid, {"request_id": rid, "text": "", "media": media,
+                                 "status": "managed_media_queued" if state in self.managed_states else "media_queued",
+                                 **({"managed_owner": argv[argv.index("--owner") + 1],
+                                     "managed_epoch": int(argv[argv.index("--expected-epoch") + 1])}
+                                    if state in self.managed_states else {})})
             if self.on_queue is not None:
                 self.on_queue()
             return json.dumps(box[rid])
         if action == "queue":
-            box.setdefault(rid, {"request_id": rid, "text": data, "status": "queued"})
+            box.setdefault(rid, {"request_id": rid, "text": data,
+                                 "status": "managed_queued" if state in self.managed_states else "queued",
+                                 **({"managed_owner": argv[argv.index("--owner") + 1],
+                                     "managed_epoch": int(argv[argv.index("--expected-epoch") + 1])}
+                                    if state in self.managed_states else {})})
             if self.on_queue is not None:
                 self.on_queue()
             return json.dumps(box[rid])
@@ -150,6 +160,21 @@ class ConversationTests(unittest.TestCase):
         path.write_bytes(base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
         return path
+
+    def test_unenrolled_gui_refuses_before_intent_when_desktop_is_managed(self):
+        self.choose(0)
+        desktop=Path(json.loads(Path(self.settings["sender_template"]).read_text())["ui_dir"])
+        desktop.mkdir(mode=0o700)
+        (desktop/"coordinator.sqlite3").write_bytes(b"synthetic managed desktop marker")
+        with self.assertRaisesRegex(conv.ConversationError,"desktop is managed"):
+            conv.send(self.settings,"must-not-freeze","synthetic request")
+        self.assertEqual(self.fake.sent,[])
+        self.assertFalse(any("must-not-freeze" in box for box in self.fake.outboxes.values()))
+
+    def managed_binding(self, entry, owner="session-a", epoch=4):
+        return {"channel_state_dir": entry["state_dir"], "channel_id": entry["channel_id"],
+                "session_id": entry["session_id"], "owner": owner, "epoch": epoch,
+                "control": "active"}
 
     def test_image_send_identity_conflict_and_restart_never_repeats(self):
         for kind in (0, 2):
@@ -339,6 +364,291 @@ class ConversationTests(unittest.TestCase):
             conv.send(self.settings, "race", "hello")
         self.assertEqual(self.fake.sent, [])
 
+    def test_explicit_id_survives_default_selection_change_but_rejects_entry_revision(self):
+        self.choose(0)
+        target = self.fake.metadata[0]["conversation_id"]
+        self.choose(2)
+        self.fake.on_queue = lambda: self.choose(1)
+        result = conv.send(self.settings, "explicit", "hello", id=target)
+        self.assertEqual(result["status"], "ui_observed")
+        self.assertEqual(self.fake.sent[-1][0], conv.registry(self.settings)["entries"][target]["state_dir"])
+        self.fake.on_queue = None
+        snapshot, entry = conv.selected(self.settings, target)
+        current = conv.registry(self.settings)
+        current["entries"][target]["revision"] += 1
+        conv.save_registry(self.settings, current)
+        with self.assertRaisesRegex(conv.ConversationError, "selection changed"):
+            conv.assert_selection(self.settings, snapshot, entry)
+
+    def test_read_other_channel_does_not_wait_for_blocked_sync(self):
+        self.choose(0)
+        self.choose(2)
+        group_id = self.fake.metadata[0]["conversation_id"]
+        private_id = self.fake.metadata[2]["conversation_id"]
+        group_state = conv.registry(self.settings)["entries"][group_id]["state_dir"]
+        entered = threading.Event()
+        release = threading.Event()
+        original = self.fake.__call__
+        errors = []
+
+        def blocked(argv, **kwargs):
+            if argv[1] == "channel" and "sync" in argv and group_state in argv:
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("blocked sync was not released")
+            return original(argv, **kwargs)
+
+        def read_group():
+            try:
+                conv.read(self.settings, id=group_id)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with mock.patch.object(conv.runner, "command", side_effect=blocked):
+            thread = threading.Thread(target=read_group)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(conv.read(self.settings, id=private_id)["conversation"]["conversation_id"],
+                                 private_id)
+            finally:
+                release.set()
+                thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_same_channel_sync_is_serialized(self):
+        self.choose()
+        target = self.fake.metadata[0]["conversation_id"]
+        entered = threading.Event()
+        release = threading.Event()
+        second_done = threading.Event()
+        original = self.fake.__call__
+        sync_calls = []
+        errors = []
+
+        def blocked(argv, **kwargs):
+            if argv[1] == "channel" and "sync" in argv:
+                sync_calls.append(threading.current_thread().name)
+                if len(sync_calls) == 1:
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError("blocked sync was not released")
+            return original(argv, **kwargs)
+
+        def read_target(done=None):
+            try:
+                conv.read(self.settings, id=target)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                if done is not None:
+                    done.set()
+
+        with mock.patch.object(conv.runner, "command", side_effect=blocked):
+            first = threading.Thread(target=read_target, name="first")
+            second = threading.Thread(target=read_target, args=(second_done,), name="second")
+            first.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                second.start()
+                self.assertFalse(second_done.wait(0.05))
+                self.assertEqual(sync_calls, ["first"])
+            finally:
+                release.set()
+                first.join(3)
+                if second.ident is not None:
+                    second.join(3)
+        self.assertEqual(sync_calls, ["first", "second"])
+        self.assertEqual(errors, [])
+
+    def test_configure_and_control_require_explicit_id_and_epoch(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        target = entry["conversation_id"]
+        root = self.registry / "ui"
+        root.mkdir(mode=0o700)
+        with mock.patch.object(conv.dispatch, "configure", return_value={"epoch": 0}) as configured:
+            self.assertEqual(conv.configure(self.settings, target, "session-a"), {"epoch": 0})
+            configured.assert_called_once_with(self.settings, entry, "session-a", "pull", "observe", None)
+        with mock.patch.object(conv, "_managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value={"epoch": 2}) as called:
+            self.assertEqual(conv.control(self.settings, target, "takeover", 1), {"epoch": 2})
+            called.assert_called_once_with(self.settings["wx_cli"], root, "takeover",
+                                           "--conversation-id", target, "--expected-epoch", 1)
+        with self.assertRaises(conv.ConversationError):
+            conv.control(self.settings, target, "handback", -1)
+        with mock.patch.object(conv, "config", return_value=self.settings), \
+             mock.patch.object(conv, "configure", return_value={"epoch": 1}) as configure_cli, \
+             mock.patch.object(conv, "control", return_value={"epoch": 2}) as control_cli, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "configure", "--id", target,
+                                        "--owner", "session-a"]), 0)
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "takeover", "--id", target,
+                                        "--expected-epoch", "1"]), 0)
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "handback", "--id", target,
+                                        "--expected-epoch", "2"]), 0)
+        configure_cli.assert_called_once_with(self.settings, target, "session-a", "pull", "observe", None)
+        self.assertEqual(control_cli.call_args_list, [mock.call(self.settings, target, "takeover", 1),
+                                                       mock.call(self.settings, target, "handback", 2)])
+        for action in ("configure", "takeover", "handback"):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                conv.main(["--config", "/synthetic/config.json", action])
+
+    def test_managed_send_returns_pending_and_never_uses_raw_outbox_send(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        root = self.registry / "ui"
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.dispatch, "send_existing",
+                               return_value={"request_id": "managed", "status": "pending", "dispatch_id": 7}) as send:
+            result = conv.send(self.settings, "managed", "hello", id=entry["conversation_id"],
+                               owner="session-a", expected_epoch=4)
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["dispatch_id"], 7)
+            self.assertEqual(conv.send(self.settings, "managed", "hello", id=entry["conversation_id"],
+                                       owner="session-a", expected_epoch=4)["status"],
+                             "pending")
+            self.assertEqual(send.call_count, 2)
+        self.assertEqual(self.fake.sent, [])
+        self.assertFalse(any("send" in call for call in self.fake.calls if "outbox" in call))
+
+    def test_managed_send_refuses_missing_or_stale_owner_before_freeze(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        root = self.registry / "ui"
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry,
+                                                                                         owner="new-owner", epoch=8)), \
+             mock.patch.object(conv.dispatch, "send_existing") as send:
+            for owner, epoch in ((None, None), ("old-owner", 7), ("new-owner", 7)):
+                with self.assertRaises(conv.ConversationError):
+                    conv.send(self.settings, "stale", "hello", id=entry["conversation_id"],
+                              owner=owner, expected_epoch=epoch)
+            self.assertNotIn("stale", self.fake.outboxes.get(state, {}))
+            send.assert_not_called()
+
+    def test_managed_orphan_intent_is_not_adopted_by_current_owner(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        self.fake.outboxes[state] = {"orphan": {"request_id": "orphan", "text": "hello",
+                                                "status": "managed_queued"}}
+        root = self.registry / "ui"
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.dispatch, "send_existing") as send:
+            with self.assertRaisesRegex(conv.ConversationError, "originated under another owner epoch"):
+                conv.send(self.settings, "orphan", "hello", id=entry["conversation_id"],
+                          owner="session-a", expected_epoch=4)
+            send.assert_not_called()
+
+    def test_managed_send_flags_reach_text_image_and_reply_api(self):
+        target = self.fake.metadata[0]["conversation_id"]
+        input_text = io.TextIOWrapper(io.BytesIO(b"hello"), encoding="utf-8")
+        with mock.patch.object(conv, "config", return_value=self.settings), \
+             mock.patch.object(conv.sys, "stdin", input_text), \
+             mock.patch.object(conv, "send", return_value={"status": "pending"}) as sending, \
+             mock.patch.object(conv, "send_image", return_value={"status": "pending"}) as image_sending, \
+             mock.patch.object(conv, "reply", return_value={"status": "pending"}) as replying, \
+             contextlib.redirect_stdout(io.StringIO()):
+            common = ["--id", target, "--owner", "session-a", "--expected-epoch", "4"]
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "send", *common,
+                                        "--request-id", "rid", "--text-stdin"]), 0)
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "send-image", *common,
+                                        "--request-id", "image-rid", "--image", "/synthetic/image.png"]), 0)
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "reply", *common,
+                                        "--cursor", "3", "--text-stdin"]), 0)
+        sending.assert_called_once_with(self.settings, "rid", "hello", target,
+                                        owner="session-a", expected_epoch=4, wait=True, scheduling={})
+        image_sending.assert_called_once_with(self.settings, "image-rid", Path("/synthetic/image.png"), target,
+                                              owner="session-a", expected_epoch=4, wait=True, scheduling={})
+        replying.assert_called_once_with(self.settings, 3, "", target,
+                                         owner="session-a", expected_epoch=4)
+
+    def test_managed_image_uses_same_dispatch_seam(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        image = self.make_image()
+        root = self.registry / "ui"
+
+        def complete(_, channel_state, request_id, **kwargs):
+            item = self.fake.outboxes[channel_state][request_id]
+            item["status"] = "ui_observed"
+            return item
+
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.dispatch, "send_existing", side_effect=complete) as sent:
+            result = conv.send_image(self.settings, "managed-image", image, id=entry["conversation_id"],
+                                     owner="session-a", expected_epoch=4)
+        self.assertEqual(result["status"], "ui_observed")
+        sent.assert_called_once_with(self.settings["wx_cli"], state, "managed-image",
+                                     owner="session-a", expected_epoch=4)
+        self.assertEqual(self.fake.sent, [])
+
+    def test_managed_focus_is_queued_with_current_epoch(self):
+        self.choose(0)
+        entry = conv.selected(self.settings)[1]
+        root = self.registry / "ui"
+        calls = []
+
+        def coordinator(binary, surface, *args):
+            calls.append(args)
+            if args[0] == "status":
+                return {"channel_state_dir": entry["state_dir"], "channel_id": entry["channel_id"],
+                        "session_id": entry["session_id"], "epoch": 4}
+            if args[0] == "enqueue-focus":
+                return {"dispatch_id": 9}
+            return {"dispatches": [{"dispatch_id": 9, "status": "done", "result": "focus_completed"}]}
+
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", side_effect=coordinator), \
+             mock.patch.object(conv.dispatch, "drain"):
+            self.assertTrue(conv.focus_conversation(self.settings, id=entry["conversation_id"])["focused"])
+        self.assertEqual(calls[1][:3], ("enqueue-focus", "--conversation-id", entry["conversation_id"]))
+        self.assertEqual(calls[1][-2:], ("--expected-epoch", 4))
+        self.assertFalse(any("--focus-only" in call for call in self.fake.calls))
+
+    def test_managed_imported_reply_pending_keeps_consumer_unacknowledged(self):
+        self.choose()
+        entry = conv.selected(self.settings)[1]
+        entry.update(imported=True, controller_config="/synthetic/controller.json")
+        state = Path(entry["state_dir"])
+        write_private(state / conv.interactive.LEASE_NAME,
+                      {"pending": {"cursor": 3, "text": "answer", "request_id": "existing-reply"}})
+        self.fake.outboxes[str(state)] = {"existing-reply": {"request_id": "existing-reply",
+            "text": "answer", "status": "managed_queued"}}
+        with mock.patch.object(conv, "selected_channel", return_value=contextlib.nullcontext(({}, entry))), \
+             mock.patch.object(conv, "fresh"), mock.patch.object(conv, "assert_selection"), \
+             mock.patch.object(conv, "coordinated", return_value=contextlib.nullcontext()), \
+             mock.patch.object(conv, "_managed_root", return_value=self.registry), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.ctl, "config", return_value={"state_dir": str(state)}), \
+             mock.patch.object(conv.interactive, "reply",
+                               side_effect=conv.interactive.ChatError("send_uncertain", "queued")) as imported_reply:
+            result = conv.reply(self.settings, 3, "answer", id=entry["conversation_id"],
+                                owner="session-a", expected_epoch=4)
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["request_id"], "existing-reply")
+        passed_settings = imported_reply.call_args.args[0]
+        self.assertEqual((passed_settings["_dispatch_owner"], passed_settings["_dispatch_epoch"]),
+                         ("session-a", 4))
+        self.assertFalse(any("ack" in call for call in self.fake.calls))
+
     def test_registry_cannot_redirect_channel_state(self):
         self.choose()
         id = self.fake.metadata[0]["conversation_id"]
@@ -483,33 +793,43 @@ class ConversationTests(unittest.TestCase):
         config_two = {"state_dir": str(self.registry / "controller-two")}
         for value in (config_one, config_two):
             Path(value["state_dir"]).mkdir(mode=0o700)
-        configured = [(Path("/one"), config_one, {"talker": "one@chatroom"}),
-                      (Path("/two"), config_two, {"talker": "two@chatroom"})]
+        self.settings["controller_configs"] = ["/one", "/two"]
+        config_one["wx_cli"] = config_two["wx_cli"] = self.settings["wx_cli"]
         calls = []
-        with mock.patch.object(conv, "controllers", return_value=configured), \
-             mock.patch.object(conv.ctl, "status", side_effect=[{"alive": True}, {"alive": False}]), \
+        with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \
              mock.patch.object(conv.interactive, "select", side_effect=lambda value, talker: calls.append(("select", talker))), \
              mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
              mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
              mock.patch.object(conv.interactive, "_check_outbox_clear"), \
              mock.patch.object(conv.interactive, "takeover", side_effect=lambda value: calls.append(("take", value["state_dir"]))), \
              mock.patch.object(conv.interactive, "handback", side_effect=lambda value: calls.append(("back", value["state_dir"]))):
-            with conv.coordinated(self.settings, {"state_dir": "manual", "controller_config": None}):
+            with conv.coordinated(self.settings, {"state_dir": config_one["state_dir"],
+                                                  "controller_config": "/one", "talker": "one@chatroom"}):
                 pass
         self.assertEqual([item[0] for item in calls], ["select", "take", "back"])
         lease = Path(config_two["state_dir"]) / conv.ctl.INTERACTIVE_NAME
         write_private(lease, {"version": 1})
-        with mock.patch.object(conv, "controllers", return_value=configured):
+        with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \
+             mock.patch.object(conv.interactive, "select"), \
+             mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
+             mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
+             mock.patch.object(conv.interactive, "_check_outbox_clear"), \
+             mock.patch.object(conv.interactive, "takeover"), \
+             mock.patch.object(conv.interactive, "handback"):
+            with conv.coordinated(self.settings, {"state_dir": config_one["state_dir"],
+                                                  "controller_config": "/one", "talker": "one@chatroom"}):
+                pass
             with self.assertRaisesRegex(conv.ConversationError, "another operator"):
-                with conv.coordinated(self.settings, {"state_dir": "manual", "controller_config": None}):
+                with conv.coordinated(self.settings, {"state_dir": config_two["state_dir"],
+                                                      "controller_config": "/two", "talker": "two@chatroom"}):
                     pass
 
     def test_handback_failure_is_reported_and_not_retried(self):
         value = {"state_dir": str(self.registry / "controller")}
         Path(value["state_dir"]).mkdir(mode=0o700)
-        configured = [(Path("/controller"), value, {"talker": "one@chatroom"})]
-        with mock.patch.object(conv, "controllers", return_value=configured), \
-             mock.patch.object(conv.ctl, "status", return_value={"alive": True}), \
+        self.settings["controller_configs"] = ["/controller"]
+        value["wx_cli"] = self.settings["wx_cli"]
+        with mock.patch.object(conv.ctl, "config", return_value=value), \
              mock.patch.object(conv.interactive, "select"), \
              mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
              mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
@@ -517,7 +837,8 @@ class ConversationTests(unittest.TestCase):
              mock.patch.object(conv.interactive, "takeover"), \
              mock.patch.object(conv.interactive, "handback", side_effect=conv.interactive.ChatError("pending", "pending send")) as back:
             with self.assertRaisesRegex(conv.ConversationError, "lease retained"):
-                with conv.coordinated(self.settings, {"state_dir": "manual", "controller_config": None}):
+                with conv.coordinated(self.settings, {"state_dir": value["state_dir"],
+                                                      "controller_config": "/controller", "talker": "one@chatroom"}):
                     pass
         back.assert_called_once()
 

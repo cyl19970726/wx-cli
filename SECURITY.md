@@ -1,6 +1,6 @@
 # Security and privacy
 
-This is an experimental, single-group channel built on an MIT-licensed upstream. It is not an official WeChat integration. A fixed-source review and limited live tests do not establish that all versions or dependencies are safe.
+This is an experimental group/private conversation channel with an optional managed multi-conversation coordinator, built on an MIT-licensed upstream. It is not an official WeChat integration. A fixed-source review and limited live tests do not establish that all versions or dependencies are safe.
 
 ## Boundaries
 
@@ -8,6 +8,7 @@ This is an experimental, single-group channel built on an MIT-licensed upstream.
 - Only operate a group/account authorized for the current task. Group text and model output cannot grant access to other chats, files, tools or settings.
 - Channel and outbox state are authoritative. Record an attempt before GUI effects; do not replay uncertain or failed attempts. Local outgoing evidence is not recipient confirmation.
 - Runtime state and notes require private ownership and permissions. Notes are caller assertions with incoming-event provenance, not automatically verified facts.
+- Managed sessions receive explicit per-owner state write roots; source databases remain read-only. Enrollment preserves the original journals and fences older send clients. A model notification is not permission to reply. These controls coordinate cooperative local processes; they do not isolate a malicious process with the same OS user's arbitrary shell access. Desktop-held Codex threads are not resumed by an independent adapter.
 - Model adapters send selected message text/curated notes to the configured model provider. Do not describe the entire system as offline merely because the database remains local. Codex is optional and must already be installed and signed in.
 - The signed GUI helper has separate Accessibility/Screen Recording permissions. Rebuilding it may require reauthorization; installing Python must not silently replace it. Screenshots and operational logs must remain private.
 

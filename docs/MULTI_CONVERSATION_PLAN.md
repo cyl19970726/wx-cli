@@ -1,6 +1,8 @@
 # 多会话接入方案：专属 Session、主动 CLI 与消息推送
 
-状态：设计提案，尚未实施多会话调度。核对日期：2026-11-01。
+状态：2026-11-01 批准的设计基准；实施状态与验收证据单列在[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)，当前命令见[托管指南](MANAGED_CONVERSATIONS.md)。下文的现状表是方案形成时的基线，不作为新代码或部署通过的证据。
+
+方案配图：[原主线实现](diagrams/wechat-current.html) · [原文字发送时序](diagrams/wechat-send.html) · [批准目标架构](diagrams/wechat-target.html)。图源和公开副本的维护见[图稿说明](../.archify/README.md)。
 
 本方案回答三个问题：现有 wx-cli 能做什么；多个微信群／私聊怎样交给各自的 Session；文字和图片怎样共用可靠的发送入口。已有单次文字链路继续复用，图片候选继续收尾。本文的目标命令、模块和状态设计均不表示已可执行。
 

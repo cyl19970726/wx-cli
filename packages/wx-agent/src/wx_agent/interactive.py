@@ -69,6 +69,13 @@ def _command(settings, section, *parts, data=None):
 
 
 def _json(settings, section, *parts, data=None):
+    if section == "outbox" and parts and parts[0] == "send":
+        from . import dispatch
+        if dispatch.managed_root(settings["state_dir"]):
+            return dispatch.send_existing(settings["wx_cli"], settings["state_dir"],
+                                          parts[parts.index("--request-id") + 1],
+                                          owner=settings.get("_dispatch_owner"),
+                                          expected_epoch=settings.get("_dispatch_epoch"))
     try:
         return runner.one_json(_command(settings, section, *parts, data=data))
     except runner.RunnerError as exc:
@@ -407,13 +414,14 @@ def reply(settings, cursor, text):
         if pending is not None and status["consumer_cursor"] == cursor:
             _check(existing is not None, "cursor_drift", "ack advanced without a durable outbox request")
         if existing is None:
+            fence = ("--owner", settings["_dispatch_owner"], "--expected-epoch", str(settings["_dispatch_epoch"])) if settings.get("_dispatch_owner") is not None else ()
             _json(settings, "outbox", "queue", "--request-id", request_id,
                   "--channel-id", binding["channel_id"], "--session-id", binding["session_id"],
-                  "--text-stdin", data=text)
+                  "--text-stdin", *fence, data=text)
         item = _json(settings, "outbox", "show", "--request-id", request_id)
         _check(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
         _text_match(item, text)
-        if item.get("status") == "queued":
+        if item.get("status") in ("queued", "managed_queued", "managed_media_queued"):
             lease["pending"]["phase"] = "queued"
             runner.save(state_dir / LEASE_NAME, lease)
             try:

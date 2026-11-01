@@ -2,6 +2,8 @@
 
 本文说明如何安装 `wx-cli` 与 `wx-agent`、配置私有运行环境，并按需读取及处理已授权的群聊或个人会话。既有 `wx-agent chat` 单群流程与新的 [`wx-agent conversations`](CONVERSATIONS_CLI.md) 多会话手动流程并存；后者不需要模型或常驻 Agent。以下 `/ABS/...` 都是需要替换成本机绝对路径的占位符；群名和 ID 只用合成示例。操作仅限当前任务明确授权的测试会话。
 
+迁移到每会话 owner、共享文字/图片队列或受管 Session 推送时，先按[托管指南](MANAGED_CONVERSATIONS.md)保存原状态并显式 configure。已托管状态不再使用旧 runner；主动读取仍不启动模型。实际新版本验收见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+
 ## 1. 安装
 
 源码工作目录可直接构建 Rust CLI，并把 Python 包装进独立虚拟环境：
