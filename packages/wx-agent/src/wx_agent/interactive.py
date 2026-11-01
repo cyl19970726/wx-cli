@@ -35,7 +35,8 @@ def _check(condition, code, message):
 
 
 def _fingerprint(settings):
-    raw = json.dumps(settings, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    canonical = {key: value for key, value in settings.items() if key != "_compatible_fingerprints"}
+    raw = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -105,8 +106,9 @@ def _status(settings):
 
 def _selection(settings, binding):
     selected = _read_optional(Path(settings["state_dir"]) / SELECTION_NAME)
+    fingerprints = {_fingerprint(settings), *settings.get("_compatible_fingerprints", ())}
     _check(selected is not None, "selection_required", "select the bound group first")
-    _check(selected.get("version") == 1 and selected.get("config_fingerprint") == _fingerprint(settings)
+    _check(selected.get("version") == 1 and selected.get("config_fingerprint") in fingerprints
            and selected.get("binding") == {key: binding.get(key) for key in STATE_KEYS}
            and selected.get("talker") == binding["talker"], "selection_drift", "group selection or config changed")
     return selected

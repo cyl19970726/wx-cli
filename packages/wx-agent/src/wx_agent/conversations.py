@@ -496,6 +496,7 @@ def coordinated(settings, target_entry):
             require(not lease.exists() and not lease.is_symlink(), "external_lease",
                     "another operator holds an interactive lease")
             interactive.select(value, target_entry["talker"], compatible=(original,))
+            value["_compatible_fingerprints"] = (interactive._fingerprint(original),)
             channel = interactive._status(value)
             _, state, cursor = interactive._runner_state(value, channel["binding"])
             require(state.get("pending") is None and cursor == channel["consumer_cursor"],

@@ -896,13 +896,16 @@ class ConversationTests(unittest.TestCase):
              mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
              mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
              mock.patch.object(conv.interactive, "_check_outbox_clear"), \
-             mock.patch.object(conv.interactive, "takeover", side_effect=lambda value: calls.append(("take", value["state_dir"]))), \
+             mock.patch.object(conv.interactive, "takeover",
+                               side_effect=lambda value: calls.append(
+                                   ("take", value["state_dir"], value.get("_compatible_fingerprints")))), \
              mock.patch.object(conv.interactive, "handback", side_effect=lambda value: calls.append(("back", value["state_dir"]))):
             with conv.coordinated(self.settings, {"state_dir": config_one["state_dir"],
                                                   "controller_config": "/one", "talker": "one@chatroom"}):
                 pass
         self.assertEqual([item[0] for item in calls], ["select", "take", "back"])
         self.assertEqual(calls[0][2], (config_one,))
+        self.assertEqual(calls[1][2], (conv.interactive._fingerprint(config_one),))
         lease = Path(config_two["state_dir"]) / conv.ctl.INTERACTIVE_NAME
         write_private(lease, {"version": 1})
         with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \

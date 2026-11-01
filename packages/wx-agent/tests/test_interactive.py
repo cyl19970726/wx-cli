@@ -251,6 +251,11 @@ class InteractiveTests(unittest.TestCase):
         candidate = dict(self.settings, wx_cli="/synthetic/candidate-wx-cli")
         chat.select(candidate, "test@chatroom", compatible=(self.settings,))
         self.assertEqual(selection.read_bytes(), original)
+        candidate["_compatible_fingerprints"] = (chat._fingerprint(self.settings),)
+        self.assertEqual(chat._fingerprint(candidate),
+                         chat._fingerprint({key: value for key, value in candidate.items()
+                                            if key != "_compatible_fingerprints"}))
+        chat._selection(candidate, self.fake.binding)
         incompatible = dict(candidate, consumer="another-agent")
         with self.assertRaisesRegex(chat.ChatError, "compatible selection configuration differs"):
             chat.select(incompatible, "test@chatroom", compatible=(self.settings,))
