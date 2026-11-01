@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "一次文字发送：从 CLI 到桌面点击与核验",
+    "locale": "zh-CN",
+    "output": ".archify/sequence-wechat-send-20261101-160826/wechat-send.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/cyl19970726/wx-cli.git",
+      "revision": "11e20ca59d8e360c3b281d563e6f30053d13c031"
+    }
+  },
+  "participants": [
+    {
+      "id": "session",
+      "type": "external",
+      "label": "业务 Session",
+      "sublabel": "决定发送内容",
+      "sources": [
+        {
+          "path": "docs/AGENT_INTEGRATION.md",
+          "line": 3,
+          "end_line": 15
+        }
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "会话 CLI",
+      "sublabel": "Python",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 379,
+          "end_line": 476
+        }
+      ]
+    },
+    {
+      "id": "outbox",
+      "type": "backend",
+      "label": "发件账本",
+      "sublabel": "Rust outbox",
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 206,
+          "end_line": 218
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 382,
+          "end_line": 399
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 661,
+          "end_line": 710
+        }
+      ]
+    },
+    {
+      "id": "driver",
+      "type": "backend",
+      "label": "发送驱动",
+      "sublabel": "Python",
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 639,
+          "end_line": 680
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 682,
+          "end_line": 729
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 763,
+          "end_line": 857
+        }
+      ]
+    },
+    {
+      "id": "helper",
+      "type": "backend",
+      "label": "原生助手",
+      "sublabel": "Swift",
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 489,
+          "end_line": 595
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 707,
+          "end_line": 886
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 888,
+          "end_line": 954
+        }
+      ]
+    },
+    {
+      "id": "wx",
+      "type": "frontend",
+      "label": "微信窗口",
+      "sublabel": "可见桌面",
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 147,
+          "end_line": 230
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 467,
+          "end_line": 488
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 888,
+          "end_line": 954
+        }
+      ]
+    },
+    {
+      "id": "reader",
+      "type": "backend",
+      "label": "消息读取",
+      "sublabel": "Rust channel",
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 318,
+          "end_line": 360
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 472,
+          "end_line": 528
+        }
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "id": "request",
+      "from": "session",
+      "to": "cli",
+      "y": 180,
+      "label": "会话 ID + 正文 + request ID",
+      "variant": "emphasis",
+      "note": "先验证目标绑定；协调已有 writer。注册表锁覆盖当前调用。"
+    },
+    {
+      "id": "enqueue",
+      "from": "cli",
+      "to": "outbox",
+      "y": 280,
+      "label": "保存不可变发送意图",
+      "variant": "emphasis"
+    },
+    {
+      "id": "request-send",
+      "from": "cli",
+      "to": "outbox",
+      "y": 330,
+      "label": "请求执行同一意图",
+      "variant": "emphasis",
+      "note": "Rust 先持久记录 attempt，才启动 driver；同 ID 换正文会被拒绝。"
+    },
+    {
+      "id": "start-driver",
+      "from": "outbox",
+      "to": "driver",
+      "y": 440,
+      "label": "绑定与正文 JSON",
+      "variant": "emphasis",
+      "note": "driver 取得 sender.lock；锁忙即拒绝。检查旧 helper 没有仍在执行。"
+    },
+    {
+      "id": "inspect",
+      "from": "driver",
+      "to": "helper",
+      "y": 550,
+      "label": "inspect：核对环境",
+      "variant": "security",
+      "note": "每个动作写 job JSON，以 open 启动助手，再等待 result JSON。"
+    },
+    {
+      "id": "inspect-window",
+      "from": "helper",
+      "to": "wx",
+      "y": 650,
+      "label": "读取窗口与权限",
+      "variant": "security"
+    },
+    {
+      "id": "inspect-ok",
+      "from": "helper",
+      "to": "driver",
+      "y": 700,
+      "label": "窗口／会话／权限检查结果",
+      "variant": "return"
+    },
+    {
+      "id": "focus",
+      "from": "driver",
+      "to": "helper",
+      "y": 780,
+      "label": "focus-group：定位聊天",
+      "variant": "emphasis"
+    },
+    {
+      "id": "search",
+      "from": "helper",
+      "to": "wx",
+      "y": 830,
+      "label": "搜索目标并点击唯一结果",
+      "variant": "emphasis",
+      "note": "粘贴目标名 → OCR 核对分类及唯一结果 → 点击 → 再核验标题。"
+    },
+    {
+      "id": "focus-proof",
+      "from": "helper",
+      "to": "driver",
+      "y": 940,
+      "label": "返回新鲜的聚焦证据",
+      "variant": "return"
+    },
+    {
+      "id": "prepare",
+      "from": "driver",
+      "to": "helper",
+      "y": 1020,
+      "label": "prepare-visual：准备正文",
+      "variant": "emphasis"
+    },
+    {
+      "id": "paste",
+      "from": "helper",
+      "to": "wx",
+      "y": 1070,
+      "label": "核对旧草稿，再粘贴正文",
+      "variant": "emphasis",
+      "note": "剪贴板快照 → Command-V → Command-A/C 全文比对；外部改变剪贴板则停止。"
+    },
+    {
+      "id": "prepared",
+      "from": "helper",
+      "to": "driver",
+      "y": 1190,
+      "label": "prepared：正文已核对",
+      "variant": "return"
+    },
+    {
+      "id": "baseline-query",
+      "from": "driver",
+      "to": "reader",
+      "y": 1270,
+      "label": "提交前同步并读取游标",
+      "variant": "default",
+      "note": "仅查询新复制的加密副本；保存发送前的 cursor。"
+    },
+    {
+      "id": "baseline",
+      "from": "reader",
+      "to": "driver",
+      "y": 1370,
+      "label": "发送前游标基线",
+      "variant": "return"
+    },
+    {
+      "id": "submit",
+      "from": "driver",
+      "to": "helper",
+      "y": 1450,
+      "label": "submit-visual：提交一次",
+      "variant": "emphasis",
+      "note": "重新核对目标、草稿和按钮；独占 submit 标记写入后才允许点击。"
+    },
+    {
+      "id": "click",
+      "from": "helper",
+      "to": "wx",
+      "y": 1560,
+      "label": "CGEvent 点击发送按钮",
+      "variant": "emphasis"
+    },
+    {
+      "id": "submitted",
+      "from": "helper",
+      "to": "driver",
+      "y": 1610,
+      "label": "submitted：点击已发出",
+      "variant": "return",
+      "note": "这个返回值不证明微信服务端接收，也不证明对方收到。"
+    },
+    {
+      "id": "outgoing-query",
+      "from": "driver",
+      "to": "reader",
+      "y": 1720,
+      "label": "查找基线后的精确出站消息",
+      "variant": "default",
+      "note": "匹配 channel／account／talker、本账号发送者及完全一致的正文。"
+    },
+    {
+      "id": "outgoing-match",
+      "from": "reader",
+      "to": "driver",
+      "y": 1830,
+      "label": "匹配事件，或仍无证据",
+      "variant": "return"
+    },
+    {
+      "id": "outcome",
+      "from": "driver",
+      "to": "outbox",
+      "y": 1910,
+      "label": "ui_observed 或 indeterminate",
+      "variant": "return",
+      "note": "保存阶段报告；本地核验结束才释放锁。任一不确定结果保留原 ID。"
+    },
+    {
+      "id": "persisted",
+      "from": "outbox",
+      "to": "cli",
+      "y": 2020,
+      "label": "结果与证据已保存",
+      "variant": "return"
+    },
+    {
+      "id": "complete",
+      "from": "cli",
+      "to": "session",
+      "y": 2070,
+      "label": "返回发送状态",
+      "variant": "return"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 520,
+      "label": "① 目标绑定与持久尝试"
+    },
+    {
+      "from": 530,
+      "to": 760,
+      "label": "② 取得桌面与环境检查"
+    },
+    {
+      "from": 770,
+      "to": 1000,
+      "label": "③ 找到正确会话"
+    },
+    {
+      "from": 1010,
+      "to": 1430,
+      "label": "④ 准备输入并取核验基线"
+    },
+    {
+      "from": 1440,
+      "to": 1700,
+      "label": "⑤ 重新检查、提交一次"
+    },
+    {
+      "from": 1710,
+      "to": 2130,
+      "label": "⑥ 本地出站核验与结果落盘"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "时间轴表示顺序",
+      "items": [
+        "纵向位置仅表示先后，不是实际耗时。",
+        "这是已合并的文字主线；原生操作依赖已登录、已授权、已校准的专用桌面。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败不是重发许可",
+      "items": [
+        "未知草稿、锁屏、权限缺失、窗口／剪贴板变化均可停止操作。",
+        "submit 后查不到本地记录时记为不确定；不能更换请求 ID 再点一次。",
+        "发送后本地观察不同于独立收件确认；人工确认不应成为未来队列逐条等待的门槛。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "图片候选怎样接入",
+      "items": [
+        "PR #5 在 prepare／submit 增加冻结图片及输入框像素核验。",
+        "出站验证须解析新图片事件的附件内容，不是只找任意一条图片记录。",
+        "图片与文字将共用桌面队列；目前候选还缺实机收件验收。"
+      ]
+    }
+  ]
+}

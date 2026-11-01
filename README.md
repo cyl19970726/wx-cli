@@ -8,6 +8,8 @@
 
 ## 一个仓库，三个执行层
 
+多会话扩展的最新设计见[专属 Session、主动 CLI 与消息推送方案](docs/MULTI_CONVERSATION_PLAN.md)：包含现状差距、统一文字／图片发送队列、逐会话接管和验收批次。该文为设计提案，不扩大下述已验证范围。
+
 | 层 | 提供什么 | 入口 |
 | --- | --- | --- |
 | Rust / wx-cli | 加密副本读取、稳定群/个人会话身份发现、NDJSON 事件、consumer 确认、持久发件箱 | `wx-cli conversations` / `wx-cli channel` / `wx-cli outbox` |
