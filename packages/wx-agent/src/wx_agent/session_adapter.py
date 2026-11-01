@@ -180,12 +180,17 @@ class AppServer:
 
     def close(self) -> None:
         if self.process.poll() is None:
-            self.process.terminate()
+            if self.process.stdin and not self.process.stdin.closed:
+                self.process.stdin.close()
             try:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
 
     def __enter__(self):
         return self
@@ -203,6 +208,7 @@ class SessionAdapter:
         self.local_host = local_host or socket.gethostname()
         self._held_fd = None
         self._active_turn_id = None
+        self._resumed = False
 
     def _release_lock(self) -> None:
         if self._held_fd is not None:
@@ -221,7 +227,7 @@ class SessionAdapter:
     @staticmethod
     def create_managed(server: AppServer, host: str, cwd: str, lock_path: str,
                        local_host: str = None, writable_roots=()) -> ManagedSession:
-        """Provision once, then persist the returned reference in owner config."""
+        """Allocate once; CLI provisioning materializes history before closing."""
         if host != (local_host or socket.gethostname()):
             raise SessionError("managed thread host does not match this machine")
         ManagedSession("codex",host,"provisioning",cwd,lock_path,writable_roots=tuple(writable_roots))
@@ -243,18 +249,30 @@ class SessionAdapter:
             raise SessionError("thread identity mismatch")
         return thread
 
+    def _resume_metadata(self) -> dict:
+        result = self.server.request("thread/resume", {
+            "threadId": self.session.thread_id, "cwd": self.session.cwd,
+            "excludeTurns": True,
+        })
+        thread = result.get("thread", {})
+        if thread.get("id") != self.session.thread_id:
+            raise SessionError("resumed thread identity mismatch")
+        self._resumed = True
+        return thread
+
     def _read_status(self) -> dict:
-        thread = self._thread()
+        if not self._resumed:
+            thread = self._resume_metadata()
+        else:
+            try:
+                thread = self._thread()
+            except SessionError as exc:
+                if "thread not loaded" not in str(exc):
+                    raise
+                thread = self._resume_metadata()
+        if thread.get("status", {}).get("type") == "notLoaded":
+            thread = self._resume_metadata()
         state = thread.get("status", {}).get("type")
-        if state == "notLoaded":
-            result = self.server.request("thread/resume", {
-                "threadId": self.session.thread_id, "cwd": self.session.cwd,
-                "excludeTurns": True,
-            })
-            thread = result.get("thread", {})
-            if thread.get("id") != self.session.thread_id:
-                raise SessionError("resumed thread identity mismatch")
-            state = thread.get("status", {}).get("type")
         return {"provider": self.session.provider, "host": self.session.host,
                 "thread_id": self.session.thread_id, "state": state}
 
@@ -277,6 +295,8 @@ class SessionAdapter:
             os.close(descriptor)
 
     def turn_status(self, turn_id: str) -> dict:
+        if not self._resumed and self.status()["state"] == "busy":
+            return {"thread_id":self.session.thread_id,"turn_id":turn_id,"status":"busy"}
         thread = self._thread(include_turns=True)
         for turn in thread.get("turns", []):
             if turn.get("id") == turn_id:

@@ -1,5 +1,6 @@
 """Push routing boundaries without a model, desktop or WeChat process."""
 import socket
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -136,6 +137,79 @@ class PushLoopTests(unittest.TestCase):
         self.assertFalse(any(args[:2] in (("inbox", "show"), ("inbox", "finish-turn"))
                              for args in self.calls))
         self.assertEqual(self.claims, 0)
+
+
+class ProvisioningTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve()
+        self.path=self.root/"sessions.json"
+        outer=self
+        class Server:
+            starts=0
+            turns=0
+            durable=False
+            disconnect=False
+            terminal="completed"
+            def __init__(self,*_):
+                self.loaded=False
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+            def request(self,method,params):
+                if method=="thread/start":
+                    Server.starts+=1;self.loaded=True
+                    return {"thread":{"id":"thread-init"}}
+                if method=="turn/start":
+                    saved=json.loads(outer.path.read_text())
+                    outer.assertEqual(saved["sessions"]["owner1"]["thread_id"],"thread-init")
+                    outer.assertEqual(saved["provisioning"]["owner1"]["state"],"starting")
+                    outer.assertEqual(params["sandboxPolicy"]["type"],"readOnly")
+                    Server.turns+=1
+                    if Server.disconnect:raise session_adapter.DeliveryUnknown("synthetic response lost")
+                    Server.durable=True
+                    return {"turn":{"id":"init-turn"}}
+                if method=="thread/resume":
+                    if not Server.durable:raise session_adapter.SessionError("no rollout")
+                    self.loaded=True
+                    return {"thread":{"id":"thread-init","status":{"type":"idle"}}}
+                if method=="thread/read":
+                    if not self.loaded:raise session_adapter.SessionError("thread not loaded")
+                    return {"thread":{"id":"thread-init","status":{"type":"idle"},
+                                      "turns":[{"id":"init-turn","status":Server.terminal}]}}
+                raise AssertionError(method)
+        self.server=Server
+        patch=mock.patch.object(session_adapter,"AppServer",Server)
+        patch.start();self.addCleanup(patch.stop)
+
+    def test_explicit_provision_persists_original_reference_and_verifies_cold_resume(self):
+        result=inbox.provision(self.path,"owner1",self.root,"codex")
+        self.assertTrue(result["cold_resume_verified"])
+        saved=json.loads(self.path.read_text())
+        self.assertEqual(saved["provisioning"]["owner1"]["state"],"ready")
+        self.assertEqual((self.server.starts,self.server.turns),(1,1))
+        with self.assertRaises(inbox.dispatch.DispatchError):
+            inbox.provision(self.path,"owner1",self.root,"codex")
+        self.assertEqual(self.server.starts,1)
+
+    def test_unknown_initialization_does_not_replace_or_replay(self):
+        self.server.disconnect=True
+        with self.assertRaises(session_adapter.DeliveryUnknown):
+            inbox.provision(self.path,"owner1",self.root,"codex")
+        saved=json.loads(self.path.read_text())
+        self.assertEqual(saved["sessions"]["owner1"]["thread_id"],"thread-init")
+        self.assertNotEqual(saved["provisioning"]["owner1"]["state"],"ready")
+        with self.assertRaises(inbox.dispatch.DispatchError):
+            inbox.provision(self.path,"owner1",self.root,"codex")
+        self.assertEqual((self.server.starts,self.server.turns),(1,1))
+
+    def test_failed_initialization_retains_exact_turn_and_cannot_claim_ready(self):
+        self.server.terminal="interrupted"
+        with self.assertRaises(session_adapter.SessionError):
+            inbox.provision(self.path,"owner1",self.root,"codex")
+        saved=json.loads(self.path.read_text())
+        self.assertEqual(saved["provisioning"]["owner1"]["turn_id"],"init-turn")
+        self.assertFalse(saved["provisioning"]["owner1"].get("cold_resume_verified",False))
 
 
 if __name__ == "__main__":

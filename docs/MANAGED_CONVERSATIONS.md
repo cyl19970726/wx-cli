@@ -92,7 +92,7 @@ wx-agent conversations --config /ABS/private/conversations.json handback --id CO
 
 当前适配器仅支持由本适配器明确创建、持有的 Codex app-server Session。正在被桌面 App 持有的业务 Session 不会被复制、强行 resume 或换成临时替身；这些 Session 继续主动使用上面的 CLI。跨主机推送尚未接入；Session 和微信协调器需在同一执行宿主，控制电脑只需通过已认证 SSH 操作入口。
 
-明确新建一个受管 Session 时才执行 provision，返回的持久 thread 引用保存在私有配置中。同 owner 重复 provision 拒绝替换：
+明确新建一个受管 Session 时才执行 provision。该命令运行一次只读初始化回合（不含微信数据、不调用工具或发送消息），随后关闭连接，用同一 thread ID 冷续接验证历史存在，再标记 ready。原引用在初始化 RPC 前保存；中断、未知结果或冷续接失败保留原引用并阻止重复创建。新会话不能只凭 `thread/start` 返回 ID 就宣称已可恢复。同 owner 重复 provision 拒绝替换：
 
 ```sh
 wx-agent inbox --config /ABS/private/conversations.json provision \
@@ -109,6 +109,8 @@ wx-agent inbox --config /ABS/private/conversations.json run \
 写入范围必须来自项目授权，包含协调器和该 owner 的 channel；不授予原始微信数据库写权限。不配置时保留原只读策略，不能假定 model 能完成业务回执。显式 roots 使用 Codex 的 workspaceWrite 和禁止网络/权限升级策略；其配置形状见 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server)。已首次登记的 Session 引用保存在 Rust；仅改 sessions.json 不能静默换 thread，替换需显式 configure 更新 epoch。
 
 监听每次先持久采集再通知，源采集并发上限为 2，新事件按 1 秒静默、最长 5 秒合并，每个冻结范围最多 256 项。忙时保留 inbox；Rust 在 `turn/start` 之前保留投递，同 Session 不能并发 reserve。连接重启仍使用原 thread ID，查询已记录 turn 后更新 transport 结果；没有 turn ID 的未知 reservation 留待核查。transport 完成与业务决定分开记录；模型必须通过 inbox CLI 明确完成业务处理，日志与最终回答不会进入微信。采集、Session 连接和桌面执行器分进程，长 GUI 操作不阻塞后续采集；正常停止先让当前发送走到安全边界。
+
+冷连接先通过官方 `thread/resume` 加载指定受管 thread，再读取状态；不直接读写存档。配置中的 provisioning 项未 ready 时监听器拒绝启动该配置。初始化是显式 setup；主动读取和普通 metadata 查询不运行初始化模型。
 
 `inbox-health.json` 是私有派生健康信息，记录采集、活跃 Session、需检查事项与队列概况，不替代 Rust 状态。运行期限上限 24 小时；达到期限会关闭自持连接，未完成回合可能中断且保留原投递，需要核查。持续运行验收看实际起止与故障记录，不能把 `--seconds 86400` 当成已经运行 24 小时。
 

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import re
 import socket
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import time
 from . import channel_agent as runner
 from . import dispatch
 from . import wechat_agent_ctl as ctl
+from .session_adapter import SessionError
 
 
 def collect(binary, root, settle_seconds=0):
@@ -153,16 +155,62 @@ class PushLoop:
 
 def provision(path, owner, cwd, codex, writable_roots=()):
     from .session_adapter import AppServer, SessionAdapter
-    existing = ctl.read_json(path) if path.exists() else {"version": 1, "sessions": {}}
-    if owner in existing["sessions"]:
-        raise dispatch.DispatchError("owner already has a Session; refusing replacement")
-    with AppServer(codex) as server:
-        session = SessionAdapter.create_managed(server, socket.gethostname(), str(cwd.resolve()),
-                                               str(path.parent / ("session-" + owner + ".lock")),
-                                               writable_roots=tuple(str(root.resolve()) for root in writable_roots))
-    existing["sessions"][owner] = dict(session.__dict__)
-    ctl.atomic_json(path, existing)
-    return {"provisioned": True, "owner": owner, "ownership": "managed-app-server"}
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}",owner):
+        raise dispatch.DispatchError("owner must be a bounded safe identifier")
+    if not path.is_absolute() or path.resolve()!=path or not cwd.is_dir():
+        raise dispatch.DispatchError("provisioning requires canonical config and an existing project directory")
+    ctl.private(path.parent,True)
+    with dispatch.exclusive(path.parent,path.name+".provision.lock",blocking=True):
+        existing = ctl.read_json(path) if path.exists() else {"version": 1, "sessions": {}}
+        metadata=existing.setdefault("provisioning",{})
+        if owner in existing["sessions"] or owner in metadata:
+            raise dispatch.DispatchError("owner already has a Session; inspect its saved initialization instead of replacing it")
+        with AppServer(codex) as server:
+            metadata[owner]={"state":"creating"}
+            ctl.atomic_json(path,existing)
+            session = SessionAdapter.create_managed(server, socket.gethostname(), str(cwd.resolve()),
+                                                   str(path.parent / ("session-" + owner + ".lock")),
+                                                   writable_roots=tuple(str(root.resolve()) for root in writable_roots))
+            existing["sessions"][owner]=dict(session.__dict__)
+            metadata[owner]={"state":"starting","thread_id":session.thread_id}
+            # Save the original reference before the first mutating turn RPC.
+            ctl.atomic_json(path,existing)
+            with dispatch.exclusive(path.parent,Path(session.lock_path).name):
+                turn=server.request("turn/start",{
+                    "threadId":session.thread_id,"clientUserMessageId":"wx-provision-"+owner,
+                    "input":[{"type":"text","text":"Initialize this managed Session with a persistent checkpoint. No WeChat data is present. Do not use tools, read messages, change files or send anything. Acknowledge readiness briefly and wait for scoped notifications."}],
+                    "cwd":session.cwd,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}})
+                turn_id=turn.get("turn",{}).get("id")
+                if not turn_id:
+                    raise SessionError("initialization response unknown; original thread reference is retained")
+                metadata[owner].update(state="initializing",turn_id=turn_id)
+                ctl.atomic_json(path,existing)
+                deadline=time.monotonic()+120
+                while time.monotonic()<deadline:
+                    try:
+                        thread=server.request("thread/read",{"threadId":session.thread_id,"includeTurns":True})["thread"]
+                    except SessionError as exc:
+                        if "rollout" not in str(exc) and "not loaded" not in str(exc):
+                            raise
+                        time.sleep(.2)
+                        continue
+                    state=next((item.get("status") for item in thread.get("turns",[]) if item.get("id")==turn_id),None)
+                    if state=="completed":
+                        break
+                    if state in ("interrupted","failed"):
+                        raise SessionError("initialization turn did not complete; original reference retained")
+                    time.sleep(.2)
+                else:
+                    raise SessionError("initialization timed out; inspect original thread and turn")
+        # A completed model turn is insufficient: cold-resume the same ID.
+        with AppServer(codex) as cold:
+            adapter=SessionAdapter(session,cold,None)
+            if adapter.turn_status(turn_id)["status"]!="completed":
+                raise SessionError("cold resume could not verify initialization")
+        metadata[owner].update(state="ready",cold_resume_verified=True)
+        ctl.atomic_json(path,existing)
+        return {"provisioned": True, "owner": owner, "ownership": "managed-app-server",
+                "initialized":True,"cold_resume_verified":True}
 
 
 def main(argv=None):
@@ -257,6 +305,8 @@ def main(argv=None):
                 sessions = ctl.read_json(args.session_config)
                 if sessions.get("version") != 1:
                     raise dispatch.DispatchError("invalid Session configuration")
+                if any(item.get("state")!="ready" for item in sessions.get("provisioning",{}).values()):
+                    raise dispatch.DispatchError("Session initialization is incomplete; inspect its original references")
                 push = PushLoop(binary, root, args.config, sessions["sessions"], args.codex)
             stop = time.monotonic() + args.seconds
             collector=ThreadPoolExecutor(max_workers=1)
@@ -301,7 +351,7 @@ def main(argv=None):
         print(json.dumps(value, separators=(",", ":")))
         return 0
     except (dispatch.DispatchError, conversations.ConversationError, ctl.ControlError,
-            runner.RunnerError, OSError, ValueError) as exc:
+            runner.RunnerError, SessionError, OSError, ValueError) as exc:
         print(json.dumps({"error": type(exc).__name__, "message": str(exc)}), file=sys.stderr)
         return 1
     finally:

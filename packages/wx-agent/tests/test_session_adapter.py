@@ -26,8 +26,9 @@ class FakeServer:
             return {"thread": {"id": "thread-1", "status": {"type": self.state},
                                "turns": [{"id": "turn-1", "status": "completed"}]}}
         if method == "thread/resume":
-            self.state = "idle"
-            return {"thread": {"id": "thread-1", "status": {"type": "idle"}}}
+            if self.state=="notLoaded":
+                self.state = "idle"
+            return {"thread": {"id": "thread-1", "status": {"type": self.state}}}
         if method == "turn/start":
             if self.fail_start:
                 raise DeliveryUnknown("disconnected")
@@ -179,8 +180,24 @@ class SessionAdapterTests(unittest.TestCase):
     def test_resume_same_thread_and_query_turn(self):
         self.server.state = "notLoaded"
         self.assertEqual(self.adapter.status()["state"], "idle")
-        self.assertEqual(self.server.calls[1][1]["threadId"], "thread-1")
+        self.assertEqual(self.server.calls[0],("thread/resume",{"threadId":"thread-1","cwd":self.temp.name,"excludeTurns":True}))
         self.assertEqual(self.adapter.turn_status("turn-1")["status"], "completed")
+
+    def test_cold_connection_resumes_before_reading_a_managed_thread(self):
+        class Cold(FakeServer):
+            loaded=False
+            def request(inner,method,params):
+                if method=="thread/read" and not inner.loaded:
+                    raise SessionError("thread not loaded")
+                if method=="thread/resume":
+                    inner.loaded=True
+                return super(Cold,inner).request(method,params)
+        server=Cold()
+        adapter=SessionAdapter(self.session,server,self.evidence,local_host="test-host")
+        self.addCleanup(adapter.close)
+        self.assertEqual(adapter.status()["state"],"idle")
+        self.assertEqual(adapter.turn_status("turn-1")["status"],"completed")
+        self.assertFalse(any(method in ("thread/start","turn/start") for method,_ in server.calls))
 
     def test_desktop_owned_is_unsupported(self):
         with self.assertRaises(SessionError):
