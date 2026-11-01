@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from scripts.test_local_channel import GROUP, TABLE, fixture
 
@@ -180,6 +181,46 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
             item = self.outbox(name, "show", "--request-id", request)
             self.assertEqual(item["status"], "ui_observed")
             self.assertEqual(item["attempt_number"], 1)
+
+    def test_nonblocking_python_send_freezes_real_intents_without_desktop_effect(self):
+        from wx_agent import conversations
+        channel = self.channels["group"]
+        template = self.root / "sender-template.json"
+        template.write_text(json.dumps({"ui_dir": str(self.ui)}))
+        template.chmod(0o600)
+        settings = {"wx_cli": str(BINARY), "sender_template": str(template)}
+        entry = {"conversation_id": channel["id"], "state_dir": str(channel["state"]),
+                 "channel_id": channel["binding"]["channel_id"],
+                 "session_id": channel["binding"]["session_id"]}
+        image = self.root / "nonblocking-source.png"
+        image.write_bytes(PNG)
+        media = conversations.sender.image_descriptor(image)
+        # Only metadata lookup/calibration are synthetic. Intent freezing,
+        # owner checks and dispatch persistence use the compiled Rust CLI.
+        with mock.patch.object(conversations, "fresh", return_value=entry), \
+                mock.patch.object(conversations, "channel_status", return_value={}), \
+                mock.patch.object(conversations, "prepare_driver", return_value=self.driver):
+            for index, (request, text, attachment) in enumerate((
+                    ("nonblocking-text", "synthetic no-wait text", None),
+                    ("nonblocking-image", "", media))):
+                result = conversations.send_intent(
+                    settings, entry, request, text, media=attachment,
+                    owner="owner_group", expected_epoch=channel["epoch"],
+                    scheduling={"batch_id": "nonblocking-pair", "part_index": index},
+                    wait=False)
+                self.assertEqual(result["status"], "pending")
+                item = self.outbox("group", "show", "--request-id", request)
+                self.assertEqual(item["attempt_number"], 0)
+                self.assertEqual(item["part_index"], index)
+            with self.assertRaises(conversations.ConversationError):
+                conversations.send_intent(
+                    settings, entry, "nonblocking-text", "conflicting replacement",
+                    owner="owner_group", expected_epoch=channel["epoch"], wait=False)
+        image.unlink()
+        frozen = self.outbox("group", "show", "--request-id", "nonblocking-image")["media"]
+        self.assertEqual(hashlib.sha256(Path(frozen["path"]).read_bytes()).hexdigest(), media["sha256"])
+        self.assertEqual(len(self.coordinator("dispatch", "status")["dispatches"]), 2)
+        self.assertFalse(self.log.exists(), "nonblocking enqueue must not invoke the driver")
 
     def test_busy_lock_gap_reconcile_unknown_and_review(self):
         from wx_agent import dispatch

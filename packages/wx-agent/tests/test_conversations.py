@@ -93,6 +93,10 @@ class FakeCLI:
                 raise conv.runner.RunnerError("source changed before queue")
             box.setdefault(rid, {"request_id": rid, "text": "", "media": media,
                                  "status": "managed_media_queued" if state in self.managed_states else "media_queued",
+                                 **({key: int(argv[argv.index(flag) + 1]) if key in ("part_index", "priority") else
+                                     argv[argv.index(flag) + 1] for key, flag in
+                                    (("batch_id", "--batch-id"), ("part_index", "--part-index"),
+                                     ("priority", "--priority"), ("expires_at", "--expires-at")) if flag in argv}),
                                  **({"managed_owner": argv[argv.index("--owner") + 1],
                                      "managed_epoch": int(argv[argv.index("--expected-epoch") + 1])}
                                     if state in self.managed_states else {})})
@@ -102,6 +106,10 @@ class FakeCLI:
         if action == "queue":
             box.setdefault(rid, {"request_id": rid, "text": data,
                                  "status": "managed_queued" if state in self.managed_states else "queued",
+                                 **({key: int(argv[argv.index(flag) + 1]) if key in ("part_index", "priority") else
+                                     argv[argv.index(flag) + 1] for key, flag in
+                                    (("batch_id", "--batch-id"), ("part_index", "--part-index"),
+                                     ("priority", "--priority"), ("expires_at", "--expires-at")) if flag in argv}),
                                  **({"managed_owner": argv[argv.index("--owner") + 1],
                                      "managed_epoch": int(argv[argv.index("--expected-epoch") + 1])}
                                     if state in self.managed_states else {})})
@@ -533,6 +541,74 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(send.call_count, 2)
         self.assertEqual(self.fake.sent, [])
         self.assertFalse(any("send" in call for call in self.fake.calls if "outbox" in call))
+
+    def test_managed_no_wait_freezes_new_text_and_image_before_enqueue(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        image = self.make_image()
+        root = self.registry / "ui"
+        scheduling = {"batch_id": "batch-a", "part_index": 1, "priority": 2}
+
+        def enqueue(_, channel_state, request_id, owner, expected_epoch):
+            self.assertEqual(channel_state, state)
+            self.assertEqual((owner, expected_epoch), ("session-a", 4))
+            item = self.fake.outboxes[channel_state][request_id]
+            config_path, driver_path = conv._driver_paths(entry)
+            self.assertTrue(config_path.is_file())
+            self.assertTrue(driver_path.is_file())
+            self.assertEqual((item["managed_owner"], item["managed_epoch"]), (owner, expected_epoch))
+            self.assertEqual(item["status"], "managed_media_queued" if request_id == "image" else "managed_queued")
+            self.assertEqual(item["batch_id"], "batch-a")
+            self.assertEqual(item["part_index"], 1)
+            return item, {"dispatch_id": 17}
+
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.dispatch, "enqueue_existing", side_effect=enqueue) as queued, \
+             mock.patch.object(conv.dispatch, "send_existing") as send:
+            text = conv.send(self.settings, "text", "hello", id=entry["conversation_id"],
+                             owner="session-a", expected_epoch=4, scheduling=scheduling, wait=False)
+            picture = conv.send_image(self.settings, "image", image, id=entry["conversation_id"],
+                                      owner="session-a", expected_epoch=4, scheduling=scheduling, wait=False)
+        self.assertEqual((text["status"], picture["status"]), ("pending", "pending"))
+        self.assertEqual(queued.call_count, 2)
+        send.assert_not_called()
+        self.assertEqual(self.fake.sent, [])
+        self.assertTrue(any(call[1] == "outbox" and "queue" in call for call in self.fake.calls))
+        self.assertTrue(any(call[1] == "outbox" and "queue-image" in call for call in self.fake.calls))
+
+    def test_managed_no_wait_reused_conflicts_and_unknown_never_enqueue(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        self.fake.outboxes[state] = {"same": {"request_id": "same", "text": "original",
+            "status": "managed_queued", "managed_owner": "session-a", "managed_epoch": 4,
+            "batch_id": "batch-a", "part_index": 1}}
+        image = self.make_image()
+        self.fake.outboxes[state]["photo"] = {"request_id": "photo", "text": "",
+            "media": conv.sender.image_descriptor(image), "status": "managed_media_queued",
+            "managed_owner": "session-a", "managed_epoch": 4}
+        image.write_bytes(image.read_bytes() + b"changed")
+        root = self.registry / "ui"
+        kwargs = dict(id=entry["conversation_id"], owner="session-a", expected_epoch=4, wait=False)
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.dispatch, "enqueue_existing") as queued:
+            with self.assertRaisesRegex(conv.ConversationError, "different text"):
+                conv.send(self.settings, "same", "changed", **kwargs)
+            with self.assertRaisesRegex(conv.ConversationError, "different batch"):
+                conv.send(self.settings, "same", "original", scheduling={"batch_id": "batch-b"}, **kwargs)
+            with self.assertRaisesRegex(conv.ConversationError, "different image"):
+                conv.send_image(self.settings, "photo", image, **kwargs)
+            self.fake.outboxes[state]["same"]["status"] = "indeterminate"
+            with self.assertRaisesRegex(conv.ConversationError, "unresolved"):
+                conv.send(self.settings, "same", "original", **kwargs)
+            queued.assert_not_called()
 
     def test_managed_send_refuses_missing_or_stale_owner_before_freeze(self):
         self.choose(2)

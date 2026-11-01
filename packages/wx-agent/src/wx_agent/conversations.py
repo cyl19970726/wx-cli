@@ -533,9 +533,6 @@ def send_intent(settings, entry, request_id, text, snapshot=None, media=None,
     managed = root is not None
     if managed:
         _managed_fence(settings, entry, owner, expected_epoch, root)
-        if not wait:
-            _, queued = dispatch.enqueue_existing(settings["wx_cli"], state, request_id, owner, expected_epoch)
-            return {"request_id":request_id, "status":"pending", "dispatch_id":queued["dispatch_id"], "already_completed":False}
     try:
         listed = json.loads(command(settings, "outbox", state, "list"))
     except (ValueError, UnicodeError) as exc:
@@ -575,6 +572,11 @@ def send_intent(settings, entry, request_id, text, snapshot=None, media=None,
     driver = prepare_driver(settings, entry)
     if managed:
         _managed_fence(settings, entry, owner, expected_epoch, root)
+        if not wait:
+            _, queued = dispatch.enqueue_existing(settings["wx_cli"], state, request_id,
+                                                  owner=owner, expected_epoch=expected_epoch)
+            return {"request_id": request_id, "status": "pending", "dispatch_id": queued["dispatch_id"],
+                    "already_completed": False}
         result = dispatch.send_existing(settings["wx_cli"], state, request_id,
                                         owner=owner, expected_epoch=expected_epoch)
         require(result.get("request_id") == request_id, "outbox_drift", "dispatch request ID differs")
