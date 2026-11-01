@@ -244,6 +244,17 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(pending["request_id"], request_id)
         self.assertEqual(self.fake.acks, [])
 
+    def test_select_accepts_exact_managed_cli_alternative_without_rewriting(self):
+        self.selected()
+        selection = self.state / chat.SELECTION_NAME
+        original = selection.read_bytes()
+        candidate = dict(self.settings, wx_cli="/synthetic/candidate-wx-cli")
+        chat.select(candidate, "test@chatroom", compatible=(self.settings,))
+        self.assertEqual(selection.read_bytes(), original)
+        incompatible = dict(candidate, consumer="another-agent")
+        with self.assertRaisesRegex(chat.ChatError, "compatible selection configuration differs"):
+            chat.select(incompatible, "test@chatroom", compatible=(self.settings,))
+
     def test_recovery_cli_requires_and_forwards_expected_attempt(self):
         errors = io.StringIO()
         with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as missing:

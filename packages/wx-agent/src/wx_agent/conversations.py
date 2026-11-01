@@ -487,14 +487,15 @@ def coordinated(settings, target_entry):
         if target_entry.get("controller_config"):
             require(target_entry["controller_config"] in settings.get("controller_configs", []),
                     "controller_drift", "target controller is no longer configured")
-            value = controller_api(settings,ctl.config(Path(target_entry["controller_config"]), require_executables=False))
+            original = ctl.config(Path(target_entry["controller_config"]), require_executables=False)
+            value = controller_api(settings,original)
             require(value["state_dir"] == target_entry["state_dir"] and
                     value["wx_cli"] == settings["wx_cli"],
                     "controller_drift", "target controller changed")
             lease = Path(value["state_dir"]) / ctl.INTERACTIVE_NAME
             require(not lease.exists() and not lease.is_symlink(), "external_lease",
                     "another operator holds an interactive lease")
-            interactive.select(value, target_entry["talker"])
+            interactive.select(value, target_entry["talker"], compatible=(original,))
             channel = interactive._status(value)
             _, state, cursor = interactive._runner_state(value, channel["binding"])
             require(state.get("pending") is None and cursor == channel["consumer_cursor"],

@@ -291,16 +291,26 @@ def groups(settings, name, exact=False):
     return result
 
 
-def select(settings, talker):
+def select(settings, talker, compatible=()):
     state_dir = Path(settings["state_dir"])
     with _lock(state_dir, ctl.LOCK_NAME):
         binding = _status(settings)["binding"]
         _check(talker == binding["talker"], "different_group", "only the configured group can be selected")
-        selected = {"version": 1, "config_fingerprint": _fingerprint(settings),
+        def snapshot(source):
+            _check(source.get("state_dir") == settings.get("state_dir")
+                   and {key: value for key, value in source.items() if key != "wx_cli"}
+                   == {key: value for key, value in settings.items() if key != "wx_cli"},
+                   "selection_drift", "compatible selection configuration differs")
+            return {"version": 1, "config_fingerprint": _fingerprint(source),
                     "binding": {key: binding.get(key) for key in STATE_KEYS}, "talker": talker}
+        selected = snapshot(settings)
+        compatible = tuple(compatible)
+        expected = (selected, *(snapshot(source) for source in compatible))
         existing = _read_optional(state_dir / SELECTION_NAME)
-        _check(existing is None or existing == selected, "selection_drift", "existing group selection differs")
-        runner.save(state_dir / SELECTION_NAME, selected)
+        _check(existing is None or existing in expected, "selection_drift", "existing group selection differs")
+        # Keep the stable entry's fingerprint when a managed candidate is the
+        # only caller creating the selection; either exact fingerprint is valid.
+        runner.save(state_dir / SELECTION_NAME, existing or (expected[-1] if compatible else selected))
         return {"selected": True, "binding": selected["binding"]}
 
 

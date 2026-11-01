@@ -890,7 +890,9 @@ class ConversationTests(unittest.TestCase):
         config_one["wx_cli"] = config_two["wx_cli"] = self.settings["wx_cli"]
         calls = []
         with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \
-             mock.patch.object(conv.interactive, "select", side_effect=lambda value, talker: calls.append(("select", talker))), \
+             mock.patch.object(conv.interactive, "select",
+                               side_effect=lambda value, talker, compatible=(): calls.append(
+                                   ("select", talker, compatible))), \
              mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
              mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
              mock.patch.object(conv.interactive, "_check_outbox_clear"), \
@@ -900,6 +902,7 @@ class ConversationTests(unittest.TestCase):
                                                   "controller_config": "/one", "talker": "one@chatroom"}):
                 pass
         self.assertEqual([item[0] for item in calls], ["select", "take", "back"])
+        self.assertEqual(calls[0][2], (config_one,))
         lease = Path(config_two["state_dir"]) / conv.ctl.INTERACTIVE_NAME
         write_private(lease, {"version": 1})
         with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \
