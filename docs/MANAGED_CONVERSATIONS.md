@@ -108,7 +108,7 @@ wx-agent inbox --config /ABS/private/conversations.json run \
 
 写入范围必须来自项目授权，包含协调器和该 owner 的 channel；不授予原始微信数据库写权限。不配置时保留原只读策略，不能假定 model 能完成业务回执。显式 roots 使用 Codex 的 workspaceWrite 和禁止网络/权限升级策略；其配置形状见 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server)。已首次登记的 Session 引用保存在 Rust；仅改 sessions.json 不能静默换 thread，替换需显式 configure 更新 epoch。
 
-监听每次先持久采集再通知，源采集并发上限为 2，新事件按 1 秒静默、最长 5 秒合并，每个冻结范围最多 256 项。忙时保留 inbox；Rust 在 `turn/start` 之前保留投递，同 Session 不能并发 reserve。连接重启仍使用原 thread ID，查询已记录 turn 后更新 transport 结果；没有 turn ID 的未知 reservation 留待核查。transport 完成与业务决定分开记录；模型必须通过 inbox CLI 明确完成业务处理，日志与最终回答不会进入微信。采集、Session 连接和桌面执行器分进程，长 GUI 操作不阻塞后续采集；正常停止先让当前发送走到安全边界。
+监听每次先持久采集再通知，源采集并发上限为 2，新事件按 1 秒静默、最长 5 秒合并，每个冻结范围最多 256 项。忙时保留 inbox；Rust 在 `turn/start` 之前保留投递，同 Session 不能并发 reserve。连接重启仍使用原 thread ID，查询已记录 turn 后更新 transport 结果；没有 turn ID 的未知 reservation 留待核查。transport 完成与业务决定分开记录；模型必须通过 inbox CLI 明确完成业务处理，日志与最终回答不会进入微信。采集使用独立线程，监听进程持有 Session 连接，桌面执行器为独立进程；长 GUI 操作不阻塞采集，正常停止让当前发送先走到安全边界。
 
 冷连接先通过官方 `thread/resume` 加载指定受管 thread，再读取状态；不直接读写存档。配置中的 provisioning 项未 ready 时监听器拒绝启动该配置。初始化是显式 setup；主动读取和普通 metadata 查询不运行初始化模型。
 

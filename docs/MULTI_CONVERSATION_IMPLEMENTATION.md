@@ -1,40 +1,76 @@
 # 多会话实施与验收记录（2026-11-01）
 
-本轮按 [多会话方案](MULTI_CONVERSATION_PLAN.md)推进。以下将代码、离线验证、Mac mini 现场与独立收件分开记录；旧版文字验收不能替代新增协调器的验收。授权范围为测试群和测试私聊、受控升级、fork 分支提交与审阅 PR；不合并、不发布、不操作业务群。本页不包含私有身份、消息或截图。
+实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。当前运行代码为 `777076844fc59376019b85a4cdd42ec2be7aaccb`；本页明确区分实现、离线检查、真实读取、受管 Session 与 GUI/收件证据。原文字的历史验收继续有效，新增功能不继承旧版实机结论。不合并、不发布、不向非测试业务群发送。
 
-## 分批进度
+## 分批状态
 
-| 批次 | 当前进展 | 尚未达到的验收条件 |
+| 批次 | 已有证据 | 未关闭的验收 |
 | --- | --- | --- |
-| P0 图片与 helper 基线 | 图片代码与 helper 生命周期、恢复修复已整合。Mac mini 新鲜核验的 helper 为 `9f`，三项桌面权限均为真，旧 runner 未运行。 | 新集成版本尚无 GUI 图片或文字发送，也无独立收件证据；桌面控制故障仍阻断实机回归。 |
-| P1 会话隔离与主动 CLI | 注册表锁缩至快照和更新；逐会话锁、显式 ID、目标 controller 接管、owner/epoch 栅栏及配置命令已有代码和合成回归。 | 双群及私聊的真实并行读取、接管与发件仍待现场对照。 |
-| P2 统一发送 | Rust 保留 channel outbox 与冻结意图，新增持久 dispatch、单桌面执行器、文字/图片及 focus 入队、未知结果停通道和重启对账。`batch_id + part_index` 冻结顺序、优先级老化与到期拦截、未关联本人出站判别及其代际暂停已进入代码；16 项真实 CLI 合成集成已通过。 | 新协调器的真实 GUI 发送、人工出站现场识别及独立收件尚未闭环；合成通过不等于 P2 实机验收通过。 |
-| P3 inbox 与 Session | Rust inbox、处理结果及持续待办已有代码；连续事件经 1 秒静默、最长 5 秒采集窗口合并，每批上限 256。defer 按到期或新信息重新待办，draft 不自动续办，取消与决定历史保留。当前 owner 绑定保存 `session_ref`，阻止仅改私有配置就替换 thread；显式 `configure` 会更新代际并清除旧引用。托管 inbox 监听与桌面执行器分进程，已有记录的 turn 在重启后按原证据恢复。专用受管 Codex app-server 测试 thread 已验证续接，并在显式限定可写目录后，由同一 thread 的模型通过 Rust inbox 对合成消息成功记录 `skip`；早期只读及中断记录仍保留，详见 [Session 适配器记录](SESSION_ADAPTER_VALIDATION_20261101.md)。 | 真实微信增量到业务处理的连续链路、桌面 App 正持有的业务 Session 投递、跨主机投递及重启故障现场验收均未完成。测试 thread 不代表业务 Session 已接通。 |
-| P4 运行验收 | Rust 全量复跑、严格 Clippy、Python 3.12 scripts、已安装 wheel、真实 CLI 合成集成和 Swift 参数检查已有本地通过证据。 | Python 3.9 CI、远程交付、现场迁移/回退与故障演练、新版本 GUI 发送及独立收件、24 小时有界运行和最终审阅仍待完成；24 小时观察尚未启动。 |
+| P0 图片/文字基线 | 复用图片 `3c7ba2c`、生命周期及恢复 `86c1db3`，没有重写基础收发。原签名助手 SHA 前缀 `9f5f0ec0ba8f`，新鲜检查三项权限均 true。 | 设置已由原生屏幕共享关闭；新私聊文字取得一次 ui_observed，用户独立确认收到且文字/换行正常。图片在 prepare 的 Copy 哨兵检查拒绝，原尝试为 indeterminate、草稿保留；群阶段未开始。 |
+| P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现。Mac mini 两个授权目标同时增量读取，合计 0.086 秒，两页均无新事件；原绑定、consumer、attempt、意图元数据及共享配置均未改动。 | 真实 GUI 并发、接管临界区和人工出站的现场复验仍未完成。0.086 秒是两次空增量轮询，不是历史消息或容量成绩。 |
+| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch；包含意图来源代际、补登记、顺序 batch、优先级老化、到期拦截、原 helper 退出保护、未知结果停通道及零 attempt 核查恢复。16 项编译 CLI 合成集成通过。 | 现场已有私聊文字和图片两个 dispatch；文字一次本地出站，图片不明后停通道。群队列与图片成功发送仍未通过。 |
+| P3 inbox/Session | 持久批次、处理租约、skip/defer/draft/reply、持续待办和决定历史已实现。同一受管测试 thread 的模型曾完成合成 Rust inbox 的 skip。Mac mini 两个新受管 Session 各完成只读初始化，并以原 ID 冷续接验证；同 thread 不分配给另一聊天。 | 观察开始后尚无新的微信入站处理证据；桌面 App 持有的业务 Session 推送及跨宿主推送未接入，原业务 Session 继续主动 CLI。 |
+| P4 运行验收 | 完整 CI 通过；Mac mini 独立构建/安装和 Python 3.9.6 矩阵通过。两个测试绑定的 24 小时观察已启动，发送保持暂停。 | 24 小时尚未结束；私聊文字已获独立收件确认；图片、群阶段及现场回退完整演练仍不能通过。 |
 
-新绑定默认 `observe`；只有明确授权的会话才配置 `authorized`。托管发送在冻结意图和入队时携带原 owner/epoch，旧 Session 不得取新代际替旧任务发送；无来源代际的旧排队意图保持阻断。Rust 保存绑定、事件、消费、inbox、意图和尝试；Python 编排；Swift 执行受控桌面动作。`ui_observed` 是本地观察，不是收件证明。
+## 工程验证
 
-## 离线验证证据
+代码 `7770768` 的 [CI 41302033715](https://github.com/cyl19970726/wx-cli/actions/runs/41302033715)四项成功：Rust、Python 3.9、Python 3.12、Swift。若后续提交仅更新本文，运行版本仍固定于上述代码；最新提交的自动检查以 PR Checks 为准。
 
-私有原始日志位于忽略目录 `.local/multigroup-evidence/`；此处只记录汇总，不把运行材料加入仓库。测试数来自相应日志或 [Session 适配器记录](SESSION_ADAPTER_VALIDATION_20261101.md)，均为各次执行时的工作区快照；共享代码仍在集成，不把过滤或忽略项算作通过。
-
-| 检查 | 实际记录 |
+| 检查 | 实际结果 |
 | --- | --- |
-| Rust outgoing 定向测试 | 25 通过、0 失败、0 忽略；`outgoing-tests.log`。 |
-| Rust coordinator 定向测试 | 最新 `coordinator-tests.log` 记录 5 通过、0 失败、0 忽略；此前记录为 3 项。 |
-| 真实 CLI 合成集成 | `multi-integration.log` 记录 16 通过，覆盖混合文字/图片排队、batch 顺序与失败前项、优先级与到期、defer 续办、人工出站及 owner/Session 栅栏。这里的“真实 CLI”指执行编译的 CLI 与合成状态，不是操作真实微信。 |
-| 托管 Python 定向测试 | `managed-python.log` 记录 52 项通过、0 失败；为该次执行快照。最终 scripts 与安装包结果另列。 |
-| Python scripts | Python 3.12 运行 113 项通过；`python-scripts-312.log`。此前并发运行时一项 lost-response 测试超时；单独重跑 1 项通过，分别见 `python-baseline.log`、`python-lost-response.log`。 |
-| Swift | 参数与 named pasteboard 恢复检查通过；`swift-parameters.log`。不代表真实 GUI 点击或收件。 |
-| Python wheel | `wheel-tests.log` 记录已安装 wheel 的入口及 100 项测试通过；此前 89/90 项是较早快照。针对私有状态目录的写权限测试修正后取得本次结果。Python 3.9 本地未运行，可由后续 GitHub CI 核验。 |
-| Rust 全量与构建 | `rust-full.log` 复跑退出码为 0；46 个测试汇总合计 859 通过、11 项原有忽略、0 失败。`clippy.log` 记录严格 Clippy 通过；`rust-build.log` 和 `fmt.log` 留有构建及格式检查记录。忽略项不计入通过。 |
+| Rust 完整测试 | 859 passed、11 原有 ignored、0 failed；严格 all-target Clippy、fmt 和 build 通过。 |
+| 编译 CLI 合成集成 | 16 passed，含文字/图片并发、GUI 排他、锁忙零 attempt、批次、过期、孤儿意图、本人出站、Session 历史作用域和未知不重放。真实 CLI 指执行编译程序与生成的 SQLite，不是真实微信。 |
+| Python CI 脚本 | Python 3.9/3.12 各运行 97 项，2 项编译 CLI 场景跳过；对应场景在 Rust job 实际执行，不把跳过算通过。 |
+| 仓库外 wheel | Python 3.9/3.12 各 108 passed，含入口、首次初始化、冷续接前置条件、未知结果不替换引用及 scoped write roots。 |
+| Mac mini Python 3.9.6 | 仓库脚本 113 passed；仓库外 wheel 108 passed；Rust 构建和独立候选安装完成。 |
+| Swift | 参数与命名剪贴板恢复检查通过。助手未因 Python/Rust 升级而重编、替换或重置权限。 |
+| 可分享材料 | 图源与经原通过回执核验的空白规范化公开 HTML 一并保存；公开源码与 diff 检查通过。图稿不是实现或实机证据。 |
 
-此前 Rust 全量首跑的旧恢复用例曾在并发负载下遇到 2 秒探针超时；最新全量复跑已通过，旧失败记录不删除。受管 Session 的早期写入失败也保留在适配器记录中；随后对**同一**测试 thread 显式授予合成状态目录写权限，模型完成 inbox `skip`，Rust 记录原 thread/turn 关联。此证据不涉及微信消息或发送。没有远程 CI 通过或新部署的证据。
+早期并发负载曾使原有两秒进程探针超时；完整复跑与最终 CI 已通过，没有降低断言或新增 Rust 忽略项。早期 Session 写权限、未持久化空 thread 的失败证据均保留。单元测试和安装包检查不代替实机收发。
 
-## Mac mini 现场与后续闭环
+## 后续非阻塞入口修复
 
-本轮现场反馈：新鲜 helper `9f` 的 Accessibility、Screen Recording、Post Events 三项权限均为真，runner 为停止状态；微信主窗口与设置窗口同时存在。CUA 控制先后返回 `noWindowsAvailable`、超时和 `cgWindowNotFound`，重置后仍未恢复。DERP 路径上的远程 SSH 不稳定；SCP v1 小文件曾送达，但 v2/v3 与二进制均未核验，不能据此认定远端代码或可执行文件已更新。当前没有新的 GUI 发送、图片内容核验、独立收件确认，也没有部署新 coordinator、迁移远端协调器根目录或启动 24 小时观察。桌面控制由执行 agent 继续自查；不把权限为真推断为窗口控制已可用。
+GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图、检查复用 ID 的正文/图片/调度参数前就尝试 enqueue。已将非阻塞分支移到相同的身份、内容、状态、metadata 和 driver 检查之后，再入队；仍不执行 GUI 或等待结果。两个单元回归覆盖新文字/图片、复用内容/调度冲突及不明尝试不得入队。新增编译 Rust 集成验证真实冻结、两个零 attempt 排队项、源图片删除后冻结字节仍存在，且没有 driver 调用。
 
-后续先完成远程交付核验；经授权推送后可考虑用 GitHub CI 补 Python 3.9，再在远端核对 git clone 与实际安装版本，不能以传输命令退出码代替文件和运行状态核验。执行 agent 继续自行排查窗口控制，核对 helper、桌面锁和目标身份；恢复后才在授权测试会话内做文字与单图各一次的完整出站及独立收件回归。随后验证两个会话并发、接管竞态、人工出站识别、未知结果停通道、重启后的原 turn 恢复、旧状态迁移与回退，再进行有界持续运行。未取得这些现场证据前，状态仍是实施候选，不能标为 P0–P4 验收通过或可上线。
+本地 Python 3.12 仓库脚本 **114 passed**（含编译 CLI 的 **17** 个合成集成）；仓库外 wheel **110 passed**。公开源码和 diff 检查随提交运行。此 Python 修复尚未替换 Mac mini 的 `7770768`；现场图片准备故障不是这个入队分支的验收结果，二者不得混同。该提交的完整 CI 以 PR Checks 为准。
 
-代码基线 `a07e2d1` 已含图片与 helper 恢复整合；本页后续进度以当前共享工作区的未合并候选和上述日期证据为准。私有日志及远端现场材料继续留在忽略目录，不复制进公开报告。
+## Mac mini 部署与保护
+
+源码按提交直接拉取后在独立候选目录构建，避开不稳定的批量 SCP。当前只为授权测试群与测试私聊启用托管；另一个已登记目标没有被操作。共享 registry、原 controller 配置及三个原稳定入口的字节哈希保持不变。新 CLI 可对已托管、停止的旧 controller 临时使用候选 Rust API，不改写其原命令或 consumer。
+
+启动前核对旧 runner 停止、无 pending、无交互租约和活跃 helper，保存两个授权 state 的 SQLite 备份、派生配置及媒体。只按已知旧内容迁移这两个 state 的生成 driver。启用 owner/input 后，原绑定、consumer 和全部 attempt 保持一致；未恢复旧数据库快照、未删除失败意图、未换 request ID。
+
+新增 Session 的首次创建在 0.166.0-alpha.5.1 上暴露空 thread 无 rollout 的问题。旧失败引用没有改写，也没有业务数据关联。修复后的明确 setup 先保存原引用，完成一次无微信内容的只读初始化，再关闭连接并冷续接同一 ID，之后才标记 ready。两个新的专用测试身份均通过此验证；它们不代表桌面业务 thread 已被接通。细节见 [Session 记录](SESSION_ADAPTER_VALIDATION_20261101.md)。
+
+## 有界观察
+
+时间均为 Asia/Taipei：2026-11-01 **19:52:26** 开始，计划至 2026-11-02 **19:52:26**。进程运行在 Mac mini，SSH 断开后仍存活；现已核对健康文件更新、采集无错、Session 无需检查事项、执行器存活。策略是 `input=push / reply_policy=observe`，桌面通道暂停；初始化回合、模型最终文字和工具输出不会转发微信。
+
+此观察覆盖采集、inbox、受管 Session 及后台进程。20:29 的有界 GUI 测试临时使用 pull/authorized，之后两目标均恢复 push/observe（epoch 3），桌面再次暂停，原观察进程未重启。因此不是单一配置下连续发送暂停的 24 小时记录。开始时没有新入站，不能冒称已经处理真实微信入站任务、完成忙闲故障演练或稳定收发 24 小时。已配置当前聊天的定时核对，仅在有实质失败、需用户动作或观察结束时报告。
+
+## 最新 GUI 验收与停止点
+
+早先原生桌面工具返回 noWindowsAvailable/超时；用户明确同意 AppleScript 后，System Events 返回 osascript 未获辅助访问（-25211），直接应用脚本查询也超时。微信助手自己的三项权限为真，两者不是同一权限主体。浏览器自动审查拒绝 VNC 链接，理由是只允许 HTTP/HTTPS 协议，未通过间接浏览器方式重试。
+
+20:26 原生 Screen Sharing 实际点击恢复：从微信“窗口”菜单选中设置，再关闭其红色关闭按钮。新鲜画面和助手 inspect 均确认只剩主窗口，Accessibility/Screen Recording/Post Events 均 true。没有调整权限、编辑 TCC、重签或替换助手。
+
+20:29 在暂停模型投递（pull）并临时启用已授权测试发送后，使用候选原命令通过共享队列执行：
+
+| 目标/内容 | 结果 | 边界 |
+| --- | --- | --- |
+| 授权私聊文字 | attempt 1 为 ui_observed，约 7.25 秒 | 中文、换行、emoji 的本地证据；用户独立确认收到，文字和换行正常。 |
+| 授权私聊四色合成图片 | attempt 1 为 indeterminate | 原生 prepare 报 `Composer Copy did not replace image sentinel exactly once`；没有 submit result，图片草稿仍在。没有点击另一个发送入口、清草稿、重放或替换 ID。 |
+| 授权测试群 | 未开始 | 图片失败后停止整个 GUI 阶段，没有通过切聊天越过失败。 |
+
+两目标策略已恢复 push/observe，桌面通道暂停，执行器/采集仍存活，无活跃模型回合或 Session attention。原图片的状态继续按 indeterminate 保留；缺少 submit result 不等于独立收件判断，也不授予图片恢复权限。P0–P4 仍未全部验收通过，不能描述为上线就绪。
+
+## 私有证据索引
+
+- E01：本地忽略目录中的工程矩阵、完整 CI 日志及公开材料核验。
+- E02：远端候选按提交构建、Python 3.9.6 检查和 wheel/binary 摘要。
+- E03：授权双目标真实并行空轮询及原 metadata/共享文件哈希对照。
+- E04：受管初始化、冷续接、旧失败引用和真实合成 inbox 决定。
+- E05：启动前备份、观察 manifest、PID/命令和健康记录。
+- E06：助手权限、窗口、AppleScript 失败、后续原生关闭设置，以及文字/图片各一次尝试和停止后的策略恢复证据。
+
+真实身份、Session/turn 引用、token、配置、截图与数据库保留在各自宿主的忽略/私有验收目录；公共仓库仅记录上述汇总。
