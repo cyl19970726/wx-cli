@@ -92,6 +92,8 @@ wx-agent conversations --config /ABS/private/conversations.json handback --id CO
 
 当前适配器仅支持由本适配器明确创建、持有的 Codex app-server Session。正在被桌面 App 持有的业务 Session 不会被复制、强行 resume 或换成临时替身；这些 Session 继续主动使用上面的 CLI。跨主机推送尚未接入；Session 和微信协调器需在同一执行宿主，控制电脑只需通过已认证 SSH 操作入口。
 
+已停止的导入 controller 可能保留原稳定 CLI 生成的 selection 指纹。受管候选只可接受 `wx_cli` 不同、其余配置逐字段相同的临时替代指纹，并在本次内存操作中保留原指纹；不得改写共享 selection 来迫使校验通过。
+
 明确新建一个受管 Session 时才执行 provision。该命令运行一次只读初始化回合（不含微信数据、不调用工具或发送消息），随后关闭连接，用同一 thread ID 冷续接验证历史存在，再标记 ready。原引用在初始化 RPC 前保存；中断、未知结果或冷续接失败保留原引用并阻止重复创建。新会话不能只凭 `thread/start` 返回 ID 就宣称已可恢复。同 owner 重复 provision 拒绝替换：
 
 ```sh
