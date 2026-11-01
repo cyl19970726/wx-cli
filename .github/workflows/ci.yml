@@ -65,3 +65,5 @@ jobs:
       - uses: actions/checkout@v6
       - name: Native bridge parameter tests
         run: native/macos/wechat-bridge/test-parameters.sh
+      - name: Build native bridge
+        run: WX_BRIDGE_BUILD_DIR="$RUNNER_TEMP/wechat-bridge" native/macos/wechat-bridge/build.sh
