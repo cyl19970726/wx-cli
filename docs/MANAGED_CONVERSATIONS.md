@@ -18,6 +18,8 @@ wx-agent conversations --config /ABS/private/conversations.json configure \
 
 首次注册记录事件 cutover；历史消息不重新推送，旧 consumer 不回退。注册之后的入站无论 pull/push、暂停与否，都先进入 Rust inbox；输入方式只决定是否主动通知 Session。源事件更新与非文本保留引用；附件未同步仍为等待状态，不能直接记为已理解。只读分页不领取处理权、不确认 consumer，也不获取桌面锁。
 
+独立候选使用不同 Rust 可执行路径时，已托管且停止的旧 controller 可以在当前操作中使用候选 CLI；原 controller 文件、命令、state 和 consumer 保持不变。活跃旧 writer 或未托管的 API 路径漂移仍拒绝。读取目录元数据不协调其他 controller。一个持久 Session 引用只能绑定一个聊天，不能把不同聊天的上下文合到同一个 thread。
+
 已托管 channel 不再运行旧的单群文案 runner，避免它跳过非文本或绕过处理记录。旧 `chat` 的发送路径与通用 CLI 一样走托管队列；旧版 outbox 领取受到数据库触发器保护。运行新版本时不要另起旧 writer。
 
 ## 主动处理一次增量

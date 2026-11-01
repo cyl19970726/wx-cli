@@ -171,6 +171,23 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.fake.sent,[])
         self.assertFalse(any("must-not-freeze" in box for box in self.fake.outboxes.values()))
 
+    def test_candidate_cli_uses_only_stopped_enrolled_controller_without_rewriting_config(self):
+        legacy={"wx_cli":"/legacy/bin/wx-cli","state_dir":str(self.registry/"legacy")}
+        original=legacy.copy();root=self.registry/"ui"
+        with mock.patch.object(conv.dispatch,"managed_root",return_value=root), \
+             mock.patch.object(conv.dispatch,"root_from_settings",return_value=root), \
+             mock.patch.object(conv.ctl,"status",return_value={"alive":False}) as status:
+            selected=conv.controller_api(self.settings,legacy)
+            self.assertEqual(selected["wx_cli"],self.settings["wx_cli"])
+            self.assertEqual(legacy,original)
+            status.assert_called_once_with(legacy)
+            status.return_value={"alive":True}
+            with self.assertRaisesRegex(conv.ConversationError,"stop the original"):
+                conv.controller_api(self.settings,legacy)
+        with mock.patch.object(conv.dispatch,"managed_root",return_value=None):
+            with self.assertRaisesRegex(conv.ConversationError,"outside managed migration"):
+                conv.controller_api(self.settings,legacy)
+
     def managed_binding(self, entry, owner="session-a", epoch=4):
         return {"channel_state_dir": entry["state_dir"], "channel_id": entry["channel_id"],
                 "session_id": entry["session_id"], "owner": owner, "epoch": epoch,
@@ -637,7 +654,7 @@ class ConversationTests(unittest.TestCase):
              mock.patch.object(conv, "coordinated", return_value=contextlib.nullcontext()), \
              mock.patch.object(conv, "_managed_root", return_value=self.registry), \
              mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
-             mock.patch.object(conv.ctl, "config", return_value={"state_dir": str(state)}), \
+             mock.patch.object(conv.ctl, "config", return_value={"state_dir": str(state),"wx_cli":self.settings["wx_cli"]}), \
              mock.patch.object(conv.interactive, "reply",
                                side_effect=conv.interactive.ChatError("send_uncertain", "queued")) as imported_reply:
             result = conv.reply(self.settings, 3, "answer", id=entry["conversation_id"],

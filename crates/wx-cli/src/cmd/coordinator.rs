@@ -476,6 +476,18 @@ fn open(root: &Path, create: bool) -> Result<Connection, Box<dyn Error>> {
         if !columns.iter().any(|x| x == "session_ref") {
             db.execute_batch("ALTER TABLE binding ADD COLUMN session_ref TEXT;")?;
         }
+        db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS dedicated_session_per_conversation ON binding(session_ref) WHERE session_ref IS NOT NULL;")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS session_scope (
+          session_ref TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        INSERT OR IGNORE INTO session_scope(session_ref,conversation_id) SELECT session_ref,conversation_id FROM binding WHERE session_ref IS NOT NULL;
+        CREATE TRIGGER IF NOT EXISTS session_scope_immutable BEFORE UPDATE ON session_scope BEGIN SELECT RAISE(ABORT,'Session conversation scope is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS session_scope_retained BEFORE DELETE ON session_scope BEGIN SELECT RAISE(ABORT,'Session conversation scope history must be retained'); END;
+        CREATE TRIGGER IF NOT EXISTS dedicated_session_scope AFTER UPDATE OF session_ref ON binding WHEN NEW.session_ref IS NOT NULL BEGIN
+          INSERT OR IGNORE INTO session_scope(session_ref,conversation_id) VALUES(NEW.session_ref,NEW.conversation_id);
+          SELECT CASE WHEN (SELECT conversation_id FROM session_scope WHERE session_ref=NEW.session_ref)<>NEW.conversation_id THEN RAISE(ABORT,'Session belongs to another conversation') END;
+        END;")?;
     }
     Ok(db)
 }
@@ -1535,6 +1547,18 @@ fn turn_reserve(root: &Path, id: i64, token: &str, session: &str) -> Result<Valu
         .is_some_and(|existing| existing != session)
     {
         return Err(invalid("owner is bound to another persistent Session; configure with expected epoch to replace it"));
+    }
+    let scope: Option<String> = tx
+        .query_row(
+            "SELECT conversation_id FROM session_scope WHERE session_ref=?1",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if scope.as_deref().is_some_and(|old| old != conversation) {
+        return Err(invalid(
+            "Session conversation scope cannot be reused for another chat",
+        ));
     }
     if let Some(state) = turn_state {
         if session_ref.as_deref() != Some(session) {

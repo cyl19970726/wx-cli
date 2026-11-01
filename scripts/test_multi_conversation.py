@@ -393,6 +393,22 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
                                  "--token", renewed["token"], "--session-ref", "codex:test:other")
                 self.assertEqual(self.coordinator("status", "--conversation-id", group["id"])
                                  ["owner_session_ref"], "codex:test:other")
+        self.coordinator("inbox","record-turn","--delivery-id",renewed["delivery_id"],"--token",renewed["token"],
+                         "--thread-id","other","--turn-id","second-turn")
+        self.coordinator("inbox","finish-turn","--delivery-id",renewed["delivery_id"],"--token",renewed["token"],"--status","completed")
+        self.coordinator("inbox","complete","--delivery-id",renewed["delivery_id"],"--token",renewed["token"],"--decision","skip")
+        private=self.channels["private"]
+        with sqlite3.connect(private["source"]/"message/message_0.db") as db:
+            db.execute(f"INSERT INTO [{private['table']}] VALUES (60,160,1,1,1700000060,?,NULL,0)",
+                       (b"synthetic_member:\nseparate private conversation",))
+        self.cli("channel",private["state"],"sync")
+        self.coordinator("inbox","reconcile","--conversation-id",private["id"])
+        separate=self.coordinator("inbox","claim","--conversation-id",private["id"],"--owner","owner_private")
+        self.coordinator("inbox","reserve-turn","--delivery-id",separate["delivery_id"],"--token",separate["token"],
+                         "--session-ref","codex:test:other",okay=False)
+        self.coordinator("inbox","reserve-turn","--delivery-id",separate["delivery_id"],"--token",separate["token"],
+                         "--session-ref","codex:test:original",okay=False)
+        self.assertIsNone(self.coordinator("status","--conversation-id",private["id"])["owner_session_ref"])
 
     def test_real_events_inbox_claim_decisions_and_owner_fence(self):
         # Enrollment cut over the historical fixture. Add one incoming event to each source.

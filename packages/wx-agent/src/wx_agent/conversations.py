@@ -200,7 +200,6 @@ def controllers(settings):
     for path_value in settings.get("controller_configs", []):
         path = Path(path_value)
         value = ctl.config(path, require_executables=False)
-        require(value["wx_cli"] == settings["wx_cli"], "controller_drift", "controller uses another wx-cli")
         state = Path(value["state_dir"])
         require(str(state) not in seen, "controller_drift", "duplicate controller state")
         seen.add(str(state))
@@ -208,6 +207,22 @@ def controllers(settings):
         require(isinstance(binding, dict), "controller_drift", "controller binding unavailable")
         result.append((path, value, binding))
     return result
+
+
+def controller_api(settings,value):
+    """Use the candidate CLI for an enrolled, stopped legacy controller.
+
+    Paths are deployment details, not a second binding. Preserve the original
+    controller file, commands, consumer and state, and never adopt a live writer.
+    """
+    if value["wx_cli"]==settings["wx_cli"]:
+        return value
+    root=dispatch.managed_root(value["state_dir"])
+    require(root is not None and root==dispatch.root_from_settings(settings),
+            "controller_drift","controller uses another wx-cli outside managed migration")
+    require(not ctl.status(value)["alive"],"controller_running",
+            "stop the original controller before using a candidate CLI")
+    return dict(value,wx_cli=settings["wx_cli"])
 
 
 def binding_matches(settings, binding, metadata):
@@ -472,7 +487,7 @@ def coordinated(settings, target_entry):
         if target_entry.get("controller_config"):
             require(target_entry["controller_config"] in settings.get("controller_configs", []),
                     "controller_drift", "target controller is no longer configured")
-            value = ctl.config(Path(target_entry["controller_config"]), require_executables=False)
+            value = controller_api(settings,ctl.config(Path(target_entry["controller_config"]), require_executables=False))
             require(value["state_dir"] == target_entry["state_dir"] and
                     value["wx_cli"] == settings["wx_cli"],
                     "controller_drift", "target controller changed")
@@ -602,7 +617,7 @@ def send(settings, request_id, text, id=None, media=None, owner=None, expected_e
         fresh(settings, entry["conversation_id"], entry, unique_name=True)
         with coordinated(settings, entry):
             if entry["imported"]:
-                value = ctl.config(Path(entry["controller_config"]), require_executables=False)
+                value = controller_api(settings,ctl.config(Path(entry["controller_config"]), require_executables=False))
                 status_value = interactive._status(value)
                 interactive._check_outbox_clear(value, status_value["binding"], status_value["consumer_cursor"])
                 _, state, _ = interactive._runner_state(value, status_value["binding"])
@@ -618,7 +633,7 @@ def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None):
         fresh(settings, entry["conversation_id"], entry, unique_name=True)
         with coordinated(settings, entry):
             if entry["imported"]:
-                value = ctl.config(Path(entry["controller_config"]), require_executables=False)
+                value = controller_api(settings,ctl.config(Path(entry["controller_config"]), require_executables=False))
                 assert_selection(settings, snapshot, entry)
                 root = _managed_root(settings, entry)
                 managed = root is not None
