@@ -218,6 +218,15 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// Archive only a proven pre-submit attempt; retain its unknown outbox state forever.
+    AbandonUnsent {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        expected_attempt: i64,
+    },
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum FocusResult {
@@ -1142,6 +1151,92 @@ fn surface_pause(root: &Path, reason: Option<&str>) -> Result<Value, Box<dyn Err
     )?;
     Ok(json!({"paused_reason":reason}))
 }
+
+fn abandon_unsent(
+    root: &Path,
+    id: i64,
+    reason: &str,
+    expected_attempt: i64,
+) -> Result<Value, Box<dyn Error>> {
+    if reason.trim().len() < 8 || reason.len() > 512 || expected_attempt < 1 {
+        return Err(invalid(
+            "abandonment requires a review reason and exact attempt",
+        ));
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (conversation, request, status, result): (String, String, String, Option<String>) = tx
+        .query_row(
+            "SELECT conversation_id,request_id,status,result FROM dispatch WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if active.is_some() || status != "unknown" || result.as_deref() != Some("indeterminate") {
+        return Err(invalid(
+            "only an idle indeterminate dispatch can be reviewed",
+        ));
+    }
+    let b = binding(&tx, &conversation)?;
+    let outbox = Connection::open_with_flags(
+        b.state.join("outgoing.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let evidence: String = outbox.query_row(
+        "SELECT result_evidence FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=?2 AND status='indeterminate'",
+        params![request, expected_attempt],
+        |r| r.get(0),
+    )?;
+    private(Path::new(&evidence), false)?;
+    let report: Value = serde_json::from_reader(OpenOptions::new().read(true).open(&evidence)?)?;
+    let identity = format!("{}\0{}", b.channel_id, request);
+    let suffix = if expected_attempt == 1 {
+        String::new()
+    } else {
+        format!("-a{expected_attempt}")
+    };
+    let tid = format!(
+        "send-{}{}",
+        &hex::encode(Sha256::digest(identity.as_bytes()))[..48],
+        suffix
+    );
+    let stages = ["started", "inspected", "group_focused"];
+    if report["request_id"] != request
+        || report["id"] != tid
+        || report["attempt_number"] != expected_attempt
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || !stages.contains(&report["stage"].as_str().unwrap_or(""))
+    {
+        return Err(invalid("attempt evidence does not prove a pre-submit stop"));
+    }
+    for suffix in ["submit-attempted.json", "stage.json"] {
+        let path = Path::new(&evidence)
+            .parent()
+            .ok_or_else(|| invalid("attempt evidence has no parent"))?
+            .join(format!("{tid}.{suffix}"));
+        if path.exists() || path.symlink_metadata().is_ok() {
+            return Err(invalid("native submit evidence exists; cannot abandon"));
+        }
+    }
+    tx.execute(
+        "UPDATE dispatch SET status='done',result='abandoned_pre_submit',updated_at=?2 WHERE id=?1",
+        params![id, now()],
+    )?;
+    tx.execute(
+        "INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+        params![reason, now()],
+    )?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id": id, "status": "done", "result": "abandoned_pre_submit", "outbox_status": "indeterminate", "attempt_number": expected_attempt}),
+    )
+}
 pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Error>> {
     surface_pause(root, Some(reason))?;
     Ok(())
@@ -1872,6 +1967,11 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 dispatch_id,
                 reason,
             } => restore_queued(root, dispatch_id, &reason)?,
+            DispatchAction::AbandonUnsent {
+                dispatch_id,
+                reason,
+                expected_attempt,
+            } => abandon_unsent(root, dispatch_id, &reason, expected_attempt)?,
         },
         CoordinatorAction::Inbox { action } => match action {
             InboxAction::Reconcile { conversation_id } => inbox_reconcile(root, &conversation_id)?,

@@ -333,6 +333,33 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         self.assertFalse(any(item["request_id"] == "old-owner-orphan" for item in
                              self.coordinator("dispatch", "status")["dispatches"]))
 
+    def test_abandon_unsent_requires_pre_submit_evidence(self):
+        from wx_agent import dispatch
+        queued = self.queue("group", "unknown-pre-submit")
+        dispatch.drain(BINARY, self.ui)
+        channel = self.channels["group"]
+        identity = hashlib.sha256((channel["binding"]["channel_id"] + "\0unknown-pre-submit").encode()).hexdigest()[:48]
+        tid = "send-" + identity
+        evidence = self.root / (tid + ".client-result.json")
+        evidence.write_text(json.dumps({"id": tid, "request_id": "unknown-pre-submit",
+            "attempt_number": 1, "channel_id": channel["binding"]["channel_id"],
+            "session_id": channel["binding"]["session_id"], "status": "indeterminate",
+            "stage": "inspected"}))
+        evidence.chmod(0o600)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_attempt SET result_evidence=? WHERE request_id='unknown-pre-submit' AND attempt_number=1",
+                       (str(evidence),))
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", queued["dispatch_id"],
+                         "--expected-attempt", 1, "--reason", "reviewed pre-submit stop only")
+        self.assertEqual(self.outbox("group", "show", "--request-id", "unknown-pre-submit")
+                         ["status"], "indeterminate")
+        self.assertEqual(self.coordinator("dispatch", "status")["dispatches"][0]["result"],
+                         "abandoned_pre_submit")
+        second = self.queue("private", "unknown-with-submit")
+        dispatch.drain(BINARY, self.ui)
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", second["dispatch_id"],
+                         "--expected-attempt", 1, "--reason", "cannot discard submit uncertainty", okay=False)
+
     def test_reviewed_old_focus_does_not_block_new_send(self):
         from wx_agent import dispatch
         channel = self.channels["group"]

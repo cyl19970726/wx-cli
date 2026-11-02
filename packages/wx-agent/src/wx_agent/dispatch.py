@@ -229,6 +229,10 @@ def main(argv=None):
     review.add_argument("--reason", required=True)
     review.add_argument("--confirm-desktop-safe", action="store_true", required=True)
     review.add_argument("--restore-unattempted", type=int)
+    abandon = sub.add_parser("abandon-unsent")
+    abandon.add_argument("--dispatch-id", type=int, required=True)
+    abandon.add_argument("--expected-attempt", type=int, required=True)
+    abandon.add_argument("--reason", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
     run.add_argument("--seconds", type=float, default=3600)
@@ -263,6 +267,10 @@ def main(argv=None):
             value = call(binary, root, "dispatch", "resume")
         elif args.action == "review":
             value = review_surface(binary, root, args.reason, args.confirm_desktop_safe, args.restore_unattempted)
+        elif args.action == "abandon-unsent":
+            with exclusive(root, "executor.lock"), exclusive(root, "sender.lock"):
+                value = call(binary, root, "dispatch", "abandon-unsent", "--dispatch-id", args.dispatch_id,
+                             "--expected-attempt", args.expected_attempt, "--reason", args.reason)
         else:
             value = call(binary, root, "dispatch", "status")
         print(json.dumps(value, separators=(",", ":")))
