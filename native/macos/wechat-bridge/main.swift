@@ -484,6 +484,26 @@ private func mouseClick(_ point: CGPoint) throws {
     up.post(tap: .cghidEventTap)
 }
 
+private func imageContextCopy(_ point: CGPoint) throws {
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard let down = CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
+                             mouseCursorPosition: point, mouseButton: .right),
+          let up = CGEvent(mouseEventSource: source, mouseType: .rightMouseUp,
+                           mouseCursorPosition: point, mouseButton: .right),
+          let copy = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: true),
+          let copyUp = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: false) else {
+        throw Failure("Could not construct image context Copy")
+    }
+    down.post(tap: .cghidEventTap)
+    usleep(100_000)
+    up.post(tap: .cghidEventTap)
+    usleep(200_000)
+    copy.flags = .maskCommand
+    copyUp.flags = .maskCommand
+    copy.post(tap: .cghidEventTap)
+    copyUp.post(tap: .cghidEventTap)
+}
+
 private func key(_ code: CGKeyCode, command: Bool = false) throws {
     guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
           let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
@@ -662,7 +682,7 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
             guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
                 throw Failure("Clipboard changed before staged image Copy")
             }
-            try key(8, command: true)
+            try imageContextCopy(imagePoint)
             try await Task.sleep(nanoseconds: 250_000_000)
             copiedCount = board.changeCount
         }
