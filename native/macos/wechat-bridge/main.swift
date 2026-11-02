@@ -488,24 +488,30 @@ private func mouseClick(_ point: CGPoint) throws {
     up.post(tap: .cghidEventTap)
 }
 
-private func imageContextCopy(_ point: CGPoint) throws {
+private func imageContextCopy(_ point: CGPoint, expectedPID: Int32) throws {
     let source = CGEventSource(stateID: .hidSystemState)
     guard let down = CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
                              mouseCursorPosition: point, mouseButton: .right),
           let up = CGEvent(mouseEventSource: source, mouseType: .rightMouseUp,
-                           mouseCursorPosition: point, mouseButton: .right),
-          let copy = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: true),
-          let copyUp = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: false) else {
+                           mouseCursorPosition: point, mouseButton: .right) else {
         throw Failure("Could not construct image context Copy")
     }
     down.post(tap: .cghidEventTap)
     usleep(100_000)
     up.post(tap: .cghidEventTap)
-    usleep(200_000)
-    copy.flags = .maskCommand
-    copyUp.flags = .maskCommand
-    copy.post(tap: .cghidEventTap)
-    copyUp.post(tap: .cghidEventTap)
+    usleep(400_000)
+    let app = AXUIElementCreateApplication(expectedPID)
+    let nodes = traverse(app, maxNodes: 500)
+    let labels = Set(["复制", "Copy"])
+    let copies = nodes.filter { node in
+        node.role == kAXMenuItemRole as String && labels.contains(node.title)
+    }
+    guard copies.count == 1, let copy = copies.first else {
+        throw Failure("Image context menu has no unique Copy action")
+    }
+    guard AXUIElementPerformAction(copy.element, kAXPressAction as CFString) == .success else {
+        throw Failure("Image context Copy action was not accepted")
+    }
 }
 
 private func key(_ code: CGKeyCode, command: Bool = false) throws {
@@ -686,7 +692,7 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
             guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
                 throw Failure("Clipboard changed before staged image Copy")
             }
-            try imageContextCopy(imagePoint)
+            try imageContextCopy(imagePoint, expectedPID: state.expectedPID)
             try await Task.sleep(nanoseconds: 250_000_000)
             copiedCount = board.changeCount
         }
