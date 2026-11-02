@@ -64,6 +64,10 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 同一 macOS 桌面的配置共用原 `ui_dir`，即唯一协调器根目录。`executor.lock` 排除多个执行循环；Rust 在原 `sender.lock` 内核验领取、旧 helper、窗口和权限，然后才持久记录 attempt。锁传递给 driver，避免重复自锁；父进程退出后 driver 仍持有相同锁。原 helper 未解决标记继续阻止下一次 GUI 操作。正文、图片、目标与 attempt 均在原 Rust outbox；协调器只保存引用与调度信息。
 
+多个会话可以同时提交意图；执行器逐项领取，用该项 channel 的 driver 切到对应目标，核对精确标题、群/私聊类型及草稿后提交，完成本地出站核验再释放桌面。执行期间第二个执行器返回 busy，其他会话仍可读取。队列不依赖默认 selected_id，也不在上一个发送的剪贴板、准备或提交阶段切换会话。
+
+切换会话时，系统输入法提示可能改变空输入框的外观。私有 sender 配置可在 `empty_composer_reference` 之外提供至多两个 `empty_composer_alternates`，格式同为 `{path, sha256}`。每一张都必须是已人工确认无草稿的完整输入区截图，位于私有 UI 目录，尺寸、权限和摘要独立校验。接受其中一张完整像素匹配；不屏蔽提示区域或容忍其他文字/图片。原生准备与提交必须使用同一套参考图，恢复原尝试也必须保留它已使用的参考集合。
+
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 
 文字和图片按全局就绪顺序执行，同会话前项失败会阻止后项越过。图文使用相同 `--batch-id` 和从 0 开始的 `--part-index`；即使 part 1 先入队，也等 part 0 成功。每部分独立 request ID，不提供原子图文事务。`--priority 0/1/2` 分别表示显式人工、普通业务、主动通知；只影响下次选择，等待超过 300 秒优先按先来顺序，不能越过同会话因果前项。`--expires-at UNIX_SECONDS` 冻结期限，过期返回 owner 检查，不消耗 attempt。图片冻结、输入变化拒绝、像素与出站内容核验沿用[图片合同](IMAGE_SEND_VALIDATION_20261024.md)。队列与 `focus` 共用暂停语义，不在另一个发送中途切窗。

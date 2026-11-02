@@ -22,6 +22,7 @@ private struct Command: Decodable {
     let expectedDraft: String?
     let expectedDraftMedia: ImageMedia?
     let emptyComposerReference: EmptyComposerReference?
+    let emptyComposerAlternates: [EmptyComposerReference]?
     let expectedPID: Int32?
     let expectedWindowID: UInt32?
     let expectedFrame: RectInput?
@@ -253,6 +254,7 @@ private struct VisualStage: Codable {
     let expectedDraft: String
     let expectedDraftMedia: ImageMedia?
     let emptyComposerReference: EmptyComposerReference?
+    let emptyComposerAlternates: [EmptyComposerReference]?
     let expectedPID: Int32
     let expectedWindowID: UInt32
     let expectedFrame: RectInput
@@ -307,6 +309,14 @@ private func exclusiveMarker(_ url: URL) throws {
 
 private func visualInputs(_ command: Command) throws -> VisualStage {
     let suppliedText = command.text ?? command.body ?? ""
+    let alternates = command.emptyComposerAlternates ?? []
+    let references = [command.emptyComposerReference].compactMap { $0 } + alternates
+    guard alternates.count <= 2,
+          alternates.isEmpty || command.emptyComposerReference != nil,
+          Set(references.map(\.path)).count == references.count,
+          Set(references.map(\.sha256)).count == references.count else {
+        throw Failure("Empty composer references must be a bounded, distinct calibrated set")
+    }
     guard command.text == nil || command.body == nil || command.text == command.body,
           let targetGroup = command.targetGroup,
           let targetKind = command.targetKind,
@@ -347,6 +357,7 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
                        expectedDraft: VisualParameters.canonicalNewlines(expectedDraft),
                        expectedDraftMedia: command.expectedDraftMedia,
                        emptyComposerReference: command.emptyComposerReference,
+                       emptyComposerAlternates: command.emptyComposerAlternates,
                        expectedPID: pid, expectedWindowID: windowID,
                        expectedFrame: frame, composerRect: composer, buttonPoint: button)
 }
@@ -360,7 +371,8 @@ private func sameVisualInputs(_ a: VisualStage, _ b: VisualStage) -> Bool {
     a.expectedWindowID == b.expectedWindowID && a.expectedFrame == b.expectedFrame &&
     a.composerRect == b.composerRect && a.buttonPoint == b.buttonPoint &&
     a.expectedDraftMedia == b.expectedDraftMedia &&
-    a.emptyComposerReference == b.emptyComposerReference && a.media == b.media
+    a.emptyComposerReference == b.emptyComposerReference &&
+    a.emptyComposerAlternates == b.emptyComposerAlternates && a.media == b.media
 }
 
 private func screenshotText(_ image: CGImage, rect: CGRect) throws -> [String] {
@@ -526,7 +538,8 @@ private func key(_ code: CGKeyCode, command: Bool = false) throws {
 }
 
 private func readSelectedDraft(_ state: VisualStage, step: String, expected: String) async throws -> String {
-    let reference = try state.emptyComposerReference?.load(in: outputDirectory, rect: state.composerRect.rect)
+    let approved = [state.emptyComposerReference].compactMap { $0 } + (state.emptyComposerAlternates ?? [])
+    let references = try approved.map { try $0.load(in: outputDirectory, rect: state.composerRect.rect) }
     let (window, _, _) = try await freshVisual(state, step: "\(step)-before-click", draft: nil)
     let clickPoint = CGPoint(x: state.composerRect.x + 25, y: state.composerRect.y + 20)
     try mouseClick(globalPoint(clickPoint, window: window))
@@ -550,15 +563,15 @@ private func readSelectedDraft(_ state: VisualStage, step: String, expected: Str
         let copied = board.string(forType: .string)
         var visuallyBlank = false
         if expected.isEmpty && afterCount == ownedCount {
-            for observation in 0..<(reference == nil ? 1 : 3) {
+            for observation in 0..<(references.isEmpty ? 1 : 3) {
                 guard board.changeCount == ownedCount, board.string(forType: .string) == sentinel else {
                     throw Failure("Clipboard changed during empty draft verification")
                 }
                 let suffix = observation == 0 ? "" : "-\(observation)"
                 let (_, image, _) = try await freshVisual(state, step: "\(step)-empty-check\(suffix)", draft: nil)
-                if let reference {
+                if !references.isEmpty {
                     visuallyBlank = VisualParameters.matchesEmptyComposer(image, rect: state.composerRect.rect,
-                                                                         reference: reference)
+                                                                         references: references)
                 } else {
                     visuallyBlank = (try? requireDraft(image, rect: state.composerRect.rect, expected: "")) != nil
                 }
@@ -566,7 +579,7 @@ private func readSelectedDraft(_ state: VisualStage, step: String, expected: Str
                     throw Failure("Clipboard changed during empty draft verification")
                 }
                 if visuallyBlank { break }
-                if reference != nil && observation < 2 { try await Task.sleep(nanoseconds: 300_000_000) }
+                if !references.isEmpty && observation < 2 { try await Task.sleep(nanoseconds: 300_000_000) }
             }
         }
         guard VisualParameters.copyIsExpected(expected: expected, sentinel: sentinel,

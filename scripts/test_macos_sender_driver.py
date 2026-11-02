@@ -70,6 +70,47 @@ class SenderTests(unittest.TestCase):
             with self.assertRaises(driver.Refused):
                 driver.validate_empty_composer_reference(config)
 
+    def test_empty_composer_alternates_are_bounded_pinned_and_forwarded(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            references = []
+            for index in range(4):
+                path = ui / (str(index) + ".png")
+                raw = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 400, 80) + bytes([index])
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                references.append({"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()})
+            config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_pid=42,
+                          composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                          button_point={"x": 800, "y": 610}, empty_composer_reference=references[0],
+                          empty_composer_alternates=references[1:3])
+            driver.validate_empty_composer_reference(config)
+            self.assertEqual(driver._prepare_command(self.request, config)["emptyComposerAlternates"], references[1:3])
+            for changes in ({"empty_composer_alternates": references[1:]},
+                            {"empty_composer_alternates": [references[0]]},
+                            {"empty_composer_reference": None},
+                            {"empty_composer_alternates": "invalid"},
+                            {"empty_composer_alternates": [dict(references[1], sha256="0" * 64)]}):
+                with self.subTest(changes=changes), self.assertRaises(driver.Refused):
+                    driver.validate_empty_composer_reference(dict(config, **changes))
+
+    def test_recovery_preserves_calibrated_alternates(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_unsent_artifacts(root, modern=True)
+            alternate = {"path": str(Path(root) / "indicator.png"), "sha256": "2" * 64}
+            config["empty_composer_alternates"] = [alternate]
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            for suffix in (".prepare-visual.job.json", ".visual-state.json"):
+                path = Path(root) / (tid + suffix)
+                driver.private_update(path, dict(driver.private_read(path), emptyComposerAlternates=[alternate]))
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                for replacement in (None, [], [dict(alternate, sha256="3" * 64)]):
+                    with self.assertRaisesRegex(driver.Refused, "prior empty composer alternates differ"):
+                        driver.prove_unsent(recovery, dict(config, empty_composer_alternates=replacement),
+                                            2, driver.time.monotonic() + 3, persist=False)
+
     def test_recovery_preserves_reference_and_allows_reviewed_addition(self):
         with tempfile.TemporaryDirectory() as root:
             request, config, tid = self._prior_unsent_artifacts(root, modern=True)

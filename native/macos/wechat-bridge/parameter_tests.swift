@@ -310,9 +310,10 @@ import ImageIO
     }
 
     static func emptyComposerChecks() {
-        func image(_ changed: Bool = false) -> CGImage {
+        func image(_ changed: Bool = false, unexpectedDraft: Bool = false) -> CGImage {
             var bytes = [UInt8](repeating: 255, count: 4 * 3 * 4)
             if changed { bytes[0] = 254 }
+            if unexpectedDraft { bytes[4] = 253 }
             let provider = CGDataProvider(data: Data(bytes) as CFData)!
             return CGImage(width: 4, height: 3, bitsPerComponent: 8, bitsPerPixel: 32,
                 bytesPerRow: 16, space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -322,6 +323,14 @@ import ImageIO
         let original = image(), rect = CGRect(x: 0, y: 0, width: 4, height: 3)
         precondition(VisualParameters.matchesEmptyComposer(original, rect: rect, reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(image(true), rect: rect, reference: original))
+        let indicator = image(true)
+        precondition(VisualParameters.matchesEmptyComposer(indicator, rect: rect, references: [original, indicator]))
+        precondition(!VisualParameters.matchesEmptyComposer(indicator, rect: rect, references: [original]))
+        precondition(!VisualParameters.matchesEmptyComposer(image(true, unexpectedDraft: true),
+            rect: rect, references: [original, indicator]))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect, references: []))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect,
+            references: [original, indicator, original, indicator]))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 1, dy: 0), reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: CGRect(x: 0, y: 0, width: 3, height: 3), reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 0.1, dy: 0), reference: original))

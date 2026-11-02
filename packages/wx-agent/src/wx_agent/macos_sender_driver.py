@@ -197,6 +197,19 @@ def validate_media(media):
 
 def validate_empty_composer_reference(config):
     reference = config.get("empty_composer_reference")
+    alternates = config.get("empty_composer_alternates", [])
+    if (not isinstance(alternates, list) or len(alternates) > 2
+            or alternates and reference is None):
+        raise Refused("empty composer alternates require a bounded calibrated set")
+    references = ([reference] if reference is not None else []) + alternates
+    for item in references:
+        _validate_empty_composer_reference(config, item)
+    if (len({item["path"] for item in references}) != len(references)
+            or len({item["sha256"] for item in references}) != len(references)):
+        raise Refused("empty composer references must be distinct")
+
+
+def _validate_empty_composer_reference(config, reference):
     if reference is None:
         return
     if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
@@ -437,6 +450,8 @@ def _prepare_command(request, config, window_id=None, frame=None, focus_id=None)
         command["text"] = request["text"]
     if config.get("empty_composer_reference") is not None:
         command["emptyComposerReference"] = config["empty_composer_reference"]
+    if config.get("empty_composer_alternates"):
+        command["emptyComposerAlternates"] = config["empty_composer_alternates"]
     return command
 
 
@@ -518,13 +533,16 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
             raise Refused("prior attempt text or binding differs")
     if any(state.get(key) != job.get(key) for key in
            ("id", "text", "targetGroup", "expectedDraft", "expectedPID", "expectedWindowID",
-            "expectedFrame", "composerRect", "buttonPoint", "emptyComposerReference")):
+            "expectedFrame", "composerRect", "buttonPoint", "emptyComposerReference", "emptyComposerAlternates")):
         raise Refused("prior prepare state differs from its job")
     # A reviewed upgrade may add calibration to an old attempt. Once an attempt
     # used a reference, recovery must retain that exact immutable reference.
     if (job.get("emptyComposerReference") is not None
             and job["emptyComposerReference"] != config.get("empty_composer_reference")):
         raise Refused("prior empty composer reference differs")
+    if (job.get("emptyComposerAlternates") is not None
+            and job["emptyComposerAlternates"] != config.get("empty_composer_alternates")):
+        raise Refused("prior empty composer alternates differ")
     # Inspect and focus must be complete, and every launched job must have a terminal result.
     expected_jobs = {old_tid + ".prepare-visual.job.json",
                      old_tid + "-inspect.inspect.job.json",

@@ -148,6 +148,13 @@ enum VisualParameters {
         return current == expected
     }
 
+    // Each approved appearance still compares the entire composer exactly.
+    // This permits calibrated input indicators without ignoring any pixels.
+    static func matchesEmptyComposer(_ image: CGImage, rect: CGRect, references: [CGImage]) -> Bool {
+        guard !references.isEmpty, references.count <= 3 else { return false }
+        return references.contains { matchesEmptyComposer(image, rect: rect, reference: $0) }
+    }
+
     static func withinFocusSearchBudget(_ elapsed: TimeInterval) -> Bool {
         elapsed.isFinite && elapsed >= 0 && elapsed < 6
     }
