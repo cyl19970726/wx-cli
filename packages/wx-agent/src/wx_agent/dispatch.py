@@ -193,8 +193,10 @@ def review_surface(binary, root, reason, confirm_desktop_safe, restore_unattempt
         ids = call(binary, root, "status")["conversations"]
         if not ids:
             raise DispatchError("no registered desktop driver")
-        binding = call(binary, root, "status", "--conversation-id", ids[0])
-        driver = Path(binding["channel_state_dir"]) / "conversation-sender"
+        drivers = []
+        for cid in ids:
+            binding = call(binary, root, "status", "--conversation-id", cid)
+            drivers.append(Path(binding["channel_state_dir"]) / "conversation-sender")
         if restore_unattempted is not None:
             queue = call(binary, root, "dispatch", "status")
             restored = [item for item in queue.get("dispatches", [])
@@ -203,12 +205,13 @@ def review_surface(binary, root, reason, confirm_desktop_safe, restore_unattempt
                 raise DispatchError("unattempted dispatch is unavailable")
             binding = call(binary, root, "status", "--conversation-id",
                            restored[0]["conversation_id"])
-            driver = Path(binding["channel_state_dir"]) / "conversation-sender"
-        result = subprocess.run([str(driver), "--dispatch-preflight"],
-                                env=dict(os.environ, WX_DESKTOP_LOCK_FD=str(fd)), pass_fds=(fd,),
-                                capture_output=True, timeout=30)
-        if result.returncode or json.loads(result.stdout).get("ready") is not True:
-            raise DispatchError("fresh desktop/helper preflight did not pass")
+            drivers = [Path(binding["channel_state_dir"]) / "conversation-sender"]
+        for driver in drivers:
+            result = subprocess.run([str(driver), "--dispatch-preflight"],
+                                    env=dict(os.environ, WX_DESKTOP_LOCK_FD=str(fd)), pass_fds=(fd,),
+                                    capture_output=True, timeout=30)
+            if result.returncode or json.loads(result.stdout).get("ready") is not True:
+                raise DispatchError("fresh desktop/helper preflight did not pass")
         if restore_unattempted is not None:
             call(binary,root,"dispatch","restore-queued","--dispatch-id",restore_unattempted,"--reason",reason)
         return call(binary, root, "dispatch", "review", "--reason", reason)

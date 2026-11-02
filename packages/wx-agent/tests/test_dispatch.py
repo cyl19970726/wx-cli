@@ -65,6 +65,27 @@ class DispatchRoutingTests(unittest.TestCase):
             self.assertEqual(result["status"], "ready")
             self.assertTrue(run.call_args.args[0][0].endswith("group/conversation-sender"))
 
+    def test_review_preflights_every_managed_conversation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bindings = {name: {"channel_state_dir": str(root / name), "conversation_id": name}
+                        for name in ("private", "group")}
+            def call(_, __, *parts):
+                if parts == ("status",):
+                    return {"conversations": ["private", "group"]}
+                if parts[:2] == ("status", "--conversation-id"):
+                    return bindings[parts[2]]
+                if parts[:2] == ("dispatch", "review"):
+                    return {"status": "ready"}
+                raise AssertionError(parts)
+            def driver(args, env, pass_fds, capture_output, timeout):
+                return type("Result", (), {"returncode": 0, "stdout": json.dumps({"ready": True})})()
+            with mock.patch.object(dispatch, "call", side_effect=call), \
+                    mock.patch.object(dispatch.subprocess, "run", side_effect=driver) as run:
+                self.assertEqual(dispatch.review_surface("/bin/wx-cli", root, "all targets ready", True)["status"], "ready")
+            self.assertEqual([item.args[0][0] for item in run.call_args_list],
+                             [str(root / "private/conversation-sender"), str(root / "group/conversation-sender")])
+
 
 if __name__ == "__main__":
     unittest.main()
