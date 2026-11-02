@@ -1063,8 +1063,8 @@ fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn E
             "only a current-owner, unattempted managed intent can return to queue",
         ));
     }
-    let original: (Option<String>, Option<i64>) = intent(&b, &request)
-        .map(|item| (item.owner, item.epoch))?;
+    let original: (Option<String>, Option<i64>) =
+        intent(&b, &request).map(|item| (item.owner, item.epoch))?;
     if original.0.as_deref() != Some(b.owner.as_str()) || original.1 != Some(epoch) {
         return Err(invalid(
             "unattempted intent does not match its original owner epoch",
