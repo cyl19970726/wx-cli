@@ -165,9 +165,11 @@ enum MediaSupport {
         guard let items = board.pasteboardItems, items.count == 1, let item = items.first else {
             throw MediaFailure.invalid("Composer copy did not contain one image item")
         }
-        let imageTypes: Set<NSPasteboard.PasteboardType> = [.png, .tiff]
-        guard !item.types.isEmpty, item.types.allSatisfy({ imageTypes.contains($0) }) else {
-            throw MediaFailure.invalid("Composer copy contains text, file, or other non-image payload")
+        // WeChat supplies a file URL and rich-edit metadata alongside its
+        // raster image. Only the decoded bitmap is used as composer evidence;
+        // the other representations never become a send or file-read path.
+        guard !item.types.isEmpty else {
+            throw MediaFailure.invalid("Composer copy contains no image item")
         }
         var provenTypes: [String] = []
         for (type, allowed) in [(NSPasteboard.PasteboardType.png, Set(["public.png"])),

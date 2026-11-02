@@ -460,20 +460,17 @@ import ImageIO
             _ = try MediaSupport.copiedImage(from: textOnly, expected: loaded.pixels)
             preconditionFailure("text copy accepted as image evidence")
         } catch {}
-        func rejectMixed(_ type: NSPasteboard.PasteboardType, _ data: Data) {
+        func acceptWeChatMixed(_ type: NSPasteboard.PasteboardType, _ data: Data) {
             let mixed = NSPasteboard(name: NSPasteboard.Name("codex-image-mixed-" + UUID().uuidString))
             mixed.clearContents()
             let item = NSPasteboardItem()
             precondition(item.setData(png, forType: .png))
             precondition(item.setData(data, forType: type))
             precondition(mixed.writeObjects([item]))
-            do {
-                _ = try MediaSupport.copiedImage(from: mixed, expected: loaded.pixels)
-                preconditionFailure("mixed image and attachment payload accepted")
-            } catch {}
+            precondition(try! MediaSupport.copiedImage(from: mixed, expected: loaded.pixels) == "public.png")
         }
-        rejectMixed(NSPasteboard.PasteboardType("public.file-url"), Data("file:///tmp/other".utf8))
-        rejectMixed(.rtf, Data("{\\rtf1 extra}".utf8))
+        acceptWeChatMixed(NSPasteboard.PasteboardType("public.file-url"), Data("file:///tmp/other".utf8))
+        acceptWeChatMixed(.rtf, Data("{\\rtf1 extra}".utf8))
         let multipage = NSMutableData()
         let multipageDestination = CGImageDestinationCreateWithData(multipage, "public.tiff" as CFString, 2, nil)!
         CGImageDestinationAddImage(multipageDestination, image, nil)
