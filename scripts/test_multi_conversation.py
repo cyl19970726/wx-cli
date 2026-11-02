@@ -333,6 +333,28 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         self.assertFalse(any(item["request_id"] == "old-owner-orphan" for item in
                              self.coordinator("dispatch", "status")["dispatches"]))
 
+    def test_reviewed_old_focus_does_not_block_new_send(self):
+        from wx_agent import dispatch
+        channel = self.channels["group"]
+        queued = self.queue("group", "send-after-reviewed-focus")
+        self.coordinator("configure", "--conversation-id", channel["id"],
+                         "--expected-epoch", channel["epoch"], "--owner", "owner_group",
+                         "--input", "pull", "--reply-policy", "authorized")
+        channel["epoch"] += 1
+        self.coordinator("dispatch", "restore-queued", "--dispatch-id", queued["dispatch_id"],
+                         "--reason", "reviewed unattempted send after focus")
+        with sqlite3.connect(self.ui / "coordinator.sqlite3") as db:
+            db.execute("INSERT INTO dispatch(conversation_id,request_id,operation,channel_id,epoch,status,result,created_at,updated_at) VALUES(?,?,?,?,?,'blocked','focus_failed_requires_review',1,1)",
+                       (channel["id"], "old-focus", "focus", channel["binding"]["channel_id"], channel["epoch"] - 1))
+            db.execute("INSERT INTO dispatch(conversation_id,request_id,operation,channel_id,epoch,status,result,created_at,updated_at) VALUES(?,?,?,?,?,'unknown','helper_disappeared',1,1)",
+                       (self.channels["private"]["id"], "unknown-focus", "focus", self.channels["private"]["binding"]["channel_id"], self.channels["private"]["epoch"]))
+        other = self.queue("private", "send-after-unknown-focus")
+        dispatch.drain(BINARY, self.ui)
+        self.assertEqual(self.outbox("private", "show", "--request-id", "send-after-unknown-focus")
+                         ["attempt_number"], 0)
+        self.assertEqual(self.outbox("group", "show", "--request-id", "send-after-reviewed-focus")
+                         ["attempt_number"], 1)
+
     def test_rapid_incoming_events_form_one_frozen_delivery(self):
         group = self.channels["group"]
         with sqlite3.connect(group["source"] / "message/message_0.db") as db:
