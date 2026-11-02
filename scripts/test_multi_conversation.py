@@ -349,11 +349,17 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
             db.execute("INSERT INTO dispatch(conversation_id,request_id,operation,channel_id,epoch,status,result,created_at,updated_at) VALUES(?,?,?,?,?,'unknown','helper_disappeared',1,1)",
                        (self.channels["private"]["id"], "unknown-focus", "focus", self.channels["private"]["binding"]["channel_id"], self.channels["private"]["epoch"]))
         other = self.queue("private", "send-after-unknown-focus")
+        older = self.queue("group", "send-blocked-by-old-epoch")
+        with sqlite3.connect(self.ui / "coordinator.sqlite3") as db:
+            db.execute("UPDATE dispatch SET status='blocked',result='owner_epoch_changed',epoch=? WHERE id=?",
+                       (channel["epoch"] - 1, older["dispatch_id"]))
         dispatch.drain(BINARY, self.ui)
         self.assertEqual(self.outbox("private", "show", "--request-id", "send-after-unknown-focus")
                          ["attempt_number"], 0)
         self.assertEqual(self.outbox("group", "show", "--request-id", "send-after-reviewed-focus")
                          ["attempt_number"], 1)
+        self.assertEqual(self.outbox("group", "show", "--request-id", "send-blocked-by-old-epoch")
+                         ["attempt_number"], 0)
 
     def test_rapid_incoming_events_form_one_frozen_delivery(self):
         group = self.channels["group"]
