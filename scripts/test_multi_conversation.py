@@ -278,6 +278,11 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
     def test_restore_queued_requires_review_and_zero_attempt(self):
         from wx_agent import dispatch
         queued = self.queue("group", "group-restore-unattempted")
+        channel = self.channels["group"]
+        self.coordinator("configure", "--conversation-id", channel["id"],
+                         "--expected-epoch", channel["epoch"], "--owner", "owner_group",
+                         "--input", "pull", "--reply-policy", "authorized")
+        channel["epoch"] += 1
         (self.root / "deny-preflight").write_text("synthetic refusal")
         dispatch.drain(BINARY, self.ui)
         self.assertEqual(self.outbox("group", "show", "--request-id", "group-restore-unattempted")
@@ -287,11 +292,22 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         with sqlite3.connect(self.ui / "coordinator.sqlite3") as db:
             db.execute("UPDATE dispatch SET status='unknown',result='synthetic_abandoned_claim' "
                        "WHERE id=?", (queued["dispatch_id"],))
+            db.execute("UPDATE surface SET active_dispatch=NULL")
         self.coordinator("dispatch", "restore-queued", "--dispatch-id", queued["dispatch_id"],
                          "--reason", "reviewed synthetic helper refusal")
         self.assertEqual(self.coordinator("dispatch", "status")["dispatches"][0]["status"],
                          "queued")
+        # Simulate interruption after the outbox epoch commit but before the
+        # dispatch journal catches up. Only this recorded transition resumes.
+        with sqlite3.connect(self.ui / "coordinator.sqlite3") as db:
+            db.execute("UPDATE dispatch SET epoch=?,status='blocked' WHERE id=?",
+                       (channel["epoch"] - 1, queued["dispatch_id"]))
+            db.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?,?,0)",
+                       (f"restore-pending:{queued['dispatch_id']}:{channel['epoch'] - 1}:{channel['epoch']}", 1))
+        self.coordinator("dispatch", "restore-queued", "--dispatch-id", queued["dispatch_id"],
+                         "--reason", "resume exact committed recovery")
         (self.root / "deny-preflight").unlink()
+        self.coordinator("dispatch", "pause", "--reason", "synthetic final recovery")
         self.coordinator("dispatch", "review", "--reason", "synthetic helper now ready")
         dispatch.drain(BINARY, self.ui)
         self.assertEqual(self.outbox("group", "show", "--request-id", "group-restore-unattempted")

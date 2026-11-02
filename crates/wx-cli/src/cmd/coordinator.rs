@@ -1057,35 +1057,54 @@ fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn E
         || !matches!(status.as_str(), "unknown" | "blocked")
         || b.control != "active"
         || b.reply_policy != "authorized"
-        || !intent(&b, &request)?.ready_for(&b)
     {
         return Err(invalid(
             "only a current-owner, unattempted managed intent can return to queue",
         ));
     }
-    let original: (Option<String>, Option<i64>) =
-        intent(&b, &request).map(|item| (item.owner, item.epoch))?;
-    if original.0.as_deref() != Some(b.owner.as_str()) || original.1 != Some(epoch) {
+    let marker = format!("restore-pending:{id}:{epoch}:{}", b.epoch);
+    let pending: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM surface_review WHERE reason=?1",
+            [&marker],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let original = intent(&b, &request)?;
+    if !matches!(
+        original.status.as_str(),
+        "managed_queued" | "managed_media_queued"
+    ) || original.attempts != 0
+        || original.owner.as_deref() != Some(b.owner.as_str())
+        || original.epoch != Some(epoch) && !(pending.is_some() && original.epoch == Some(b.epoch))
+    {
         return Err(invalid(
             "unattempted intent does not match its original owner epoch",
         ));
     }
-    // A reviewed configure may advance the owner generation before this
-    // recovery. Keep the immutable content and reconcile only this unattempted
-    // original intent to that current generation; never replay an attempt.
+    // The two SQLite journals cannot commit atomically. First persist this
+    // exact recovery transition; a crash after the outbox commit can then be
+    // safely resumed without reinterpreting any other intent.
+    tx.execute(
+        "INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,0)",
+        params![marker, now()],
+    )?;
+    tx.commit()?;
     let outbox = b.state.join("outgoing.sqlite3");
     let mut outbox = Connection::open_with_flags(&outbox, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let outbox_tx = outbox.transaction_with_behavior(TransactionBehavior::Immediate)?;
     outbox_tx.execute(
         "UPDATE outgoing_intent SET managed_owner=?1,managed_epoch=?2 WHERE request_id=?3 AND managed_owner=?4 AND managed_epoch=?5 AND attempt_number=0 AND status IN ('managed_queued','managed_media_queued')",
-        params![b.owner,b.epoch,request,original.0,original.1],
+        params![b.owner,b.epoch,request,original.owner,original.epoch],
     )?;
     outbox_tx.commit()?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute(
         "UPDATE dispatch SET epoch=?2 WHERE id=?1",
         params![id, b.epoch],
     )?;
     tx.execute("UPDATE dispatch SET status='queued',token=NULL,worker=NULL,lease_until=NULL,result='restored_before_attempt',updated_at=?2 WHERE id=?1",params![id,now()])?;
+    tx.execute("DELETE FROM surface_review WHERE reason=?1", [&marker])?;
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",params![reason,now()])?;
     tx.commit()?;
     Ok(json!({"dispatch_id":id,"status":"queued","request_id":request,"attempt_number":0}))
