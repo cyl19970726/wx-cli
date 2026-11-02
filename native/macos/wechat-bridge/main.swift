@@ -673,6 +673,7 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
         try await Task.sleep(nanoseconds: 250_000_000)
         let board = NSPasteboard.general
         var copiedCount = board.changeCount
+        let copiedTypes = board.pasteboardItems?.flatMap { $0.types.map(\.rawValue) } ?? []
         if copiedCount == owned && board.string(forType: .string) == sentinel {
             let (currentWindow, _, _) = try await freshVisual(state, step: "\(step)-image-fallback-ready", draft: nil)
             guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
@@ -697,7 +698,7 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
             copiedCount = board.changeCount
         }
         guard copiedCount == owned + 1 else {
-            throw Failure("Composer Copy did not replace image sentinel exactly once")
+            throw Failure("Composer Copy did not replace image sentinel exactly once (types: \(copiedTypes.joined(separator: ",")))")
         }
         let type = try MediaSupport.copiedImage(from: board, expected: image.pixels)
         verifiedCopyCount = copiedCount
