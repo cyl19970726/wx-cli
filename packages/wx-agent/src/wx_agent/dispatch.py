@@ -195,6 +195,15 @@ def review_surface(binary, root, reason, confirm_desktop_safe, restore_unattempt
             raise DispatchError("no registered desktop driver")
         binding = call(binary, root, "status", "--conversation-id", ids[0])
         driver = Path(binding["channel_state_dir"]) / "conversation-sender"
+        if restore_unattempted is not None:
+            queue = call(binary, root, "dispatch", "status")
+            restored = [item for item in queue.get("dispatches", [])
+                        if item.get("dispatch_id") == restore_unattempted]
+            if len(restored) != 1:
+                raise DispatchError("unattempted dispatch is unavailable")
+            binding = call(binary, root, "status", "--conversation-id",
+                           restored[0]["conversation_id"])
+            driver = Path(binding["channel_state_dir"]) / "conversation-sender"
         result = subprocess.run([str(driver), "--dispatch-preflight"],
                                 env=dict(os.environ, WX_DESKTOP_LOCK_FD=str(fd)), pass_fds=(fd,),
                                 capture_output=True, timeout=30)
