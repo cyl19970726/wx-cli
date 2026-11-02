@@ -304,7 +304,15 @@ def prepare_driver(settings, entry):
     template.pop("target_group", None)
     config_path, driver_path = _driver_paths(entry)
     ctl.atomic_json(config_path, template)
-    expected = "#!/bin/sh\nexport WX_SENDER_CONFIG=" + shlex.quote(str(config_path)) + "\nexec " + shlex.quote(settings["sender_executable"]) + " \"$@\"\n"
+    command = shlex.quote(settings["sender_executable"])
+    if Path(settings["sender_executable"]).name.startswith("python"):
+        module = Path(settings["sender_executable"]).parent.parent / "lib"
+        versions = sorted(module.glob("python3.*"))
+        require(any((version / "site-packages/wx_agent/macos_sender_driver.py").is_file()
+                    for version in versions), "driver_drift",
+                "candidate Python has no installed sender module")
+        command += " -m wx_agent.macos_sender_driver"
+    expected = "#!/bin/sh\nexport WX_SENDER_CONFIG=" + shlex.quote(str(config_path)) + "\nexec " + command + " \"$@\"\n"
     if driver_path.exists() or driver_path.is_symlink():
         info = driver_path.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and

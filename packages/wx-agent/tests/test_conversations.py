@@ -179,6 +179,21 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.fake.sent,[])
         self.assertFalse(any("must-not-freeze" in box for box in self.fake.outboxes.values()))
 
+    def test_prepare_driver_supports_candidate_python_interpreter(self):
+        state=self.registry/"channel"
+        state.mkdir(mode=0o700)
+        python=self.registry/"venv/bin/python3"
+        python.parent.mkdir(parents=True,mode=0o700)
+        python.write_text("#!/bin/sh\n")
+        python.chmod(0o700)
+        module=self.registry/"venv/lib/python3.9/site-packages/wx_agent/macos_sender_driver.py"
+        module.parent.mkdir(parents=True,mode=0o700)
+        module.write_text("synthetic installed sender")
+        settings=dict(self.settings,sender_executable=str(python))
+        with mock.patch.object(conv,"channel_status",return_value={"binding":{}}):
+            conv.prepare_driver(settings,{"state_dir":str(state),"name":"Synthetic Group","kind":"group"})
+        self.assertIn("-m wx_agent.macos_sender_driver",(state/"conversation-sender").read_text())
+
     def test_candidate_cli_uses_only_stopped_enrolled_controller_without_rewriting_config(self):
         legacy={"wx_cli":"/legacy/bin/wx-cli","state_dir":str(self.registry/"legacy")}
         original=legacy.copy();root=self.registry/"ui"
