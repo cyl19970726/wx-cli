@@ -20,6 +20,7 @@ private struct Command: Decodable {
     let targetKind: TargetKind?
     let focusEvidenceID: String?
     let expectedDraft: String?
+    let expectedDraftMedia: ImageMedia?
     let emptyComposerReference: EmptyComposerReference?
     let expectedPID: Int32?
     let expectedWindowID: UInt32?
@@ -250,6 +251,7 @@ private struct VisualStage: Codable {
     let targetKind: TargetKind
     let focusEvidenceID: String
     let expectedDraft: String
+    let expectedDraftMedia: ImageMedia?
     let emptyComposerReference: EmptyComposerReference?
     let expectedPID: Int32
     let expectedWindowID: UInt32
@@ -343,6 +345,7 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
                        targetGroup: targetGroup,
                        targetKind: targetKind, focusEvidenceID: focusEvidenceID,
                        expectedDraft: VisualParameters.canonicalNewlines(expectedDraft),
+                       expectedDraftMedia: command.expectedDraftMedia,
                        emptyComposerReference: command.emptyComposerReference,
                        expectedPID: pid, expectedWindowID: windowID,
                        expectedFrame: frame, composerRect: composer, buttonPoint: button)
@@ -356,6 +359,7 @@ private func sameVisualInputs(_ a: VisualStage, _ b: VisualStage) -> Bool {
     a.targetKind == b.targetKind && a.focusEvidenceID == b.focusEvidenceID &&
     a.expectedWindowID == b.expectedWindowID && a.expectedFrame == b.expectedFrame &&
     a.composerRect == b.composerRect && a.buttonPoint == b.buttonPoint &&
+    a.expectedDraftMedia == b.expectedDraftMedia &&
     a.emptyComposerReference == b.emptyComposerReference && a.media == b.media
 }
 
@@ -1038,7 +1042,11 @@ private func runVisual(_ command: Command) async throws -> [String: Any] {
         state.stage = "prepare-attempted"
         try writeStage(state)
         let (_, _, lockStatus) = try await freshVisual(state, step: "prepare-start", draft: nil)
-        _ = try await readSelectedDraft(state, step: "old-draft", expected: state.expectedDraft)
+        if let image = input.expectedDraftMedia {
+            _ = try await readSelectedImage(state, image: MediaSupport.load(image), step: "old-image")
+        } else {
+            _ = try await readSelectedDraft(state, step: "old-draft", expected: state.expectedDraft)
+        }
         if let image = sourceImage {
             try await pasteNativeImage(state, image: image, step: "replace-draft")
             let copyType = try await readSelectedImage(state, image: image, step: "new-image")
