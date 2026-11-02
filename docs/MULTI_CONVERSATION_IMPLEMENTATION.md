@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | P0 图片/文字基线 | 复用图片 `3c7ba2c`、生命周期及恢复 `86c1db3`，没有重写基础收发。私聊和测试群文字、测试群四色图片均获用户独立收件确认；图片 Rust 源事件为 cursor 49。Candidate 2 三项权限新鲜检查为 true。 | 私聊旧图片原尝试仍 indeterminate、草稿保留；候选回退的队列原生像素回读尚未完成。 |
 | P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现。Mac mini 两个授权目标同时增量读取，合计 0.086 秒，两页均无新事件；原绑定、consumer、attempt、意图元数据及共享配置均未改动。 | 真实 GUI 并发、接管临界区和人工出站的现场复验仍未完成。0.086 秒是两次空增量轮询，不是历史消息或容量成绩。 |
-| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch；包含意图来源代际、补登记、顺序 batch、优先级老化、到期拦截、原 helper 退出保护、未知结果停通道及零 attempt 核查恢复。17 项编译 CLI 合成集成通过。 | 文字和群图片实机通过，但图片队列原请求仍零 attempt、owner epoch 变化后阻断；自动完成与恢复未通过。 |
+| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch；包含意图来源代际、补登记、顺序 batch、优先级老化、到期拦截、原 helper 退出保护、未知结果停通道及零 attempt 核查恢复。19 项编译 CLI 合成集成通过。真实队列已领取图片 dispatch，并在原生准备阶段停止。 | 原生像素回读未通过，不能称图片队列成功。 |
 | P3 inbox/Session | 持久批次、处理租约、skip/defer/draft/reply、持续待办和决定历史已实现。私聊真实 delivery 1 skip、delivery 2 defer 均有 completed transport turn；两个原 Session 冷续接后 idle/ready。 | 桌面 App 持有的业务 Session 推送及跨宿主推送未接入，原业务 Session 继续主动 CLI。 |
 | P4 运行验收 | 最新四任务 CI 通过；Mac mini 独立构建/安装和 Python 3.9.6 矩阵通过。两个测试绑定完成有界实机验收，发送保持暂停，观察正常停止。 | 真并发现场故障注入和 24 小时连续观察未通过；旧观察约 17 小时 40 分后停止。 |
 
@@ -53,6 +53,16 @@ GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图�
 | 并发与停止 | 群、私聊均 `push/observe`，桌面暂停；手动接管已交还，群 epoch 15、私聊 epoch 3；旧观察进程已正常停止。 | 不宣称 24 小时连续观察通过。 |
 
 原 `wx-multi-20261102-group-image-candidate2-v1` 在 outbox 仍是 `managed_media_queued`、attempt 0，dispatch 6 为 `blocked/owner_epoch_changed`。配置→恢复阶段改变 epoch 时，零 attempt 恢复按原 owner/epoch 拒绝；它没有被重放、换 ID 或把人工发送冒充为其队列完成。私聊旧图片 `wx-multi-20261101-private-image-v1` 仍 `indeterminate`，没有 submit result，草稿保留；历史 queued focus 也保留。因而图片实机收发已通过，队列自动恢复与原图回退的完整端到端验收尚未全部通过。
+
+### 队列恢复与原生图片停止点（2026-11-02 后续）
+
+`20a24d9`、`a32cbd8` 修复零尝试意图在 owner epoch 变化后的恢复，并为协调器/outbox 两个 SQLite 文件记录精确恢复代际；中断后只可续接该转换。`7e4f798` 使旧代际隔离项不再挡住当前队列；未知项仍阻断所属会话。`d45867d` 让桌面审查预检每个受管 sender，而不是只查第一项。`88a5fc8` 保留旧 sender 兼容并支持候选 Python 启动器。
+
+真实 dispatch 11 被领取后，attempt 1 在聚焦阶段停止，没有 submit。`52438e7` 增加 `abandon-unsent`：只有绑定 attempt 的原生报告明确处于提交前、且没有 submit-attempted 或提交状态文件时，才把 dispatch 标为 `abandoned_pre_submit`；outbox 的 indeterminate 不变。dispatch 11 和后续 dispatch 12 均按该证据归档，没有重放；私聊未知图片仍保留。
+
+`8ca44ce`、`bf0deac`、`a61459a` 分别调整图片复制回退、已知同图草稿核验和菜单 Copy 动作。最新 [CI 41456634689](https://github.com/cyl19970726/wx-cli/actions/runs/41456634689) 四项成功，原生构建与参数检查通过。Candidate 3 的实际准备仍报 `Composer Copy did not replace image sentinel exactly once`，没有成功像素回读或 submit。`cd35203` 只增加剪贴板类型诊断，仍需该版本重新授权后实测。
+
+因此，共享队列的恢复与真实领取已有证据，**真实图片队列自动完成仍未通过**。桌面 App 持有的业务 Session 推送、跨宿主推送、真并发故障演练和完整 24 小时观察也仍不通过。
 
 ## Mac mini 部署与保护
 
