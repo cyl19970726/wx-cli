@@ -1178,6 +1178,87 @@ def image_rejection_preflight(request, config):
 
 
 TEXT_BUTTON_REJECTION_ERROR = "Expected exactly one visible Send label in lower conversation pane"
+FOCUS_HEADER_REJECTION_ERROR = "Selected chat header is not exact target and kind"
+
+
+def focus_abandon_preflight(request, config):
+    """Archive only a finished first text focus rejection before preparation."""
+    fields = {"protocol_version", "focus_abandon_protocol_version", "content_kind", "request_id",
+              "attempt_number", "channel_id", "session_id", "account", "talker", "text"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("focus_abandon_protocol_version")) is not int
+            or request["focus_abandon_protocol_version"] != 1 or request["content_kind"] != "text"
+            or type(request["attempt_number"]) is not int or request["attempt_number"] != 1
+            or "target_name" not in config):
+        raise Refused("first focus archive protocol differs")
+    clean = {key: request[key] for key in fields - {"focus_abandon_protocol_version", "content_kind"}}
+    tid = request_ok(clean, config, 1)
+    ui = config["ui_dir"]
+    private(ui, directory=True)
+    if ui.resolve(strict=True) != ui:
+        raise Refused("first focus archive root is not canonical")
+    required = {tid + suffix for suffix in (
+        ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-attempted.json",
+        "-focus.focus-polls.json", "-focus.focus-search-after-click.png")}
+    optional = {tid + "-focus." + suffix for suffix in (
+        "before-search-click.png", "before-search-select.png", "before-search-paste.png",
+        "before-search-copy.png", "search-copy-ready.png", "focus-initial.png",
+        "focus-search-result-main.png", "focus-search-result-popup.png", "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png", "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png")}
+    with recovery_sender_lock(ui / "sender.lock"):
+        deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        before = _rejection_artifact_snapshot(ui, tid, required, optional)
+        report = _read_artifact(ui / (tid + ".client-result.json"))
+        if (report.get("id") != tid or report.get("request_id") != request["request_id"]
+                or report.get("channel_id") != request["channel_id"]
+                or report.get("session_id") != request["session_id"]
+                or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
+                or report.get("stage") != "inspected" or report.get("status") != "indeterminate"
+                or any(k in report for k in ("media_prepared", "media_submitted", "event_cursor",
+                            "focus_evidence_id", "focus_category", "recovery_from_attempt", "observation"))):
+            raise Refused("original first text report is not before preparation")
+        inspect_id, focus_id = tid + "-inspect", tid + "-focus"
+        inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+        if (_read_artifact(ui / (inspect_id + ".inspect.job.json")) != {"id": inspect_id, "action": "inspect"}
+                or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+                or inspected.get("ok") is not True):
+            raise Refused("first focus inspection differs")
+        window_id, frame = inspect_ok(inspected, config)
+        if any(not math.isfinite(frame[k]) for k in ("x", "y", "width", "height")):
+            raise Refused("first focus inspection frame is not finite")
+        expected = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+                    "targetKind": config.get("conversation_kind", "group"), "expectedPID": config["expected_pid"],
+                    "expectedWindowID": window_id, "expectedFrame": frame,
+                    "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
+        if _read_artifact(ui / (focus_id + ".focus-group.job.json")) != expected:
+            raise Refused("first focus job differs from the inspected target")
+        rejected = _read_artifact(ui / (focus_id + ".result.json"))
+        if (set(rejected) != {"id", "ok", "error", "permissions"} or rejected.get("id") != focus_id
+                or rejected.get("ok") is not False or rejected.get("error") != FOCUS_HEADER_REJECTION_ERROR
+                or not _permissions_ok(rejected.get("permissions"))
+                or report.get("error") != "focus failed before message preparation: " + helper_reason(rejected)):
+            raise Refused("first focus did not stop at the exact header rejection")
+        marker = ui / (focus_id + ".focus-attempted.json")
+        if marker.stat().st_size != 0:
+            raise Refused("first focus marker differs")
+        polls = private_read(ui / (focus_id + ".focus-polls.json"))
+        if (not isinstance(polls, list) or not 1 <= len(polls) <= 128
+                or not any(isinstance(p, dict) and p.get("popupSelected") is True
+                           and p.get("popupPresent") is True and p.get("windowCount") == 2
+                           for p in polls)):
+            raise Refused("first focus did not record a selected search row")
+        if _helper_is_live(tid, deadline):
+            raise Refused("first text focus helper is still live")
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        if _rejection_artifact_snapshot(ui, tid, required, optional) != before:
+            raise Refused("first focus artifacts changed during proof")
+    return {"protocol_version": 1, "focus_abandon_protocol_version": 1, "focus_failure_unsent_proven": True}
 
 
 def _text_button_rejection_snapshot(ui, tid):
@@ -1724,6 +1805,24 @@ def run(request, config):
 def main(argv=None):
     os.umask(0o077)
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--focus-abandon-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "focus_abandon_protocol_version": 1,
+                          "before_prepare_only": True, "archive_only": True}, separators=(",", ":")))
+        return 0
+    if argv == ["--focus-abandon-preflight"]:
+        result = {"protocol_version": 1, "focus_abandon_protocol_version": 1, "focus_failure_unsent_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = focus_abandon_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["focus_failure_unsent_proven"] else 1
     if argv == ["--text-button-rejection-capabilities"]:
         print(json.dumps({"protocol_version": 1, "text_button_rejection_protocol_version": 1,
                           "prepared_text_only": True, "submit_marker_forbidden": True}, separators=(",", ":")))

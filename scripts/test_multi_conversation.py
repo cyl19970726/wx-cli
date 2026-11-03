@@ -97,6 +97,34 @@ if sys.argv[1:] == ['--abandon-capabilities']:
         capability={'unsupported':True}
     print(json.dumps(capability))
     sys.exit(0)
+if sys.argv[1:] == ['--focus-abandon-capabilities']:
+    capability={'protocol_version':1,'focus_abandon_protocol_version':1,
+                'before_prepare_only':True,'archive_only':True}
+    if (root/'deny-focus-abandon-capability').exists():
+        capability['archive_only']=False
+    if (root/'malformed-focus-abandon-capability').exists():
+        capability['extra']=True
+    print(json.dumps(capability))
+    sys.exit(0)
+if sys.argv[1:] == ['--focus-abandon-preflight']:
+    (root/'focus-abandon-payload-received').write_text('yes')
+    candidate=json.load(sys.stdin)
+    exact=set(candidate)=={'protocol_version','focus_abandon_protocol_version','content_kind',
+                           'request_id','attempt_number','channel_id','session_id','account','talker','text'}
+    valid=(exact and candidate['protocol_version']==1 and
+           candidate['focus_abandon_protocol_version']==1 and
+           candidate['content_kind']=='text' and candidate['attempt_number']==1 and
+           candidate['text']=='synthetic reply' and
+           int(os.environ['WX_DESKTOP_LOCK_FD'])>=0 and
+           not (root/'deny-focus-abandon-proof').exists())
+    if not valid:
+        sys.exit(3)
+    proof={'protocol_version':1,'focus_abandon_protocol_version':1,
+           'focus_failure_unsent_proven':True}
+    if (root/'malformed-focus-abandon-proof').exists():
+        proof['extra']=True
+    print(json.dumps(proof))
+    sys.exit(0)
 if sys.argv[1:] == ['--abandon-preflight']:
     (root/'abandon-payload-received').write_text('yes')
     candidate=json.load(sys.stdin)
@@ -521,6 +549,102 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
                          okay=False)
         self.assertEqual(self.outbox("private", "show", "--request-id", "unknown-image-abandon")
                          ["status"], "indeterminate")
+
+    def test_focus_failure_archive_only_preserves_original_attempt_and_batch(self):
+        from wx_agent import dispatch
+        channel = self.channels["private"]
+        request = "unknown-focus-archive"
+        parent = self.queue("private", request, batch_id="focus-archive", part_index=0)
+        child = self.queue("private", "focus-archive-child", batch_id="focus-archive", part_index=1)
+        dispatch.drain(BINARY, self.ui)
+        tid = "send-" + hashlib.sha256((channel["binding"]["channel_id"] + "\0" + request).encode()).hexdigest()[:48]
+        evidence = self.ui / (tid + ".client-result.json")
+        report_error = "focus failed before message preparation: target group header mismatch"
+        native_error = "Selected chat header is not exact target and kind"
+        report = {"id": tid, "request_id": request, "attempt_number": 1,
+                  "channel_id": channel["binding"]["channel_id"],
+                  "session_id": channel["binding"]["session_id"],
+                  "status": "indeterminate", "stage": "inspected", "error": report_error}
+        permissions = {"accessibility": True, "postEvents": True, "screenRecording": True}
+        artifacts = {
+            tid + ".client-result.json": report,
+            tid + "-inspect.inspect.job.json": {"id": tid + "-inspect", "action": "inspect"},
+            tid + "-inspect.result.json": {"id": tid + "-inspect", "ok": True},
+            tid + "-focus.focus-group.job.json": {"id": tid + "-focus", "action": "focus-group"},
+            tid + "-focus.result.json": {"id": tid + "-focus", "ok": False,
+                                          "error": native_error, "permissions": permissions},
+        }
+        for name, value in artifacts.items():
+            path = self.ui / name
+            path.write_text(json.dumps(value)); path.chmod(0o600)
+        marker = self.ui / (tid + "-focus.focus-attempted.json")
+        marker.touch(mode=0o600)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_attempt SET result_evidence=? WHERE request_id=? AND attempt_number=1",
+                       (str(evidence), request))
+            db.execute("UPDATE outgoing_intent SET result_evidence=? WHERE request_id=?",
+                       (str(evidence), request))
+        command = ("dispatch", "abandon-unsent", "--dispatch-id", parent["dispatch_id"],
+                   "--expected-attempt", 1, "--reason", "archive exact focus failure before prepare")
+        original = self.outbox("private", "show", "--request-id", request)
+        def refused_with_file(name):
+            path = self.root / name
+            path.write_text("synthetic")
+            try:
+                self.coordinator(*command, okay=False)
+            finally:
+                path.unlink()
+        for name in ("deny-focus-abandon-capability", "malformed-focus-abandon-capability"):
+            refused_with_file(name)
+            self.assertFalse((self.root / "focus-abandon-payload-received").exists())
+        for name in ("deny-focus-abandon-proof", "malformed-focus-abandon-proof"):
+            refused_with_file(name)
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", parent["dispatch_id"],
+                         "--expected-attempt", 2, "--reason", "wrong attempt must fail", okay=False)
+        for changed in ({"error": "different focus failure"}, {"error": native_error},
+                        {"stage": "group_focused"},
+                        {"focus_evidence_id": "synthetic"}, {"focus_category": "contacts"},
+                        {"lateObservation": True}):
+            evidence.write_text(json.dumps(dict(report, **changed)))
+            self.coordinator(*command, okay=False)
+        evidence.write_text(json.dumps(report))
+        oversized = self.ui / (tid + "-focus.oversized.json")
+        oversized.write_bytes(b"x" * 65537); oversized.chmod(0o600)
+        self.coordinator(*command, okay=False)
+        oversized.unlink()
+        linked = self.ui / (tid + "-focus.linked.png")
+        linked.symlink_to(marker)
+        self.coordinator(*command, okay=False)
+        linked.unlink()
+        for name in (tid + "-focus.late-observed.json", tid + ".prepare-visual.job.json", tid + ".visual-state.json",
+                     tid + ".submit-attempted.json", tid + "-a2.client-result.json"):
+            path = self.ui / name
+            path.write_text("synthetic"); path.chmod(0o600)
+            self.coordinator(*command, okay=False)
+            path.unlink()
+        focus_result = self.ui / (tid + "-focus.result.json")
+        focus_result.write_text(json.dumps(dict(artifacts[focus_result.name], error="different focus failure")))
+        self.coordinator(*command, okay=False)
+        focus_result.write_text(json.dumps(dict(artifacts[focus_result.name],
+            permissions=dict(permissions, postEvents=False))))
+        self.coordinator(*command, okay=False)
+        focus_result.write_text(json.dumps(artifacts[focus_result.name]))
+        self.assertEqual(self.outbox("private", "show", "--request-id", request), original)
+        before_files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in self.ui.glob(tid + "*")}
+        result = self.coordinator(*command)
+        self.assertEqual((result["status"], result["result"], result["outbox_status"]),
+                         ("done", "abandoned_pre_submit", "indeterminate"))
+        self.assertEqual(self.outbox("private", "show", "--request-id", request), original)
+        self.assertEqual(before_files, {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                        for p in self.ui.glob(tid + "*")})
+        self.coordinator("dispatch", "review", "--reason", "synthetic archival review completed")
+        dispatch.drain(BINARY, self.ui)
+        self.assertEqual(self.outbox("private", "show", "--request-id", "focus-archive-child")
+                         ["attempt_number"], 0)
+        child_row = next(x for x in self.coordinator("dispatch", "status")["dispatches"]
+                         if x["dispatch_id"] == child["dispatch_id"])
+        self.assertEqual(child_row["status"], "blocked")
 
     def test_image_abandon_requires_first_attempt_complete_pre_prepare_proof(self):
         from wx_agent import dispatch

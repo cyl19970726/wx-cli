@@ -150,9 +150,14 @@ def main(argv=None):
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--seconds", type=int, default=3600)
     parser.add_argument("--interval", type=float, default=2)
+    parser.add_argument("--adapter", choices=("hooks", "queue-snapshot"), default="hooks")
     args = parser.parse_args(argv)
     try:
-        return run(args.config, seconds=args.seconds, interval=args.interval)
+        factory = CodexPlugin
+        if args.adapter == "queue-snapshot":
+            from .queued_snapshot import QueuedSnapshotPlugin
+            factory = QueuedSnapshotPlugin
+        return run(args.config, seconds=args.seconds, interval=args.interval, plugin_factory=factory)
     except Exception as exc:
         print("plugin runner: " + type(exc).__name__, file=sys.stderr)
         return 1

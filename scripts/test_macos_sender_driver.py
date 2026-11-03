@@ -1388,6 +1388,61 @@ class SenderTests(unittest.TestCase):
             self.assertEqual(driver.private_read(report)["stage"], "started")
 
 
+class FirstFocusArchiveTests(unittest.TestCase):
+    def fixture(self, directory):
+        request, config, tid = ImageAbandonProofTests.fixture(self, directory)
+        request.pop("abandon_protocol_version")
+        request.update(focus_abandon_protocol_version=1, content_kind="text", text="Known test message")
+        ui = Path(directory)
+        result = driver.private_read(ui / (tid + "-focus.result.json"))
+        result["error"] = driver.FOCUS_HEADER_REJECTION_ERROR
+        driver.private_update(ui / (tid + "-focus.result.json"), result)
+        report = driver.private_read(ui / (tid + ".client-result.json"))
+        report["error"] = "focus failed before message preparation: " + driver.helper_reason(result)
+        driver.private_update(ui / (tid + ".client-result.json"), report)
+        driver.private_update(ui / (tid + "-focus.focus-polls.json"), [
+            {"elapsedMs": 200, "windowCount": 2, "popupPresent": True,
+             "popupSelected": True, "windows": [{"id": 21}, {"id": 22}]}])
+        path = ui / (tid + "-focus.focus-search-after-click.png")
+        path.write_bytes(b"synthetic private capture"); path.chmod(0o600)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status"), \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("archive must not operate UI")):
+            return driver.focus_abandon_preflight(request, config)
+
+    def test_first_selected_header_rejection_archives_without_mutating_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            before = {p.name: p.read_bytes() for p in Path(directory).iterdir()}
+            self.assertTrue(self.prove(request, config)["focus_failure_unsent_proven"])
+            self.assertEqual(before, {p.name: p.read_bytes() for p in Path(directory).iterdir()})
+            with mock.patch.object(driver, "status"), self.assertRaises(driver.Refused):
+                driver.recovery_preflight(request, config)
+
+    def test_prepare_submit_or_later_attempt_never_qualifies(self):
+        for suffix in (".prepare-visual.job.json", ".visual-state.json", ".submit-attempted.json",
+                       ".submit-visual.result.json", "-a2.client-result.json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(Path(directory) / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_only_exact_first_text_failure_and_complete_permissions_qualify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            for change in ({"content_kind": "image"}, {"attempt_number": 2},
+                           {"protocol_version": True}, {"text": ""}, {"talker": "another"}):
+                with self.subTest(change=change), self.assertRaises(driver.Refused):
+                    self.prove(dict(request, **change), config)
+            result = driver.private_read(Path(directory) / (tid + "-focus.result.json"))
+            result["error"] = "Search popup not enumerated by ScreenCaptureKit within six seconds"
+            driver.private_update(Path(directory) / (tid + "-focus.result.json"), result)
+            with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
 class ImageAbandonProofTests(unittest.TestCase):
     def test_image_abandonment_has_a_separate_capability_without_changing_recovery(self):
         for flag, expected in (

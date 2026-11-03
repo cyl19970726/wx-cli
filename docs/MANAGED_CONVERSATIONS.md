@@ -91,9 +91,13 @@ wx-agent dispatch --config /ABS/private/conversations.json abandon-unsent \
   --reason '已核对原尝试在图片准备前停止及完整原生证据'
 ```
 
-文字原有证明路径保持不变。新增的**图片特例**仅接受第一次 attempt 1、当前 outbox `indeterminate`、报告停在 `inspected`，且原 inspect/focus/polls 完整证明同一个已知的六秒搜索弹层未枚举错误。缺少或矛盾的记录、`group_focused`、图片准备/状态/提交痕迹、后续 attempt、未退出的 helper 均拒绝；图片 driver 使用单独的 `--abandon-capabilities` / `--abandon-preflight` 只读合同，不借用图片发送或恢复入口。成功只把原 dispatch 标为 `done/abandoned_pre_submit`，保留原图片意图、attempt、`indeterminate` 和证据；随后仍须按 `review` 合同审查桌面，才能让其他合格队列项继续。**这不授权重试原图片，也不证明图片已发出。**该特例已在 `a9fdce6` 安装版本的原始准备前图片尝试上通过实机证明，原 outbox 和原生证据保持不变。后来停在 `group_focused` 的不同图片尝试被排除在此合同之外；每次仍须核对现场安装版本与原证据，不能把归档当成发送或恢复。
+**图片特例**仅接受第一次 attempt 1、当前 outbox `indeterminate`、报告停在 `inspected`，且原 inspect/focus/polls 完整证明同一个已知的六秒搜索弹层未枚举错误。缺少或矛盾的记录、`group_focused`、图片准备/状态/提交痕迹、后续 attempt、未退出的 helper 均拒绝；图片 driver 使用单独的 `--abandon-capabilities` / `--abandon-preflight` 只读合同，不借用图片发送或恢复入口。成功只把原 dispatch 标为 `done/abandoned_pre_submit`，保留原图片意图、attempt、`indeterminate` 和证据；随后仍须按 `review` 合同审查桌面，才能让其他合格队列项继续。**这不授权重试原图片，也不证明图片已发出。**该特例已在 `a9fdce6` 安装版本的原始准备前图片尝试上通过实机证明，原 outbox 和原生证据保持不变。后来停在 `group_focused` 的不同图片尝试被排除在此合同之外；每次仍须核对现场安装版本与原证据，不能把归档当成发送或恢复。
+
+**首次文字 focus 标题拒绝**使用同一归档命令和独立只读 driver 合同 `--focus-abandon-capabilities` / `--focus-abandon-preflight`。只接受已结束的 attempt 1、`inspected/indeterminate`、精确的 client 标题失败和 native `Selected chat header is not exact target and kind`，并复验原 inspect、目标/种类、focus job、选中搜索行的 polls、点击后画面及 helper 已退出。任何 prepare、状态、focus 成功、submit、后续 attempt 或原证据变化均拒绝。成功只归档原 dispatch；原文字 attempt、outbox 与批次后件保持原状，不能继续或重放这个原意图。缺失能力握手的旧 driver 不支持该特例。
 
 若是执行器在 attempt 之前退出，原 outbox 确实仍为零次尝试、原 owner/epoch 未变，可在同一次安全核查加 `--restore-unattempted DISPATCH_ID` 恢复该原请求。任何已有 attempt 的意图都不能走此入口。未关联发件箱证据的本人出站被视为可能人工发言：只接管对应会话并更新 epoch，不暂停其他会话；正在尝试的出站先等待结果再关联，不直接误判为人工。
+
+已完成 transport 的 `defer` / `draft` 在 owner 交接后仍保留原决定和原回合。满足恢复条件时，由**当前** owner 和 epoch 显式执行 `inbox resume`；该操作归档原 turn 历史，并把待办交给当前 owner/epoch，不新建 delivery、不回退源游标。活动或未知 transport 不能走此入口，不能用恢复来重复发送已有请求。
 
 ## 逐会话接管
 
@@ -106,7 +110,7 @@ wx-agent conversations --config /ABS/private/conversations.json handback --id CO
 
 ## 推送给受管 Session
 
-当前适配器仅支持由本适配器明确创建、持有的 Codex app-server Session。正在被桌面 App 持有的业务 Session 不会被复制、强行 resume 或换成临时替身；这些 Session 继续主动使用上面的 CLI。跨主机推送尚未接入；Session 和微信协调器需在同一执行宿主，控制电脑只需通过已认证 SSH 操作入口。
+本节适配器支持由其明确创建、持有的 Codex app-server Session。正在被桌面 App 持有的业务 Session 不会被复制、强行 resume 或换成临时替身。向已有宿主和跨主机接入使用独立的[Session 插件](SESSION_PLUGIN.md)及受限网关；其 Hook 与 queue snapshot 两种模式有各自的宿主能力和验收条件，不把本节受管 Session 的验收替代为桌面 App 验收。
 
 已停止的导入 controller 可能保留原稳定 CLI 生成的 selection 指纹。受管候选只可接受 `wx_cli` 不同、其余配置逐字段相同的临时替代指纹，并在本次内存操作中保留原指纹；不得改写共享 selection 来迫使校验通过。
 

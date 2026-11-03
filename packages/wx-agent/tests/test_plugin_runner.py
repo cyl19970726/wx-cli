@@ -27,6 +27,14 @@ class Clock:
 
 
 class PluginRunnerTests(unittest.TestCase):
+    def test_queue_snapshot_cli_reuses_the_bounded_runner(self):
+        from wx_agent.queued_snapshot import QueuedSnapshotPlugin
+        with mock.patch.object(plugin_runner, "run", return_value=0) as run:
+            self.assertEqual(plugin_runner.main(["--config", "/private/scoped.json",
+                "--seconds", "30", "--adapter", "queue-snapshot"]), 0)
+        self.assertIs(run.call_args.kwargs["plugin_factory"], QueuedSnapshotPlugin)
+        self.assertEqual(run.call_args.kwargs["seconds"], 30)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

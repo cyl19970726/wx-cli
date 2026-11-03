@@ -571,6 +571,49 @@ pub(super) fn check_image_abandon_capabilities(
     Ok(())
 }
 
+pub(super) fn check_focus_abandon_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(driver, "--focus-abandon-capabilities", None, timeout, None)?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("focus_abandon_protocol_version") == Some(&json!(1))
+            && object.get("before_prepare_only") == Some(&json!(true))
+            && object.get("archive_only") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver lacks focus-only archival capability").into());
+    }
+    Ok(())
+}
+
+pub(super) fn check_focus_abandon_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--focus-abandon-preflight",
+        Some(payload),
+        timeout,
+        Some(lock_fd),
+    )?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("focus_abandon_protocol_version") == Some(&json!(1))
+            && object.get("focus_failure_unsent_proven") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver did not prove focus failure before prepare").into());
+    }
+    Ok(())
+}
+
 pub(super) fn check_text_button_rejection_capabilities(
     driver: &Path,
     timeout: Duration,

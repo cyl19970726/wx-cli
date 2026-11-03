@@ -1364,6 +1364,115 @@ fn no_image_prepare_artifacts(
     Ok(())
 }
 
+const FOCUS_ARCHIVE_REPORT_ERROR: &str =
+    "focus failed before message preparation: target group header mismatch";
+const FOCUS_ARCHIVE_NATIVE_ERROR: &str = "Selected chat header is not exact target and kind";
+
+// This is an archival proof only. A focus failure has no recovery/retry path.
+fn focus_archive_snapshot(
+    root: &Path,
+    tid: &str,
+    later_tid: &str,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let mut snapshot = Vec::new();
+    let mut total = 0usize;
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid("focus archive directory exceeds bounded proof"));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&format!("{later_tid}.")) || name.starts_with(&format!("{later_tid}-"))
+        {
+            return Err(invalid("later native attempt artifact exists"));
+        }
+        if !name.starts_with(&format!("{tid}.")) && !name.starts_with(&format!("{tid}-")) {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if [
+            "prepare",
+            "submit",
+            "visual-state",
+            "late",
+            "recovery",
+            "focus-evidence",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+        {
+            return Err(invalid(
+                "focus archival trace contains later desktop evidence",
+            ));
+        }
+        if name != format!("{tid}.client-result.json")
+            && !name.starts_with(&format!("{tid}-inspect."))
+            && !name.starts_with(&format!("{tid}-focus."))
+        {
+            return Err(invalid(
+                "focus archival trace contains prepare, state or submit artifact",
+            ));
+        }
+        let bytes = image_rejection_read(
+            &entry.path(),
+            if name.ends_with(".png") {
+                16 * 1024 * 1024
+            } else {
+                65536
+            },
+        )?;
+        total += bytes.len();
+        if total > 128 * 1024 * 1024 {
+            return Err(invalid("focus archive evidence exceeds bounded proof"));
+        }
+        snapshot.push((name, hex::encode(Sha256::digest(&bytes))));
+    }
+    snapshot.sort();
+    for required in [
+        format!("{tid}.client-result.json"),
+        format!("{tid}-inspect.inspect.job.json"),
+        format!("{tid}-inspect.result.json"),
+        format!("{tid}-focus.focus-group.job.json"),
+        format!("{tid}-focus.result.json"),
+        format!("{tid}-focus.focus-attempted.json"),
+    ] {
+        if !snapshot.iter().any(|(name, _)| name == &required) {
+            return Err(invalid("focus archival trace is incomplete"));
+        }
+    }
+    Ok(snapshot)
+}
+
+fn check_native_focus_failure(root: &Path, tid: &str) -> Result<(), Box<dyn Error>> {
+    let path = root.join(format!("{tid}-focus.result.json"));
+    private(&path, false)?;
+    if fs::metadata(&path)?.len() > 65536 {
+        return Err(invalid("native focus result is too large"));
+    }
+    let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("id") == Some(&json!(format!("{tid}-focus")))
+            && object.get("ok") == Some(&json!(false))
+            && object.get("error") == Some(&json!(FOCUS_ARCHIVE_NATIVE_ERROR))
+            && object
+                .get("permissions")
+                .and_then(Value::as_object)
+                .is_some_and(|permissions| {
+                    permissions.len() == 3
+                        && permissions.get("accessibility") == Some(&json!(true))
+                        && permissions.get("postEvents") == Some(&json!(true))
+                        && permissions.get("screenRecording") == Some(&json!(true))
+                })
+    });
+    if !valid {
+        return Err(invalid(
+            "native focus result does not prove exact guarded failure",
+        ));
+    }
+    Ok(())
+}
+
 fn abandon_unsent(
     root: &Path,
     id: i64,
@@ -1425,10 +1534,10 @@ fn abandon_unsent(
         b.state.join("outgoing.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    let evidence: String = outbox.query_row(
-        "SELECT result_evidence FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=?2 AND status='indeterminate'",
+    let (evidence, finished_at): (String, Option<i64>) = outbox.query_row(
+        "SELECT result_evidence,finished_at FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=?2 AND status='indeterminate'",
         params![request, expected_attempt],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let (intent_status, intent_attempt, intent_evidence, kind, text):
         (String, i64, Option<String>, String, String) = outbox.query_row(
@@ -1469,6 +1578,7 @@ fn abandon_unsent(
     }
     let report_bytes = fs::read(&evidence_path)?;
     let report: Value = serde_json::from_slice(&report_bytes)?;
+    let focus_archive = kind == "text" && report["error"] == FOCUS_ARCHIVE_REPORT_ERROR;
     let stages = ["started", "inspected", "group_focused"];
     if report["request_id"] != request
         || report["id"] != tid
@@ -1492,15 +1602,64 @@ fn abandon_unsent(
     {
         return Err(invalid("attempt evidence does not prove a pre-submit stop"));
     }
+    if focus_archive {
+        let later_attempts: i64 = outbox.query_row(
+            "SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?1 AND attempt_number>1",
+            [&request],
+            |r| r.get(0),
+        )?;
+        if expected_attempt != 1
+            || finished_at.is_none()
+            || later_attempts != 0
+            || report["stage"] != "inspected"
+            || b.control != "active"
+            || [
+                "focus_evidence_id",
+                "focus_category",
+                "event_cursor",
+                "recovery_from_attempt",
+                "late_observation",
+                "lateObservation",
+                "media_prepared",
+                "media_submitted",
+            ]
+            .iter()
+            .any(|key| report.get(key).is_some())
+        {
+            return Err(invalid(
+                "focus archive requires the finished first attempt before prepare",
+            ));
+        }
+    }
     let base_tid = tid.split("-a").next().unwrap_or(&tid);
     let later_tid = format!("{base_tid}-a{}", expected_attempt + 1);
+    let focus_snapshot = if focus_archive {
+        let snapshot = focus_archive_snapshot(root, &tid, &later_tid)?;
+        check_native_focus_failure(root, &tid)?;
+        Some(snapshot)
+    } else {
+        None
+    };
     if kind == "image" {
         no_image_prepare_artifacts(root, &tid, &later_tid)?;
-    } else {
+    } else if !focus_archive {
         no_submit_artifacts(root, &tid, &later_tid)?;
     }
     let channel = load_binding(&b.state)?;
-    let payload = if kind == "image" {
+    let payload = if focus_archive {
+        serde_json::to_vec(&json!({
+            "protocol_version":1,
+            "focus_abandon_protocol_version":1,
+            "content_kind":"text",
+            "request_id":request,
+            "attempt_number":1,
+            "channel_id":b.channel_id,
+            "session_id":b.session_id,
+            "account":channel.account,
+            "talker":channel.talker,
+            "text":text,
+        }))?
+    } else if kind == "image" {
         serde_json::to_vec(&json!({
             "protocol_version":1,
             "abandon_protocol_version":1,
@@ -1536,7 +1695,21 @@ fn abandon_unsent(
             "registered sender driver is not private and executable",
         ));
     }
-    if kind == "image" {
+    if focus_archive {
+        super::outgoing::check_focus_abandon_capabilities(&driver, Duration::from_secs(20))?;
+        super::outgoing::check_focus_abandon_preflight(
+            &driver,
+            &payload,
+            Duration::from_secs(25),
+            lock.as_raw_fd(),
+        )?;
+        if focus_archive_snapshot(root, &tid, &later_tid)? != focus_snapshot.unwrap() {
+            return Err(invalid(
+                "native focus artifacts changed during driver proof",
+            ));
+        }
+        check_native_focus_failure(root, &tid)?;
+    } else if kind == "image" {
         super::outgoing::check_image_abandon_capabilities(&driver, Duration::from_secs(20))?;
         super::outgoing::check_image_abandon_preflight(
             &driver,
@@ -1558,41 +1731,38 @@ fn abandon_unsent(
     if fs::read(&evidence_path)? != report_bytes {
         return Err(invalid("attempt report changed during driver proof"));
     }
-    let current: (String, i64, Option<String>, String) = outbox.query_row(
-        "SELECT status,attempt_number,result_evidence,content_kind FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+    let current: (String, i64, Option<String>, String, String) = outbox.query_row(
+        "SELECT status,attempt_number,result_evidence,content_kind,text FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
         params![request,b.channel_id,b.session_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
     )?;
     if current.0 != "indeterminate"
         || current.1 != expected_attempt
         || current.2.as_deref() != Some(evidence.as_str())
         || current.3 != kind
+        || current.4 != text
     {
         return Err(invalid("outbox attempt changed during driver proof"));
     }
-    if kind == "image" {
-        let attempt_evidence: String = outbox.query_row(
-            "SELECT result_evidence FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=?2 AND status='indeterminate'",
+    if kind == "image" || focus_archive {
+        let (attempt_evidence, latest_finished_at): (String, Option<i64>) = outbox.query_row(
+            "SELECT result_evidence,finished_at FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=?2 AND status='indeterminate'",
             params![request, expected_attempt],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?,r.get(1)?)),
         )?;
-        if attempt_evidence != evidence {
-            return Err(invalid(
-                "image attempt evidence changed during driver proof",
-            ));
+        if attempt_evidence != evidence || (focus_archive && latest_finished_at != finished_at) {
+            return Err(invalid("attempt evidence changed during driver proof"));
         }
     }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if kind == "image" {
+    if kind == "image" || focus_archive {
         let latest_identity: (String, String) = tx.query_row(
             "SELECT conversation_id,request_id FROM dispatch WHERE id=?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if latest_identity != (conversation.clone(), request.clone()) {
-            return Err(invalid(
-                "image scheduler identity changed during driver proof",
-            ));
+            return Err(invalid("scheduler identity changed during driver proof"));
         }
     }
     let latest: (String, Option<String>) = tx.query_row(
@@ -1613,6 +1783,8 @@ fn abandon_unsent(
         || current_binding.state != b.state
         || current_binding.channel_id != b.channel_id
         || current_binding.session_id != b.session_id
+        || (focus_archive
+            && (current_binding.control != "active" || current_binding.owner != b.owner))
     {
         return Err(invalid("scheduler or binding changed during driver proof"));
     }
@@ -2922,7 +3094,7 @@ fn inbox_resume(root: &Path, id: i64, owner: &str, epoch: i64) -> Result<Value, 
         ));
     }
     tx.execute("INSERT INTO delivery_turn_history(delivery_id,turn_state,owner,epoch,session_ref,thread_id,turn_id,archived_at) SELECT id,turn_state,owner,epoch,session_ref,thread_id,turn_id,?2 FROM delivery WHERE id=?1 AND turn_state IS NOT NULL",params![id,now()])?;
-    tx.execute("UPDATE delivery SET status='pending',decision_request_id=NULL,turn_state=NULL,transport_token=NULL,session_ref=NULL,thread_id=NULL,turn_id=NULL,due_at=NULL,epoch=?2,updated_at=?3 WHERE id=?1",params![id,epoch,now()])?;
+    tx.execute("UPDATE delivery SET status='pending',decision_request_id=NULL,turn_state=NULL,transport_token=NULL,session_ref=NULL,thread_id=NULL,turn_id=NULL,due_at=NULL,owner=?2,epoch=?3,updated_at=?4 WHERE id=?1",params![id,owner,epoch,now()])?;
     tx.commit()?;
     Ok(json!({"delivery_id":id,"status":"pending"}))
 }
@@ -3350,6 +3522,72 @@ mod tests {
             inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap()["delivery_id"],
             id
         );
+    }
+    #[test]
+    fn resumed_terminal_todo_moves_to_current_owner_without_losing_history() {
+        for (decision, draft) in [(Decision::Defer, None), (Decision::Draft, Some("review"))] {
+            let (_tmp, state, root) = fixture();
+            enroll(
+                &root,
+                "conversation1",
+                &state,
+                "owner1",
+                InputMode::Push,
+                ReplyPolicy::Observe,
+            )
+            .unwrap();
+            let cursor = observed(&state, "synthetic_other");
+            inbox_reconcile(&root, "conversation1").unwrap();
+            let claim = inbox_claim(&root, "conversation1", "owner1", 300, Some(1)).unwrap();
+            let id = claim["delivery_id"].as_i64().unwrap();
+            let token = claim["token"].as_str().unwrap();
+            turn_reserve(&root, id, token, "codex:synthetic:original").unwrap();
+            turn_record(&root, id, token, "original", "original-turn").unwrap();
+            inbox_complete(
+                &root,
+                id,
+                token,
+                DecisionInput {
+                    decision,
+                    request: None,
+                    draft,
+                    reason: Some("review later"),
+                    condition: None,
+                    due_at: None,
+                },
+            )
+            .unwrap();
+            turn_finish(&root, id, token, TurnEnd::Completed).unwrap();
+            configure(
+                &root,
+                "conversation1",
+                1,
+                "owner2",
+                InputMode::Push,
+                ReplyPolicy::Observe,
+            )
+            .unwrap();
+            assert!(inbox_resume(&root, id, "owner1", 2).is_err());
+            inbox_resume(&root, id, "owner2", 2).unwrap();
+            let resumed = inbox_claim(&root, "conversation1", "owner2", 300, Some(2)).unwrap();
+            assert_eq!(resumed["delivery_id"], id);
+            assert_eq!(resumed["owner"], "owner2");
+            assert_eq!(resumed["epoch"], 2);
+            assert_eq!(resumed["cursor_start"], cursor);
+            assert_eq!(resumed["cursor_end"], cursor);
+            let db = open(&root, false).unwrap();
+            let history: (String, i64, String) = db
+                .query_row(
+                    "SELECT owner,epoch,turn_id FROM delivery_turn_history WHERE delivery_id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                history,
+                ("owner1".to_owned(), 1, "original-turn".to_owned())
+            );
+        }
     }
     #[test]
     fn dispatch_requires_authorization_and_unknown_never_replays() {

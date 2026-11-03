@@ -1,10 +1,10 @@
 # Codex Session 插件接入
 
-wx-cli 独立保存微信事件、订阅进度、持久 inbox、处理决定和发送队列。Codex 插件只把已有 delivery 接到**原 Session**，使用宿主原生 hook 核对实际回合。插件不拥有第二份业务账本，也不调用 `thread/start` 或 `thread/resume`；终结状态只通过只读 `thread/read` 核对。总体边界见[通道订阅合同](CHANNEL_SUBSCRIPTIONS.md)。
+wx-cli 独立保存微信事件、订阅进度、持久 inbox、处理决定和发送队列。Codex 插件只把已有 delivery 接到**原 Session**，通过原生 Hook 或下述 queue snapshot 模式核对实际回合。插件不拥有第二份业务账本，也不调用 `thread/start` 或 `thread/resume`；终结状态只通过只读 `thread/read` 核对。总体边界见[通道订阅合同](CHANNEL_SUBSCRIPTIONS.md)。
 
 ## 安装到一个项目
 
-需要两件交付物：已安装的 `wx-agent` wheel 提供 `wx-agent-plugin`、`wx-agent-plugin-runner` 和 `wx-agent-plugin-install`；[插件 bundle](../plugins/codex-wechat/.codex-plugin/plugin.json)提供项目 Skill 的唯一文本来源及标准插件包装。脱离源码检出的 wheel 安装时，须单独提供 bundle 的规范绝对路径；wheel 本身不包含该 Skill 副本。
+需要两件交付物：已安装的 `wx-agent` wheel 提供 `wx-agent-plugin`、`wx-agent-queue-session`、`wx-agent-plugin-runner` 和 `wx-agent-plugin-install`；[插件 bundle](../plugins/codex-wechat/.codex-plugin/plugin.json)提供项目 Skill 的唯一文本来源及标准插件包装。脱离源码检出的 wheel 安装时，须单独提供 bundle 的规范绝对路径；wheel 本身不包含该 Skill 副本。
 
 先在仓库外创建私有 `plugin.json`，填入下方配置中的真实授权值，并限制文件访问。项目目录、可执行文件、bundle 都用存在的规范绝对路径。安装示例：
 
@@ -72,4 +72,34 @@ wx-agent-plugin-runner --config /ABS/private/plugin.json --seconds 3600 --interv
 
 独立 `thread/read` 可能把宿主仍在运行的回合投影为 `interrupted`。插件只接受精确原 thread/turn、终态状态及有效 `completedAt` 同时存在的完成证据；缺少完成时间时保留原 transport，不提前结案或排入另一个处理回合。
 
-当前实机验收覆盖专用原生 TUI 宿主持有的原 Session：新入站在同一自动回合内完成精确通知回调、冻结事件读取、一次 `skip` 决定及原生/Rust 双方终结，微信发送保持暂停。普通应用的受限 SSH 发件及独立收件、异机 inbox 读取均有各自证据。桌面 App 持有的原 Session、实际异机 Session 插件处理和图片队列仍分别保留未通过状态。详见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+当前实机验收覆盖专用原生 TUI 宿主持有的原 Session：新入站在同一自动回合内完成精确通知回调、冻结事件读取、一次 `skip` 决定及原生/Rust 双方终结，微信发送保持暂停。普通应用的受限 SSH 发件及独立收件、异机 inbox 读取均有各自证据。桌面 App 持有的原 Session、实际异机 Session 插件处理的独立状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+
+## 只读 Session 的 queue snapshot 模式
+
+有的桌面宿主能向原聊天排队，却不执行项目 Hook；其原 Session 也可能只有本地只读权限。此时由已授权的外层插件通过受限网关读取冻结 delivery，将完整事件分页保存为项目内的私有快照，再通过原生 `thread/queue/add` 通知同一个 Session。通知只有本地读取命令、引用和摘要；没有正文、lease 或凭据。Session 只读快照，并返回 `skip`、`defer` 或 `draft` 的严格 JSON 提案。该模式不支持 `reply`。
+
+这是显式选择的适配模式。不要同时给同一个 binding 启动两种通知进程；既有 reservation 会阻止另一种模式接管。原 Session 的权限保持不变，外层只执行其已有网关权限允许的操作。
+
+私有配置使用独立文件：
+
+```json
+{
+  "version": 1,
+  "base_config": "/ABS/private/plugin.json",
+  "runtime_dir": "/ABS/projects/synthetic-project/.local/inbox-snapshots",
+  "snapshot_cli": "/ABS/projects/synthetic-project/.local/venv/bin/wx-agent-queue-session"
+}
+```
+
+`base_config` 复用上面的精确 Session/binding 配置，须配置 `gateway_config` 与 `gateway_client`。`runtime_dir` 必须已存在、属于当前用户且为 `0700`；快照和处理证据为 `0600`，不覆盖已有文件。它和 `snapshot_cli` 都须在原 Session 的项目内，供只读模型正常访问。快照是派生输入，Rust 仍拥有 delivery、游标和决定。
+
+```sh
+wx-agent-queue-session notify --config /ABS/private/queue-session.json
+wx-agent-queue-session reconcile --config /ABS/private/queue-session.json
+wx-agent-plugin-runner --adapter queue-snapshot \
+  --config /ABS/private/queue-session.json --seconds 600 --interval 2
+```
+
+外层先 claim/reserve，持久化快照与通知意图，再排队一次。模型执行的 `snapshot --file … --ref … --offset …` 子命令仅做本地读取，不加载网关或凭据；每段至多 8192 字节，必须读取完整冻结范围。外层只接受精确 thread/CWD/client ID、成功的规范读取命令、完整分段摘要、明确的最终 JSON 和带有效完成时间的原生成功回合。随后分别记录 turn、提交业务决定、核对 Rust 结果并结束 transport。最终文字本身不算业务确认，也不会发送微信。
+
+排队或业务提交结果未知时保留原 reservation 与意图，停止重发；`reconcile` 核对原回合，并仅在全部证据成立时记录原决定和 transport。如果业务决定已经成功、仅 transport 结束失败，后续核对只补原 transport，不重复提交决定。该模式的合成检查和实际宿主验收也分别记录，不能用前者宣称后者通过。

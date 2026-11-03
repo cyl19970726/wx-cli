@@ -2,9 +2,9 @@
 
 wx-cli / 通道服务负责授权微信会话的采集、订阅、持久 inbox 与共享发送队列。普通应用可直接提交发送意图；Session 插件消费订阅、通知原 Agent Session，并把明确处理决定或发送意图交回同一通道。微信通道不负责创建、恢复或持有模型 Session。这是 2026-11-03 用户澄清后的架构边界，合同与现有入口见[通道订阅、应用发件与 Session 插件](CHANNEL_SUBSCRIPTIONS.md)。
 
-`channel subscribe` 独立输出事件，`coordinator inbox` 保存待办和处理决定。候选已把旧 Codex 编排移入可选 `integrations/codex.py`，核心采集不导入该提供商模块；项目原生 Hook 插件及鉴权 RPC 另外提供接入。原 Session 与跨宿主实机闭环仍分别验收，实际结果见实施记录。
+`channel subscribe` 独立输出事件，`coordinator inbox` 保存待办和处理决定。旧 Codex 编排位于可选 `integrations/codex.py`，核心采集不导入该提供商模块；项目原生 Hook、queue snapshot 适配和鉴权 RPC 另外提供接入。各模式的原 Session 与跨宿主实机闭环分别验收，实际结果见实施记录。
 
-本分支的托管扩展使用 `coordinator.rs` 管理 owner/control epoch、通知水位、处理决定/待办、transport reservation 与发送引用；`dispatch.py`、`inbox.py` 负责确定性编排。`application_client.py` 为普通应用保留稳定请求命名空间，`gateway.py` 限定凭据与会话范围，`gateway_client.py` 可经 SSH 调用同一协议。`codex_plugin.py` 消费宿主原生 Hook；旧 `session_adapter.py` 只持有明确受管的长期 Codex 连接。通道的 owner 是业务处理身份，不是应用凭据或 Codex thread ID。新增运行方法见[应用接入](APPLICATION_CLIENT.md)、[Session 插件](SESSION_PLUGIN.md)及[托管指南](MANAGED_CONVERSATIONS.md)，实测见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。以下历史单群/未托管描述继续适用于尚未迁移的会话。
+本分支的托管扩展使用 `coordinator.rs` 管理 owner/control epoch、通知水位、处理决定/待办、transport reservation 与发送引用；`dispatch.py`、`inbox.py` 负责确定性编排。`application_client.py` 为普通应用保留稳定请求命名空间，`gateway.py` 限定凭据与会话范围，`gateway_client.py` 可经 SSH 调用同一协议。`codex_plugin.py` 消费宿主原生 Hook；`queued_snapshot.py` 将冻结事件派生为私有只读输入，并验证原宿主的完整读取、严格决定提案和成功终态后，通过同一网关记录决定。快照没有独立游标或发送权限。旧 `session_adapter.py` 只持有明确受管的长期 Codex 连接。通道的 owner 是业务处理身份，不是应用凭据或 Codex thread ID。运行方法见[应用接入](APPLICATION_CLIENT.md)、[Session 插件](SESSION_PLUGIN.md)及[托管指南](MANAGED_CONVERSATIONS.md)，实测见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。以下历史单群/未托管描述继续适用于尚未迁移的会话。
 
 本项目把微信作为 Agent 的一个渠道：从本机加密数据库副本获取结构化消息，以持久事件游标订阅；Agent 生成回复后，经一次性发件箱与 macOS 桌面发送。读取正文不依赖截图 OCR。视觉识别主要用于核验目标窗口、群标题、输入框和发送按钮。
 
@@ -72,7 +72,7 @@ outbox 的未知结果不自动重试。窄范围 `recover-unsent` 只允许操�
 
 Agent 通过 JSON stdin/stdout 调用，可替换 Codex 文本适配器。该适配器禁用 shell、应用和联网工具，只产文案。群消息没有授权本机操作的能力。CLI 才拥有群绑定和状态；skill 解释何时调用、如何处理人工接管和确认需求。
 
-MCP 后续暴露相同契约，不拥有第二份消费进度。托管扩展通过 Rust coordinator 和独立桌面执行器协调多个会话，使用显式模式和 owner；不复制自动回复循环。跨账号切换、跨宿主 Session 投递与桌面 App 持有 thread 的写入仍未接入。
+MCP 后续暴露相同契约，不拥有第二份消费进度。托管扩展通过 Rust coordinator 和独立桌面执行器协调多个会话，使用显式模式和 owner；不复制自动回复循环。跨宿主 Session 接入由独立插件和受限网关提供；桌面 App 持有的 thread 只经原宿主排队，不创建第二个 writer。跨账号切换未接入。
 
 ## 现场与开发版
 
