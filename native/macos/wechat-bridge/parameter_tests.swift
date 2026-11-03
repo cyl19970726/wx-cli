@@ -261,6 +261,28 @@ import ImageIO
                                                          imageWidth: 880, imageHeight: 640))
         precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, crossingBoundary], target: "Synthetic Peer", kind: .private,
                                                          imageWidth: 880, imageHeight: 640))
+        // Vision normalizes pixel boundaries; conversion back to pixels can
+        // turn exact edge contact into a fraction-of-a-millionth overlap.
+        let lowerEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 570, y: 49.9999998, width: 36, height: 12))
+        precondition(VisualParameters.uniqueHeaderTitle([privateTitle, lowerEdgeContact],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        precondition(VisualParameters.uniqueHeaderTitle([title, lowerEdgeContact],
+            target: "测试群", kind: .group, imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([lowerEdgeContact],
+            target: "Unrelated line", kind: .private, imageWidth: 880, imageHeight: 640))
+        let realOverlap = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 570, y: 49.999, width: 36, height: 12))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, realOverlap],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let sideEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 719.9999998, y: 20, width: 36, height: 12))
+        precondition(VisualParameters.uniqueHeaderTitle([privateTitle, sideEdgeContact],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let sideOverlap = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 719.999, y: 20, width: 36, height: 12))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, sideOverlap],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
         let token = "private-sentinel"
         precondition(VisualParameters.copyIsExpected(expected: "a b\n😊", sentinel: token,
                                                      beforeCount: 10, afterCount: 11,

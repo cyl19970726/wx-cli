@@ -222,7 +222,13 @@ enum VisualParameters {
         guard let rect = headerTitleRect(imageWidth: imageWidth, imageHeight: imageHeight) else {
             return false
         }
-        let overlapping = candidates.filter { $0.bounds.intersects(rect) }
+        let overlapping = candidates.filter {
+            let overlap = $0.bounds.intersection(rect)
+            // Vision's normalized coordinates may turn exact pixel-edge
+            // contact into ~0.0000002 px of overlap. This tolerance is far
+            // below one pixel; any meaningful crossing remains ambiguous.
+            return !overlap.isNull && overlap.width > 0.0001 && overlap.height > 0.0001
+        }
         guard overlapping.count == 1 else { return false }
         let candidate = overlapping[0]
         let inside = rect.insetBy(dx: 3, dy: 3)
