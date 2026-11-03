@@ -1,12 +1,17 @@
 """Push routing boundaries without a model, desktop or WeChat process."""
 import socket
 import json
+import fcntl
+import os
+from contextlib import ExitStack, nullcontext
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from wx_agent import inbox
+from wx_agent import conversations
 from wx_agent import session_adapter
 
 
@@ -210,6 +215,203 @@ class ProvisioningTests(unittest.TestCase):
         saved=json.loads(self.path.read_text())
         self.assertEqual(saved["provisioning"]["owner1"]["turn_id"],"init-turn")
         self.assertFalse(saved["provisioning"]["owner1"].get("cold_resume_verified",False))
+
+
+class RunHealthTests(unittest.TestCase):
+    class Executor:
+        def __init__(self, timeout=False):
+            self.exitcode = None
+            self.timeout = timeout
+            self.terminated = False
+
+        def poll(self):
+            return self.exitcode
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout):
+            if self.timeout:
+                raise subprocess.TimeoutExpired("synthetic executor", timeout)
+            self.exitcode = 0
+            return self.exitcode
+
+    class Future:
+        def done(self):
+            return True
+
+        def result(self):
+            return [{"conversation_id": "synthetic", "created": 0}]
+
+    class Collector:
+        def __init__(self, fail_shutdown=False):
+            self.fail_shutdown = fail_shutdown
+            self._threads = []
+
+        def submit(self, *_):
+            return RunHealthTests.Future()
+
+        def shutdown(self, wait):
+            if self.fail_shutdown:
+                raise OSError("synthetic collector cleanup error")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.config = self.root / "config.json"
+        self.executor = self.Executor()
+        self.collector = self.Collector()
+        self.health_states = []
+
+    def run_once(self, status_error=None, lock_error=None, push=None, lock_context=None):
+        def coordinator(_binary, _root, *args):
+            self.assertEqual(args, ("dispatch", "status"))
+            if status_error:
+                raise status_error
+            return {"paused_reason": None, "dispatches": []}
+
+        with ExitStack() as stack:
+            atomic_json = inbox.ctl.atomic_json
+            def record_health(path, value):
+                if Path(path).name == "inbox-health.json":
+                    self.health_states.append(value.get("run_state"))
+                return atomic_json(path, value)
+            stack.enter_context(mock.patch.object(conversations, "config", return_value={"wx_cli": "/bin/false"}))
+            stack.enter_context(mock.patch.object(inbox.dispatch, "root_from_settings", return_value=self.root))
+            if lock_error:
+                stack.enter_context(mock.patch.object(inbox.dispatch, "exclusive", side_effect=lock_error))
+            else:
+                stack.enter_context(mock.patch.object(inbox.dispatch, "exclusive",
+                                                      return_value=lock_context or nullcontext()))
+            stack.enter_context(mock.patch.object(inbox.dispatch, "call", side_effect=coordinator))
+            self.popen_mock = stack.enter_context(mock.patch.object(inbox.subprocess, "Popen", return_value=self.executor))
+            stack.enter_context(mock.patch.object(inbox, "ThreadPoolExecutor", return_value=self.collector))
+            stack.enter_context(mock.patch.object(inbox.signal, "signal"))
+            stack.enter_context(mock.patch.object(inbox.ctl, "atomic_json", side_effect=record_health))
+            args = ["--config", str(self.config), "run", "--once", "--seconds", "5"]
+            if push is not None:
+                stack.enter_context(mock.patch.object(inbox.ctl, "read_json", return_value={"version": 1, "sessions": {}}))
+                stack.enter_context(mock.patch.object(inbox, "PushLoop", return_value=push))
+                args += ["--session-config", str(self.root / "sessions.json")]
+            return inbox.main(args)
+
+    def health(self):
+        return json.loads((self.root / "inbox-health.json").read_text())
+
+    def test_normal_stop_overwrites_running_health_after_executor_exits(self):
+        self.assertEqual(self.run_once(), 0)
+        health = self.health()
+        self.assertEqual(health["run_state"], "stopped")
+        self.assertIsNotNone(health["stopped_at"])
+        self.assertFalse(health["executor_alive"])
+        self.assertEqual(health["executor_exitcode"], 0)
+        self.assertFalse(health["collector_alive"])
+        self.assertFalse(health["collection_active"])
+        self.assertEqual(health["cleanup_errors"], [])
+        self.assertTrue(self.executor.terminated)
+        self.assertEqual(self.health_states, ["running", "stopping", "stopped"])
+
+    def test_executor_timeout_keeps_stopping_health_and_reports_incomplete_shutdown(self):
+        self.executor.timeout = True
+        with self.assertRaisesRegex(RuntimeError, "shutdown incomplete"):
+            self.run_once()
+        health = self.health()
+        self.assertEqual(health["run_state"], "stopping")
+        self.assertIsNone(health["stopped_at"])
+        self.assertTrue(health["executor_alive"])
+        self.assertIsNone(health["executor_exitcode"])
+        self.assertTrue(health["executor_wait_timed_out"])
+
+    def test_cleanup_error_is_recorded_without_masking_run_error(self):
+        self.collector.fail_shutdown = True
+        self.assertEqual(self.run_once(status_error=ValueError("synthetic run failure")), 1)
+        health = self.health()
+        self.assertEqual(health["run_state"], "stopping")
+        self.assertEqual(health["run_error"], "ValueError")
+        self.assertEqual(health["cleanup_errors"],
+                         [{"step": "collector_shutdown", "error": "OSError"}])
+        self.assertFalse(health["executor_alive"])
+        self.assertFalse(health["collector_alive"])
+
+    def test_cleanup_error_after_normal_run_is_not_reported_stopped(self):
+        self.collector.fail_shutdown = True
+        with self.assertRaisesRegex(RuntimeError, "shutdown failed: collector_shutdown"):
+            self.run_once()
+        health = self.health()
+        self.assertEqual(health["run_state"], "stopping")
+        self.assertIsNone(health["stopped_at"])
+        self.assertEqual(health["cleanup_errors"],
+                         [{"step": "collector_shutdown", "error": "OSError"}])
+
+    def test_unhandled_run_error_survives_cleanup_error(self):
+        self.collector.fail_shutdown = True
+        with self.assertRaisesRegex(RuntimeError, "synthetic unhandled failure"):
+            self.run_once(status_error=RuntimeError("synthetic unhandled failure"))
+        health = self.health()
+        self.assertEqual(health["run_state"], "stopping")
+        self.assertEqual(health["run_error"], "RuntimeError")
+        self.assertEqual(health["cleanup_errors"],
+                         [{"step": "collector_shutdown", "error": "OSError"}])
+
+    def test_busy_runner_lock_cannot_overwrite_other_listeners_health(self):
+        existing = self.root / "inbox-health.json"
+        original = b'{"version":1,"run_state":"running","executor_alive":true}\n'
+        existing.write_bytes(original)
+        self.assertEqual(self.run_once(lock_error=inbox.dispatch.DispatchError("synthetic lock busy")), 1)
+        self.assertEqual(existing.read_bytes(), original)
+        self.assertEqual(self.health_states, [])
+        self.popen_mock.assert_not_called()
+        self.assertFalse(self.executor.terminated)
+
+    def test_old_runner_never_overwrites_new_owner_after_lock_release(self):
+        health_path = self.root / "inbox-health.json"
+        replacement = b'{"version":1,"run_state":"running","pid":99999}\n'
+        class Lock:
+            def __enter__(self):
+                return None
+            def __exit__(self, *_):
+                states = self_test.health_states[:]
+                self_test.assertEqual(states, ["running", "stopping", "stopped"])
+                health_path.write_bytes(replacement)
+        self_test = self
+        self.assertEqual(self.run_once(lock_context=Lock()), 0)
+        self.assertEqual(health_path.read_bytes(), replacement)
+        self.assertEqual(self.health_states, ["running", "stopping", "stopped"])
+
+    def test_release_failure_records_stopping_while_lock_is_still_owned(self):
+        class Lock:
+            def __enter__(self):
+                self.fd = os.open(self_test.root / "inbox-runner.lock", os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self.fd
+            def __exit__(self, *_):
+                raise OSError("synthetic release failure")
+        self_test = self
+        with self.assertRaisesRegex(RuntimeError, "runner_lock_release"):
+            self.run_once(lock_context=Lock())
+        health = self.health()
+        self.assertEqual(health["run_state"], "stopping")
+        self.assertIsNone(health["stopped_at"])
+        self.assertEqual(health["cleanup_errors"],
+                         [{"step": "runner_lock_release", "error": "OSError"}])
+
+    def test_final_health_labels_push_as_last_observation_after_close(self):
+        class Push:
+            active = {}
+            closed = False
+            def tick(self, allow_new):
+                return {"active_sessions": 2, "attention": {}}
+            def close(self):
+                self.closed = True
+        push = Push()
+        self.assertEqual(self.run_once(push=push), 0)
+        health = self.health()
+        self.assertTrue(push.closed)
+        self.assertTrue(health["push_closed"])
+        self.assertEqual(health["push"]["active_sessions"], 2)
+        self.assertIsInstance(health["push_observed_at"], float)
+        self.assertEqual(health["run_state"], "stopped")
 
 
 if __name__ == "__main__":

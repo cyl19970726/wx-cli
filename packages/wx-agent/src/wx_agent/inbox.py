@@ -1,6 +1,7 @@
 """Collect persisted events and route notifications to explicit managed Sessions."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -267,7 +268,13 @@ def main(argv=None):
     executor_log = None
     runner_lock = None
     runner_lock_held = False
+    runner_lock_fd = None
+    health_owned = False
     collector = None
+    collection = None
+    last_health = {}
+    root = None
+    run_error = None
     try:
         settings = conversations.config(args.config)
         binary, root = settings["wx_cli"], dispatch.root_from_settings(settings)
@@ -289,8 +296,9 @@ def main(argv=None):
             if args.interval < 1 or not 0 < args.seconds <= 86400:
                 raise dispatch.DispatchError("use interval >=1 second and duration 1..86400 seconds")
             runner_lock = dispatch.exclusive(root,"inbox-runner.lock")
-            runner_lock.__enter__()
+            runner_lock_fd = runner_lock.__enter__()
             runner_lock_held = True
+            health_owned = True
             stopping=[]
             def stop_after_current(*_):
                 stopping.append(True)
@@ -329,11 +337,14 @@ def main(argv=None):
                 value = {"collection": last_collection,"collection_active":collection is not None}
                 if push:
                     value["push"] = push.tick(allow_new=collected and (not notified_once or not args.once))
+                    value["push_observed_at"] = time.time()
                     if collected:
                         notified_once=True
                 value["dispatch"] = dispatch.call(binary,root,"dispatch","status")
                 value["executor_alive"]=executor.poll() is None
                 value["pid"]=os.getpid()
+                value["run_state"]="running"
+                last_health=value
                 ctl.atomic_json(root / "inbox-health.json", {"version": 1, "updated_at": time.time(), **value})
                 if stopping or (args.once and collected and (not push or not push.active)) or time.monotonic() >= stop:
                     break
@@ -352,23 +363,106 @@ def main(argv=None):
         return 0
     except (dispatch.DispatchError, conversations.ConversationError, ctl.ControlError,
             runner.RunnerError, SessionError, OSError, ValueError) as exc:
+        run_error=type(exc).__name__
         print(json.dumps({"error": type(exc).__name__, "message": str(exc)}), file=sys.stderr)
         return 1
     finally:
-        if executor and executor.poll() is None:
-            executor.terminate()
-        if push:
-            push.close()
-        if collector:
-            collector.shutdown(wait=True)
-        if executor and executor.poll() is None:
+        original_error = sys.exc_info()[0]
+        cleanup_errors = []
+        shutdown_started_at = time.time()
+
+        def cleanup(label, operation):
+            try:
+                operation()
+            except Exception as exc:
+                cleanup_errors.append({"step": label, "error": type(exc).__name__})
+                return False
+            return True
+
+        def executor_result():
+            if executor is None:
+                return False, None
+            try:
+                code = executor.poll()
+                return code is None, code
+            except Exception as exc:
+                cleanup_errors.append({"step": "executor_poll", "error": type(exc).__name__})
+                return None, None
+
+        executor_alive, executor_exitcode = executor_result()
+        if health_owned:
+            cleanup("health_stopping", lambda: ctl.atomic_json(root / "inbox-health.json", {
+                "version": 1, "updated_at": time.time(), **last_health,
+                "pid": os.getpid(), "run_state": "stopping",
+                "shutdown_started_at": shutdown_started_at, "stopped_at": None,
+                "executor_alive": executor_alive, "executor_exitcode": executor_exitcode,
+                "push_closed": False if push is not None else None,
+            }))
+        if executor_alive:
+            cleanup("executor_terminate", executor.terminate)
+        push_closed = push is None or cleanup("push_close", push.close)
+        collector_shutdown = collector is None or cleanup("collector_shutdown", lambda: collector.shutdown(wait=True))
+        executor_alive, executor_exitcode = executor_result()
+        wait_timed_out = False
+        if executor_alive:
             # The child handles SIGTERM at its next safe boundary; never kill
             # an in-flight Rust/GUI attempt to make shutdown appear immediate.
             try:
                 executor.wait(timeout=95)
             except subprocess.TimeoutExpired:
-                pass
+                wait_timed_out = True
+            except Exception as exc:
+                cleanup_errors.append({"step": "executor_wait", "error": type(exc).__name__})
+        executor_alive, executor_exitcode = executor_result()
         if executor_log:
-            executor_log.close()
+            cleanup("executor_log_close", executor_log.close)
+        shutdown_incomplete = False
+        final_health_error = None
+        if health_owned:
+            if collector_shutdown:
+                collector_alive = False
+            else:
+                threads = getattr(collector, "_threads", None)
+                collector_alive = (any(thread.is_alive() for thread in threads)
+                                   if threads is not None else None)
+            stopped = (executor_alive is False and collector_alive is False
+                       and push_closed and not cleanup_errors)
+            shutdown_incomplete = not stopped
+            final_health = {"version": 1, "updated_at": time.time(), **last_health,
+                            "pid": os.getpid(), "run_state": "stopped" if stopped else "stopping",
+                            "shutdown_started_at": shutdown_started_at,
+                            "stopped_at": time.time() if stopped else None,
+                            "executor_alive": executor_alive, "executor_exitcode": executor_exitcode,
+                            "executor_wait_timed_out": wait_timed_out,
+                            "collector_alive": collector_alive,
+                            "push_closed": push_closed if push is not None else None,
+                            "collection_active": collection is not None and not collection.done(),
+                            "cleanup_errors": cleanup_errors}
+            if run_error or original_error:
+                final_health["run_error"] = run_error or original_error.__name__
+            try:
+                ctl.atomic_json(root / "inbox-health.json", final_health)
+            except Exception as exc:
+                if not (run_error or original_error):
+                    final_health_error = exc
         if runner_lock_held:
-            runner_lock.__exit__(None,None,None)
+            if cleanup("runner_lock_release", lambda: runner_lock.__exit__(None,None,None)):
+                runner_lock_held = False
+            elif isinstance(runner_lock_fd, int):
+                # A failed __exit__ may already have released the lock. Only
+                # amend health if this file descriptor can still own it.
+                try:
+                    fcntl.flock(runner_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    pass
+                else:
+                    final_health.update(run_state="stopping", stopped_at=None,
+                                        cleanup_errors=cleanup_errors, updated_at=time.time())
+                    cleanup("health_release_error", lambda: ctl.atomic_json(root / "inbox-health.json", final_health))
+                    cleanup("runner_lock_fd_close", lambda: os.close(runner_lock_fd))
+        if final_health_error is not None:
+            raise final_health_error
+        if cleanup_errors and not (run_error or original_error):
+            raise RuntimeError("inbox shutdown failed: " + ", ".join(item["step"] for item in cleanup_errors))
+        if shutdown_incomplete and not (run_error or original_error):
+            raise RuntimeError("inbox shutdown incomplete; inspect inbox-health.json")
