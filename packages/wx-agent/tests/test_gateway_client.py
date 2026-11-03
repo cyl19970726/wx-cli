@@ -1,5 +1,6 @@
 """Client transport keeps credentials on stdin and uncertain results fenced."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -106,7 +107,7 @@ class GatewayClientTests(unittest.TestCase):
                         GatewayClient(self.path)
                     self.assertEqual(caught.exception.code, "invalid_config")
             ssh_path.chmod(0o600)
-            linked.hardlink_to(ssh_path)
+            os.link(ssh_path, linked)
             self.config["ssh_config"] = str(ssh_path)
             self.save()
             with self.assertRaises(GatewayError) as caught:

@@ -39,6 +39,7 @@ class PluginInstallTests(unittest.TestCase):
         self.hooks.parent.mkdir()
         original = b'{"description":"keep", "hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-stop"}]}]}}\n'
         self.hooks.write_bytes(original)
+        self.hooks.chmod(0o644)
         installed = self.install()
         self.assertEqual(installed["status"], "installed")
         self.assertEqual(installed["hook_trust"], "host_review_required")
@@ -57,6 +58,16 @@ class PluginInstallTests(unittest.TestCase):
         self.assertEqual(self.hooks.stat().st_mode & 0o777, 0o644)
         self.assertFalse(self.skill.exists())
         self.assertFalse(self.record.exists())
+
+    def test_existing_private_hook_mode_is_preserved_on_uninstall(self):
+        self.hooks.parent.mkdir()
+        original = b'{"hooks":{}}\n'
+        self.hooks.write_bytes(original)
+        self.hooks.chmod(0o600)
+        self.install()
+        installer.uninstall(self.project)
+        self.assertEqual(self.hooks.read_bytes(), original)
+        self.assertEqual(self.hooks.stat().st_mode & 0o777, 0o600)
 
     def test_uninstall_removes_only_owned_entries_after_user_adds_hook(self):
         self.install()
