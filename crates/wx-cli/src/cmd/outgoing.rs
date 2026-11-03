@@ -370,7 +370,7 @@ fn recover_unsent_with_timeout(
     check_recovery_capabilities(driver, timeout)?;
     let candidate = load_recovery_candidate(state_dir, binding, request_id, expected_attempt)?;
     let payload = driver_input(binding, &candidate, Some(expected_attempt))?;
-    check_recovery_preflight(driver, &payload, timeout)?;
+    check_recovery_preflight(driver, &payload, timeout, None)?;
     let attempt = claim_recovery(state_dir, request_id, expected_attempt)?;
     invoke_claimed_attempt(
         state_dir,
@@ -407,8 +407,11 @@ fn load_recovery_candidate(
 /// Probe before claiming: an older driver that ignores recovery fields must never
 /// receive the original message as a recovery attempt. This is a driver contract;
 /// Rust cannot inspect the desktop or independently prove the driver's UI checks.
-fn check_recovery_capabilities(driver: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
-    let value = invoke_recovery_probe(driver, "--recovery-capabilities", None, timeout)?;
+pub(super) fn check_recovery_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(driver, "--recovery-capabilities", None, timeout, None)?;
     let valid = value.as_object().is_some_and(|object| {
         object.len() == 3
             && object.get("protocol_version") == Some(&json!(1))
@@ -421,12 +424,19 @@ fn check_recovery_capabilities(driver: &Path, timeout: Duration) -> Result<(), B
     Ok(())
 }
 
-fn check_recovery_preflight(
+pub(super) fn check_recovery_preflight(
     driver: &Path,
     payload: &[u8],
     timeout: Duration,
+    lock_fd: Option<i32>,
 ) -> Result<(), Box<dyn Error>> {
-    let value = invoke_recovery_probe(driver, "--recovery-preflight", Some(payload), timeout)?;
+    let value = invoke_recovery_probe(
+        driver,
+        "--recovery-preflight",
+        Some(payload),
+        timeout,
+        lock_fd,
+    )?;
     let valid = value.as_object().is_some_and(|object| {
         object.len() == 3
             && object.get("protocol_version") == Some(&json!(1))
@@ -444,9 +454,22 @@ fn invoke_recovery_probe(
     flag: &str,
     payload: Option<&[u8]>,
     timeout: Duration,
+    lock_fd: Option<i32>,
 ) -> Result<serde_json::Value, Box<dyn Error>> {
-    let mut child = Command::new(driver)
-        .arg(flag)
+    let mut command = Command::new(driver);
+    command.arg(flag);
+    if let Some(fd) = lock_fd {
+        command.env("WX_DESKTOP_LOCK_FD", fd.to_string());
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command
         .stdin(if payload.is_some() {
             Stdio::piped()
         } else {

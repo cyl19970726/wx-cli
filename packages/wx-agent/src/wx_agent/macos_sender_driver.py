@@ -898,18 +898,41 @@ def recovery_preflight(request, config):
     request_ok(request, config, attempt_number)
     ui = config["ui_dir"]
     lock_path = ui / "sender.lock"
-    fd = os.open(str(lock_path), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(fd, "r+") as lock:
-        private(lock_path)
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refused("sender busy") from exc
+    with recovery_sender_lock(lock_path):
         deadline = time.monotonic() + BUDGET
         _guard_helper(config, deadline, clear=False)
         status(config, deadline)
         prove_unsent(request, config, attempt_number, deadline, persist=False)
     return {"protocol_version": 1, "recovery_protocol_version": 1, "unsent_proven": True}
+
+
+@contextmanager
+def recovery_sender_lock(lock_path):
+    """Accept the coordinator's held lock, or acquire it for standalone recovery."""
+    inherited = os.environ.get("WX_DESKTOP_LOCK_FD")
+    private(lock_path)
+    if inherited is not None:
+        try:
+            fd = int(inherited)
+            actual = os.fstat(fd)
+            expected = os.stat(lock_path, follow_symlinks=False)
+        except (ValueError, OSError) as exc:
+            raise Refused("inherited sender lock is unavailable") from exc
+        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise Refused("inherited sender lock does not match UI root")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refused("inherited sender lock is busy") from exc
+        yield
+        return
+    fd = os.open(str(lock_path), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refused("sender busy") from exc
+        yield
 
 
 def title_matches(observed, target):

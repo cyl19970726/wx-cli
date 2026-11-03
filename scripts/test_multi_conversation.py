@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -78,9 +79,48 @@ class MultiConversationTests(unittest.TestCase):
         self.driver.write_text("""#!""" + sys.executable + """
 import json, os, pathlib, sys, time
 root=pathlib.Path(__file__).resolve().parent.parent
+if sys.argv[1:] == ['--recovery-capabilities']:
+    if (root/'deny-recovery-capability').exists():
+        print(json.dumps({'unsupported':True}))
+    else:
+        print(json.dumps({'protocol_version':1,'recovery_protocol_version':1,
+                          'pre_submit_proof_required':True}))
+    sys.exit(0)
 if sys.argv[1:] == ['--dispatch-preflight']:
     os.fstat(int(os.environ['WX_DESKTOP_LOCK_FD']))
     print(json.dumps({'ready':not (root/'deny-preflight').exists()}))
+    sys.exit(0)
+if sys.argv[1:] == ['--recovery-preflight']:
+    (root/'recovery-payload-received').write_text('yes')
+    if (root/'deny-recovery-proof').exists():
+        sys.exit(3)
+    candidate=json.load(sys.stdin)
+    previous=candidate['recovery_from_attempt']
+    identity=candidate['channel_id']+'\\0'+candidate['request_id']
+    import hashlib
+    tid='send-'+hashlib.sha256(identity.encode()).hexdigest()[:48]
+    if previous > 1:
+        tid+='-a'+str(previous)
+    ui=root/'ui'
+    report=json.loads((ui/(tid+'.client-result.json')).read_text())
+    names=((tid+'-inspect.inspect.job.json',tid+'-inspect.result.json'),
+           (tid+'-focus.focus-group.job.json',tid+'-focus.result.json'),
+           (tid+'.prepare-visual.job.json',tid+'.prepare-visual.result.json'),
+           (tid+'.visual-state.json',))
+    artifacts={name:json.loads((ui/name).read_text()) for group in names for name in group
+               if (ui/name).is_file()}
+    complete=(previous==1 and candidate['attempt_number']==2 and candidate['protocol_version']==1
+              and report['stage']=='group_focused' and report['status']=='indeterminate'
+              and report['request_id']==candidate['request_id'] and candidate['text']=='synthetic reply'
+              and len(artifacts)==7 and artifacts[tid+'.visual-state.json']=={'id':tid,'stage':'prepare-attempted'}
+              and artifacts[tid+'.prepare-visual.result.json']=={'id':tid,'ok':False,'error':'Cannot snapshot a clipboard item'}
+              and report.get('error')==artifacts[tid+'.prepare-visual.result.json']['error']
+              and all(artifacts[tid+suffix+'.result.json']=={'id':tid+suffix,'ok':True,'action':action}
+                      for suffix,action in (('-inspect','inspect'),('-focus','focus-group')))
+              and all('submit' not in path.name for path in ui.glob(tid+'*')))
+    if not complete:
+        sys.exit(3)
+    print(json.dumps({'protocol_version':1,'recovery_protocol_version':1,'unsent_proven':True}))
     sys.exit(0)
 payload=json.load(sys.stdin)
 log=root/'driver-events.jsonl'
@@ -108,7 +148,7 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
 """)
         self.driver.chmod(0o700)
         for channel in self.channels.values():
-            os.link(self.driver, channel["state"] / "conversation-sender")
+            shutil.copy2(self.driver, channel["state"] / "conversation-sender")
 
     def cli(self, section, state, *args, data=None, okay=True):
         command = [str(BINARY), section, "--state-dir", str(state), *map(str, args)]
@@ -340,25 +380,103 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         channel = self.channels["group"]
         identity = hashlib.sha256((channel["binding"]["channel_id"] + "\0unknown-pre-submit").encode()).hexdigest()[:48]
         tid = "send-" + identity
-        evidence = self.root / (tid + ".client-result.json")
-        evidence.write_text(json.dumps({"id": tid, "request_id": "unknown-pre-submit",
+        evidence = self.ui / (tid + ".client-result.json")
+        report = {"id": tid, "request_id": "unknown-pre-submit",
             "attempt_number": 1, "channel_id": channel["binding"]["channel_id"],
             "session_id": channel["binding"]["session_id"], "status": "indeterminate",
-            "stage": "inspected"}))
+            "stage": "group_focused", "error": "Cannot snapshot a clipboard item"}
+        evidence.write_text(json.dumps(report))
         evidence.chmod(0o600)
+        artifacts = {
+            tid + "-inspect.inspect.job.json": {"id": tid + "-inspect", "action": "inspect"},
+            tid + "-inspect.result.json": {"id": tid + "-inspect", "ok": True, "action": "inspect"},
+            tid + "-focus.focus-group.job.json": {"id": tid + "-focus", "action": "focus-group"},
+            tid + "-focus.result.json": {"id": tid + "-focus", "ok": True, "action": "focus-group"},
+            tid + ".prepare-visual.job.json": {"id": tid, "action": "prepare-visual"},
+            tid + ".prepare-visual.result.json": {"id": tid, "ok": False,
+                                                   "error": "Cannot snapshot a clipboard item"},
+            tid + ".visual-state.json": {"id": tid, "stage": "prepare-attempted"},
+        }
+        for name, value in artifacts.items():
+            path = self.ui / name
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
         with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
             db.execute("UPDATE outgoing_attempt SET result_evidence=? WHERE request_id='unknown-pre-submit' AND attempt_number=1",
                        (str(evidence),))
+            db.execute("UPDATE outgoing_intent SET result_evidence=? WHERE request_id='unknown-pre-submit'",
+                       (str(evidence),))
+        command = ("dispatch", "abandon-unsent", "--dispatch-id", queued["dispatch_id"],
+                   "--expected-attempt", 1, "--reason", "reviewed complete pre-submit trace")
+        (self.root / "deny-recovery-capability").write_text("legacy driver")
+        self.coordinator(*command, okay=False)
+        self.assertFalse((self.root / "recovery-payload-received").exists(),
+                         "unknown driver must never receive the message payload")
+        (self.root / "deny-recovery-capability").unlink()
+        (self.root / "deny-recovery-proof").write_text("driver rejected proof")
+        self.coordinator(*command, okay=False)
+        self.assertEqual(self.outbox("group", "show", "--request-id", "unknown-pre-submit")
+                         ["attempt_number"], 1)
+        self.assertEqual(self.coordinator("dispatch", "status")["dispatches"][0]["status"],
+                         "unknown")
+        (self.root / "deny-recovery-proof").unlink()
+        prepare_result = self.ui / (tid + ".prepare-visual.result.json")
+        saved_result = prepare_result.read_bytes()
+        prepare_result.unlink()
+        self.coordinator(*command, okay=False)
+        prepare_result.write_bytes(saved_result)
+        prepare_result.chmod(0o600)
+        report["error"] = "different native result"
+        evidence.write_text(json.dumps(report))
+        self.coordinator(*command, okay=False)
+        report["error"] = "Cannot snapshot a clipboard item"
+        evidence.write_text(json.dumps(report))
+        visual = self.ui / (tid + ".visual-state.json")
+        visual.write_text(json.dumps({"id": tid, "stage": "submit-attempted"}))
+        self.coordinator(*command, okay=False)
+        visual.write_text(json.dumps(artifacts[visual.name]))
+        submit = self.ui / (tid + ".submit-visual.result.json")
+        submit.write_text(json.dumps({"id": tid, "ok": True}))
+        submit.chmod(0o600)
+        self.coordinator(*command, okay=False)
+        submit.unlink()
+        report["stage"] = "prepared"
+        evidence.write_text(json.dumps(report))
+        self.coordinator(*command, okay=False)
+        report["stage"] = "group_focused"
+        evidence.write_text(json.dumps(report))
+        outside = self.root / evidence.name
+        outside.write_text(evidence.read_text())
+        outside.chmod(0o600)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_attempt SET result_evidence=? WHERE request_id='unknown-pre-submit' AND attempt_number=1",
+                       (str(outside),))
+            db.execute("UPDATE outgoing_intent SET result_evidence=? WHERE request_id='unknown-pre-submit'",
+                       (str(outside),))
+        self.coordinator(*command, okay=False)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_attempt SET result_evidence=? WHERE request_id='unknown-pre-submit' AND attempt_number=1",
+                       (str(evidence),))
+            db.execute("UPDATE outgoing_intent SET result_evidence=? WHERE request_id='unknown-pre-submit'",
+                       (str(evidence),))
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", queued["dispatch_id"],
+                         "--expected-attempt", 2, "--reason", "wrong attempt must fail", okay=False)
         self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", queued["dispatch_id"],
                          "--expected-attempt", 1, "--reason", "reviewed pre-submit stop only")
         self.assertEqual(self.outbox("group", "show", "--request-id", "unknown-pre-submit")
                          ["status"], "indeterminate")
         self.assertEqual(self.coordinator("dispatch", "status")["dispatches"][0]["result"],
                          "abandoned_pre_submit")
-        second = self.queue("private", "unknown-with-submit")
+        self.coordinator("dispatch", "review", "--reason", "synthetic pre-submit proof reviewed")
+        image = self.queue("private", "unknown-image-abandon", image=True)
         dispatch.drain(BINARY, self.ui)
-        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", second["dispatch_id"],
-                         "--expected-attempt", 1, "--reason", "cannot discard submit uncertainty", okay=False)
+        self.assertEqual(self.outbox("private", "show", "--request-id", "unknown-image-abandon")
+                         ["attempt_number"], 1)
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", image["dispatch_id"],
+                         "--expected-attempt", 1, "--reason", "image has no complete proof protocol",
+                         okay=False)
+        self.assertEqual(self.outbox("private", "show", "--request-id", "unknown-image-abandon")
+                         ["status"], "indeterminate")
 
     def test_reviewed_old_focus_does_not_block_new_send(self):
         from wx_agent import dispatch

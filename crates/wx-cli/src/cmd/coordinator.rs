@@ -4,8 +4,9 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Subcommand, ValueEnum};
 use rusqlite::{
@@ -1152,26 +1153,79 @@ fn surface_pause(root: &Path, reason: Option<&str>) -> Result<Value, Box<dyn Err
     Ok(json!({"paused_reason":reason}))
 }
 
+fn no_submit_artifacts(root: &Path, tid: &str, later_tid: &str) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!("{later_tid}."))
+            || name.starts_with(&format!("{later_tid}-"))
+            || ((name.starts_with(&format!("{tid}.")) || name.starts_with(&format!("{tid}-")))
+                && name.contains("submit"))
+        {
+            return Err(invalid("native submit or later attempt artifact exists"));
+        }
+    }
+    let state = root.join(format!("{tid}.visual-state.json"));
+    if state.symlink_metadata().is_ok() {
+        private(&state, false)?;
+        let value: Value = serde_json::from_reader(OpenOptions::new().read(true).open(state)?)?;
+        if value["id"] != tid || value["stage"] != "prepare-attempted" {
+            return Err(invalid(
+                "native visual state is inconsistent with pre-submit stop",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn abandon_unsent(
     root: &Path,
     id: i64,
     reason: &str,
     expected_attempt: i64,
 ) -> Result<Value, Box<dyn Error>> {
-    if reason.trim().len() < 8 || reason.len() > 512 || expected_attempt < 1 {
+    if reason.trim().len() < 8 || reason.len() > 512 || !(1..i64::MAX).contains(&expected_attempt) {
         return Err(invalid(
             "abandonment requires a review reason and exact attempt",
         ));
     }
+    // The proof handshake, artifact reads and final scheduler update share the
+    // executor and desktop locks. The driver inherits this sender lock.
+    let executor_path = root.join("executor.lock");
+    let executor = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&executor_path)?;
+    private(&executor_path, false)?;
+    if unsafe { libc::flock(executor.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(invalid("desktop executor busy; abandonment retained"));
+    }
+    let lock_path = root.join("sender.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)?;
+    private(&lock_path, false)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(invalid("desktop sender busy; abandonment retained"));
+    }
     let mut db = open(root, true)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (conversation, request, status, result): (String, String, String, Option<String>) = tx
+    let (conversation, request, status, result): (String, String, String, Option<String>) = db
         .query_row(
             "SELECT conversation_id,request_id,status,result FROM dispatch WHERE id=?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
-    let active: Option<i64> = tx.query_row(
+    let active: Option<i64> = db.query_row(
         "SELECT active_dispatch FROM surface WHERE singleton=1",
         [],
         |r| r.get(0),
@@ -1181,7 +1235,7 @@ fn abandon_unsent(
             "only an idle indeterminate dispatch can be reviewed",
         ));
     }
-    let b = binding(&tx, &conversation)?;
+    let b = binding(&db, &conversation)?;
     let outbox = Connection::open_with_flags(
         b.state.join("outgoing.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1191,8 +1245,21 @@ fn abandon_unsent(
         params![request, expected_attempt],
         |r| r.get(0),
     )?;
-    private(Path::new(&evidence), false)?;
-    let report: Value = serde_json::from_reader(OpenOptions::new().read(true).open(&evidence)?)?;
+    let (intent_status, intent_attempt, intent_evidence, kind, text):
+        (String, i64, Option<String>, String, String) = outbox.query_row(
+        "SELECT status,attempt_number,result_evidence,content_kind,text FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        params![request,b.channel_id,b.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    )?;
+    if intent_status != "indeterminate"
+        || intent_attempt != expected_attempt
+        || intent_evidence.as_deref() != Some(evidence.as_str())
+        || kind != "text"
+    {
+        return Err(invalid(
+            "outbox current attempt or content does not match review",
+        ));
+    }
     let identity = format!("{}\0{}", b.channel_id, request);
     let suffix = if expected_attempt == 1 {
         String::new()
@@ -1204,6 +1271,18 @@ fn abandon_unsent(
         &hex::encode(Sha256::digest(identity.as_bytes()))[..48],
         suffix
     );
+    let evidence_path = root.join(format!("{tid}.client-result.json"));
+    if Path::new(&evidence) != evidence_path {
+        return Err(invalid(
+            "attempt report is outside the canonical UI root or misnamed",
+        ));
+    }
+    private(&evidence_path, false)?;
+    if fs::metadata(&evidence_path)?.len() > 65536 {
+        return Err(invalid("attempt report is too large"));
+    }
+    let report_bytes = fs::read(&evidence_path)?;
+    let report: Value = serde_json::from_slice(&report_bytes)?;
     let stages = ["started", "inspected", "group_focused"];
     if report["request_id"] != request
         || report["id"] != tid
@@ -1215,14 +1294,75 @@ fn abandon_unsent(
     {
         return Err(invalid("attempt evidence does not prove a pre-submit stop"));
     }
-    for suffix in ["submit-attempted.json", "stage.json"] {
-        let path = Path::new(&evidence)
-            .parent()
-            .ok_or_else(|| invalid("attempt evidence has no parent"))?
-            .join(format!("{tid}.{suffix}"));
-        if path.exists() || path.symlink_metadata().is_ok() {
-            return Err(invalid("native submit evidence exists; cannot abandon"));
-        }
+    let base_tid = tid.split("-a").next().unwrap_or(&tid);
+    let later_tid = format!("{base_tid}-a{}", expected_attempt + 1);
+    no_submit_artifacts(root, &tid, &later_tid)?;
+    let channel = load_binding(&b.state)?;
+    let payload = serde_json::to_vec(&json!({
+        "protocol_version":1,
+        "request_id":request,
+        "attempt_number":expected_attempt+1,
+        "recovery_from_attempt":expected_attempt,
+        "channel_id":b.channel_id,
+        "session_id":b.session_id,
+        "account":channel.account,
+        "talker":channel.talker,
+        "text":text,
+    }))?;
+    let driver = b.state.join("conversation-sender");
+    let meta = fs::symlink_metadata(&driver)?;
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.nlink() != 1
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid(
+            "registered sender driver is not private and executable",
+        ));
+    }
+    super::outgoing::check_recovery_capabilities(&driver, Duration::from_secs(20))?;
+    super::outgoing::check_recovery_preflight(
+        &driver,
+        &payload,
+        Duration::from_secs(25),
+        Some(lock.as_raw_fd()),
+    )?;
+    no_submit_artifacts(root, &tid, &later_tid)?;
+    if fs::read(&evidence_path)? != report_bytes {
+        return Err(invalid("attempt report changed during driver proof"));
+    }
+    let current: (String, i64, Option<String>) = outbox.query_row(
+        "SELECT status,attempt_number,result_evidence FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        params![request,b.channel_id,b.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    )?;
+    if current.0 != "indeterminate"
+        || current.1 != expected_attempt
+        || current.2.as_deref() != Some(evidence.as_str())
+    {
+        return Err(invalid("outbox attempt changed during driver proof"));
+    }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let latest: (String, Option<String>) = tx.query_row(
+        "SELECT status,result FROM dispatch WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let current_binding = binding(&tx, &conversation)?;
+    if latest.0 != "unknown"
+        || latest.1.as_deref() != Some("indeterminate")
+        || active.is_some()
+        || current_binding.epoch != b.epoch
+        || current_binding.state != b.state
+        || current_binding.channel_id != b.channel_id
+        || current_binding.session_id != b.session_id
+    {
+        return Err(invalid("scheduler or binding changed during driver proof"));
     }
     tx.execute(
         "UPDATE dispatch SET status='done',result='abandoned_pre_submit',updated_at=?2 WHERE id=?1",

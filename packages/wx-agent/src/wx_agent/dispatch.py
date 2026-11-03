@@ -268,9 +268,9 @@ def main(argv=None):
         elif args.action == "review":
             value = review_surface(binary, root, args.reason, args.confirm_desktop_safe, args.restore_unattempted)
         elif args.action == "abandon-unsent":
-            with exclusive(root, "executor.lock"), exclusive(root, "sender.lock"):
-                value = call(binary, root, "dispatch", "abandon-unsent", "--dispatch-id", args.dispatch_id,
-                             "--expected-attempt", args.expected_attempt, "--reason", args.reason)
+            # Rust holds both locks through native proof and scheduler commit.
+            value = call(binary, root, "dispatch", "abandon-unsent", "--dispatch-id", args.dispatch_id,
+                         "--expected-attempt", args.expected_attempt, "--reason", args.reason)
         else:
             value = call(binary, root, "dispatch", "status")
         print(json.dumps(value, separators=(",", ":")))

@@ -20,6 +20,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SenderTests(unittest.TestCase):
+    def test_inherited_recovery_lock_must_reacquire_same_locked_description(self):
+        with tempfile.TemporaryDirectory() as root:
+            lock_path = Path(root) / "sender.lock"
+            held = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            other = os.open(lock_path, os.O_RDWR)
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with mock.patch.dict(os.environ, {"WX_DESKTOP_LOCK_FD": str(other)}):
+                    with self.assertRaises(driver.Refused):
+                        with driver.recovery_sender_lock(lock_path):
+                            pass
+                with mock.patch.dict(os.environ, {"WX_DESKTOP_LOCK_FD": str(held)}):
+                    with driver.recovery_sender_lock(lock_path):
+                        pass
+            finally:
+                os.close(other)
+                os.close(held)
+
     def setUp(self):
         self.binding = {"channel_id": "channel-one", "session_id": "session-one",
                         "account": "local-account", "talker": "group@chatroom",
