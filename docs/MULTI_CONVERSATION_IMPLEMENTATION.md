@@ -1,6 +1,6 @@
 # 多会话实施与验收记录（更新至 2026-11-03）
 
-实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前运行候选为 `c8f0f0c`，Candidate 3 固定二进制 SHA-256 为 `5e2e47ef08789e2eb91dc9388ea11f8e294325127955d877f00a550807946787`。本页区分代码、离线检查、真实读取、受管 Session、GUI 和独立收件证据；旧失败作为历史保留。当前两个授权目标均为 `push/observe`，桌面发送暂停，无运行中的 worker。原文字的历史验收不自动覆盖新增队列；不合并、不发布、不向非测试业务群发送。
+实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前运行候选为 `c61ab03`；文字队列与独立收件在 `c8f0f0c` 取得，后续候选未重复发送。Candidate 3 固定二进制 SHA-256 仍为 `5e2e47ef08789e2eb91dc9388ea11f8e294325127955d877f00a550807946787`。本页区分代码、离线检查、真实读取、受管 Session、GUI 和独立收件证据；旧失败作为历史保留。当前两个授权目标均为 `push/observe`，桌面发送暂停，无运行中的 worker。原文字的历史验收不自动覆盖新增队列；不合并、不发布、不向非测试业务群发送。
 
 最新架构决策：wx-cli 独立提供群订阅和消息投递能力，Session 经 plugin 订阅并取得消息；通道与 Session 是两个独立边界。现有 managed app-server 仅为可选适配实验，不是 wx-cli 核心能力或必需运行路径。订阅/投递与 plugin 接入合同由主 agent 另行完善；本页的受管实验和实机记录不代表该架构接入已完成，plugin 尚未实现。
 
@@ -12,19 +12,19 @@
 | P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现；两个授权 channel 并发增量读取成功。最新跨会话入队时，私聊读取与群发送并行。有界接管隔离检查 `complete=true`：同目标双并发 takeover 只有一个 CAS 成功，另一会话读取成功且绑定未变；旧/接管中/迟到发送均被代际拒绝，未产生意图、attempt 或桌面效果；正确 handback 恢复原 owner、`push/observe`、Session 引用和处理水位。 | 人工出站检测的现场复验及更广故障场景仍未闭合；单次有界接管检查不等于长期并发验收。 |
 | P2 共享发送 | 文字/图片/focus 共用 Rust dispatch，含来源代际、batch 顺序、优先级、到期及未知结果保护。最新同群 Q2/Q3 各一次 attempt、`ui_observed`，源 cursor 51/52，第二执行器返回 busy；跨会话队列按 dispatch 22 私聊、23 群串行完成，各一次 attempt，源 cursor 12/54。用户独立确认两组文字的目标、顺序、内容、换行和 emoji 正确；重复 ID 未增加 attempt。 | 图片队列尚未成功；这些有界场景不替代更广故障注入或长期运行验收。 |
 | P3 inbox/Session | Rust 已有持久批次、处理租约及显式决定；可选 managed app-server 实验取得私聊 delivery 1 skip、2 defer、群 delivery 4 skip 且 transport turn completed，私聊 delivery 3 仍 pending。底层 `channel subscribe --consumer … --once` 已在两个授权通道并行实测：私聊 12/12、群 54/54 条历史事件，身份和递增 cursor 符合绑定；未 ack 的事件在退出重启后完整重读，原 consumer 行不变。 | 该检查无模型调用、ack 或发送，也没有新入站；它不证明新消息处理、wx-cli 到 Session 的投递或 plugin 接入。plugin、桌面 App 持有业务 thread 推送及跨宿主推送尚未实现。 |
-| P4 运行验收 | [CI 41482737801](https://github.com/cyl19970726/wx-cli/actions/runs/41482737801) 四项成功；当前候选已在 Mac mini 运行，完成有界文字队列、独立收件及接管隔离核验。 | 监听停止健康及更广故障注入仍待核对；完整 24 小时观察已取消，不作为本轮等待条件，也不宣称通过。 |
+| P4 运行验收 | `c61ab03` 四项 CI、本地全套 Rust、Python 检查及 Mac mini Python 3.9 安装包检查通过；短时双目标采集、监听竞争与停止健康实测通过。文字队列、独立收件及接管隔离保留各自版本证据。 | 更广现场故障注入仍未闭合；完整 24 小时观察已取消，不作为本轮等待条件，也不宣称通过。 |
 
 ## 工程验证
 
-当前候选 `c8f0f0c` 的 [CI 41482737801](https://github.com/cyl19970726/wx-cli/actions/runs/41482737801) 四项成功：Rust、Python 3.9、Python 3.12、Swift。下表区分本轮结果与旧快照；本地 Python 3.9 的 `ensurepip` 曾因 SIGABRT 中止，未运行产品测试，远端 3.9 和 CI 3.9 则已通过。
+文字验收候选 `c8f0f0c` 的 [CI 41482737801](https://github.com/cyl19970726/wx-cli/actions/runs/41482737801) 四项成功。当前代码 `c61ab03` 的 [CI 41572232120](https://github.com/cyl19970726/wx-cli/actions/runs/41572232120) 四项也成功：Rust、Python 3.9、Python 3.12、Swift。本轮本地及 Mac mini 结果如下。本地 Python 3.9 的早期 `ensurepip` SIGABRT 不计作产品测试；本轮已在 Mac mini 的 Python 3.9.6 运行当前源码和安装包检查。
 
 | 检查 | 实际结果 |
 | --- | --- |
 | Rust 完整测试 | 859 passed、11 原有 ignored、0 failed；严格 all-target Clippy、fmt 和 build 通过。 |
 | 编译 CLI 合成集成 | 先前 19 项通过，覆盖队列恢复、锁忙、顺序及未知结果；实际文字队列结果另见上方 P2。合成 CLI 不是真实微信。 |
-| Python 仓库脚本 | 最新 Python 3.12：118 passed、0 skipped。本地 Python 3.9 未运行产品测试，原因是 `ensurepip` SIGABRT；远端 3.9 与 CI 3.9 通过。 |
-| 仓库外 wheel | 最新 Python 3.12：114 passed；已安装包与源码检查分开记录。 |
-| Mac mini Python 3.9.6 | 先前仓库脚本 113 passed、wheel 108 passed；当前候选在 Mac mini 运行，3.9 的远端及 CI 检查通过。此行的旧计数不作为当前候选的新计数。 |
+| Python 仓库脚本 | 当前 Python 3.12：119 passed、0 skipped，包含编译 CLI 集成及 sender 证明回归。 |
+| 仓库外 wheel | 当前 Python 3.12：123 passed；已安装包与源码检查分开记录。 |
+| Mac mini Python 3.9.6 | 当前代码独立构建：仓库脚本 119 passed、wheel 123 passed，无跳过；候选安装和升级前后账本对照通过。 |
 | Swift | 参数与命名剪贴板恢复检查通过。输入法 ABC 指示和 caret 的外观差异，采用每配置主引用加最多两张经核实的空输入框校准替代图，仍逐像素匹配整块输入框；没有遮罩或放宽比较。 |
 | 可分享材料 | 图源与经原通过回执核验的空白规范化公开 HTML 一并保存；公开源码与 diff 检查通过。图稿不是实现或实机证据。 |
 
@@ -123,7 +123,15 @@ GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图�
 
 按通道/plugin 分层补验，`c8f0f0c` 候选对仅两个授权 channel 各用独立观察者 consumer 并行执行两次 `channel subscribe --once`：私聊两次各读 12 条、群两次各读 54 条历史事件。事件身份与递增 cursor 均符合绑定；没有 ack，退出再启动仍完整重读，原 consumer 行保持不变；模型调用、ack 和新发送均为零。公开证据索引 E08 对应私有报告。此验证只覆盖底层订阅和不确认时的重读，没有新入站处理，也不证明 Session plugin 接入或跨宿主投递。
 
-以上是有界文字队列、独立收件与接管隔离证据，不覆盖真实图片队列或监听停止健康。私聊 delivery 3 仍 pending，原 thread busy 时未换 Session；群 delivery 4 已 `skipped` 且 transport turn completed。两个授权目标已恢复 `push/observe`，桌面发送暂停，无运行中的 worker。完整 24 小时观察已取消，不以等待时间替代功能验收，也不写成通过。
+以上是有界文字队列、独立收件与接管隔离证据，不覆盖真实图片队列。私聊 delivery 3 仍 pending，原 thread busy 时未换 Session；群 delivery 4 已 `skipped` 且 transport turn completed。两个授权目标已恢复 `push/observe`，桌面发送暂停，无运行中的 worker。完整 24 小时观察已取消，不以等待时间替代功能验收，也不写成通过。
+
+## 2026-11-03 订阅边界与停止状态收口
+
+按用户澄清，通道提供订阅和消息/发送能力，Session 插件消费该能力并使用宿主接口通知原 Session。[订阅与插件合同](CHANNEL_SUBSCRIPTIONS.md)列出当前底层订阅、inbox 接口、进度含义及未交付的插件部分。现有受管 Codex 路径是可选适配实验；本轮未把它改称通用插件，也没有向桌面持有的原 thread 再次投递。
+
+`44fd7c4` 修复监听退出后残留运行健康的问题，并覆盖竞争监听器不得写另一个实例的健康、最终写入必须在释放锁之前、执行器超时与清理失败不得谎称停止。当前 wheel 的 123 项检查含这些回归。`0eb52c0` 收紧 `abandon-unsent`：Rust 在共享锁下核对当前文字 attempt、规范路径、原生状态和 submit 痕迹，复用原 driver 能力握手及完整只读证明，之后以短事务 CAS 归档调度。缺失/矛盾证据仍未知；图片保守拒绝。合成集成和 sender 回归通过，本轮没有拿实际未知请求重新归档或重试。
+
+Mac mini 独立构建安装 `c61ab03` 后，两个授权目标的全部绑定、consumer、outbox/attempt、delivery、dispatch 和 surface 行保持一致，原生助手未重建或替换。随后进行约 5 秒的 collector-only 实测：不传 Session 配置、不启动模型、不发送；两个目标采集无错误。第二监听器被拒绝且未覆盖原实例健康。主进程正常退出码 0，最终 `run_state=stopped`，collector/executor 均不存活、executor 退出码 0；原 delivery/turn、attempt、intent 和 consumer 保留，发送暂停保持。此结果覆盖生命周期，不是新入站业务处理或持续运行成绩。
 
 ## 私有证据索引
 
@@ -135,5 +143,6 @@ GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图�
 - E06：助手权限、窗口、AppleScript 失败、后续原生关闭设置，以及文字/图片各一次尝试和停止后的策略恢复证据。
 - E07：当前候选文字队列顺序、双会话串行发送、独立收件及接管隔离的脱敏汇总；原始接管核验留在私有验收目录。
 - E08：两个授权 channel 的独立观察者并行订阅、退出重启重读及原 consumer 不变的脱敏汇总；原始报告留在私有验收目录。
+- E09：当前候选独立构建/安装、原生助手与全账本不变核对、双目标短时采集、竞争监听拒绝和最终停止健康；原始材料留在私有验收目录。
 
 真实身份、Session/turn 引用、token、配置、截图与数据库保留在各自宿主的忽略/私有验收目录；公共仓库仅记录上述汇总。

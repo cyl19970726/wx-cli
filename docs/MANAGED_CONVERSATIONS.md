@@ -2,6 +2,8 @@
 
 本页描述新增托管入口。工程、实机与独立收件分别见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)；受管 Session 的实际验证范围见[适配器记录](SESSION_ADAPTER_VALIDATION_20261101.md)。旧文字验收不因本次扩展失效，新增功能也不继承旧版的实机验收。
 
+通道订阅与 Session 插件分工见[接入合同](CHANNEL_SUBSCRIPTIONS.md)。下面的 inbox/dispatch 是通道能力，Codex provision/推送是可选适配实验；订阅不要求创建受管 Session。
+
 群聊和私聊使用同样的稳定会话 ID。每个聊天绑定自己的 owner、输入方式和控制代际；可以主动读取，也可以把增量通知交给该 owner 的持久 Session。收到推送不等于必须回复，Session 的最终文本和工具日志不会自动转发微信。
 
 ## 从已有授权会话迁移
@@ -81,6 +83,8 @@ wx-agent dispatch --config /ABS/private/conversations.json review \
 
 该命令还必须通过新鲜 helper/桌面 preflight，只恢复其他合格项，不重放未知项。托管模式暂不支持 narrow `recover-unsent`，不能通过旧入口或更换 ID绕过；历史未托管恢复仍按原严格证据合同。
 
+`dispatch abandon-unsent --dispatch-id … --expected-attempt … --reason …` 只归档已证明提交前停止的调度阻塞，不发送，也不把 outbox 的 `indeterminate` 改成成功。它在 Rust 持有 executor/sender 锁期间核对当前文字 attempt、规范 UI 路径、完整原生记录，并要求 driver 能力握手和只读未提交证明。真实 submit 标记、矛盾/缺失记录、过期 attempt 或旧 driver 均拒绝。当前该证明入口只支持文字；图片保留未知状态，不能凭早期报告或缺少出站事件归档。
+
 若是执行器在 attempt 之前退出，原 outbox 确实仍为零次尝试、原 owner/epoch 未变，可在同一次安全核查加 `--restore-unattempted DISPATCH_ID` 恢复该原请求。任何已有 attempt 的意图都不能走此入口。未关联发件箱证据的本人出站被视为可能人工发言：只接管对应会话并更新 epoch，不暂停其他会话；正在尝试的出站先等待结果再关联，不直接误判为人工。
 
 ## 逐会话接管
@@ -121,6 +125,8 @@ wx-agent inbox --config /ABS/private/conversations.json run \
 冷连接先通过官方 `thread/resume` 加载指定受管 thread，再读取状态；不直接读写存档。配置中的 provisioning 项未 ready 时监听器拒绝启动该配置。初始化是显式 setup；主动读取和普通 metadata 查询不运行初始化模型。
 
 `inbox-health.json` 是私有派生健康信息，记录采集、活跃 Session、需检查事项与队列概况，不替代 Rust 状态。运行期限上限 24 小时；达到期限会关闭自持连接，未完成回合可能中断且保留原投递，需要核查。持续运行验收看实际起止与故障记录，不能把 `--seconds 86400` 当成已经运行 24 小时。
+
+健康信息使用 `run_state=running/stopping/stopped`。退出后只有确认本轮采集器和执行器结束才记录 `stopped_at`；等待超时或清理失败保留 `stopping` 和相应错误。只有持有 runner lock 的实例能写健康文件，最终写入在释放锁之前完成。`push` 带 `push_observed_at`，表示最后一次 Session 观测；关闭连接不代表其业务待办已完成。
 
 ## 回退
 
