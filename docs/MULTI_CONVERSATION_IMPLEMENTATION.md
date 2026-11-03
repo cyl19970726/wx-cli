@@ -1,8 +1,8 @@
 # 多会话实施与验收记录（更新至 2026-11-03）
 
-实施候选见[草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 已启用 `41789f7` 的 CLI/Python：原私聊 N5 图片已独立收件并在同一原 intent 完成 `exact-pixels` 延迟对账；原 N4 图片及原 N5 配文的限定归档均已实机通过。所有原 outbox、attempt、原生文件和草稿保持原样，没有重发。归档结束的是原调度阻塞，不能记为图片或配文发送成功。
+实施候选见[草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 最后核对已启用 `175358d` 的 CLI/Python：原私聊 N5 图片已独立收件并在同一原 intent 完成 `exact-pixels` 延迟对账；原 N4 图片及原 N5 配文的限定归档均已实机通过。所有原 outbox、attempt、原生文件和草稿保持原样，没有重发。归档结束的是原调度阻塞，不能记为图片或配文发送成功。
 
-按钮修复已在同一路径更新 Candidate 4，旧签名助手与代码回退证据保留，账本未变；新签名的系统权限正在按正常界面刷新。新的群图片与配文整批、桌面 App 持有的 Session、跨宿主 Session 插件和更广现场故障场景仍待验收。两个授权目标仍为 `push/observe`，桌面发送暂停；24 小时观察已取消，不合并或发布。
+按钮修复已在同一路径更新 Candidate 4，旧签名助手与代码回退证据保留，账本未变；新签名的三项权限最后实测仍为 false，界面开关显示开启不等于程序获准。随后 Mac mini 的 SSH 与屏幕共享端口均无法连接，现场验收暂停。新的群图片与配文尚未入队；桌面 App 持有的 Session、跨宿主 Session 插件和更广现场故障场景仍待验收。两个授权目标最后核对为 `push/observe`，桌面发送暂停；24 小时观察已取消，不合并或发布。
 
 最新架构决策：wx-cli 独立提供群订阅和消息投递能力，普通应用可发布通知，Session 经 plugin 消费订阅。当前源码已分离旧 Codex 适配、增加应用 `publisher_id`、项目级原生 Hook 插件、鉴权 RPC/SSH 客户端及有界前台通知 runner。通道与宿主分别验收：原专用 native TUI Session 路径已有新版全新入站闭环；不同物理宿主的只读 inbox API 已通过限定范围的实机检查；桌面 App 持有的原 Session 和实际异机 Session 插件投递仍未通过。
 
@@ -193,7 +193,7 @@ Mini 已启用完整 `d2a0dae` 运行时；两个授权目标的全部账本经�
 
 后续源码增加严格绑定账号的静默派生、界面动作前的图片配置检查、原已提交图片的延迟正面核验及单独的已知 prepare Copy 拒绝归档。延迟核验保留原 attempt/报告，新增不可修改的观察证据；归档不会将未发送的 batch 父项当成成功。完整本机 Rust 874 passed、11 原有 ignored，Python 仓库脚本 171 passed、仓库外 wheel 208 passed；独立审查发现“选择 cursor 可截断歧义窗口”，已修复为检查完整有界原始时间窗并追加回归。本节工程证据尚未计作后续修复在 Mini 的实际回验通过。
 
-跨宿主验收沿已存在的本机 App root 进行，普通入口和原生队列的无微信探针均实际完成，没有新建或强行 resume Session。当前 CLI 对 linked worktree 的 Hook 来源重定向到同一仓库的主检出目录；安装器已支持显式项目范围，实际三个 Hook 已在正确来源被发现，Skill 与记录仍在指定工作树，没有全局安装。App 内 Hook 信任和该验收聊天的网络设置等待用户正常操作：桌面工具明确拒绝控制 Codex App，本轮没有改用脚本或信任数据库绕过。尚未为本机 App root 预留真实业务 delivery，不能把两次入口探针说成订阅处理通过。
+跨宿主验收沿已存在的本机 App root 进行，普通入口和原生队列的无微信探针均实际完成，没有新建或强行 resume Session。当前 CLI 对 linked worktree 的 Hook 来源重定向到同一仓库的主检出目录；安装器已支持显式项目范围，实际三个 Hook 已在正确来源被发现，Skill 与记录仍在指定工作树，没有全局安装。用户已报告完成 App 内 Hook 信任和该验收聊天的网络设置，但尚无新的项目 Hook 回调，现有原 App root 的网络探针仍是系统拒绝。独立 CLI 的项目目录库存显示三项启用但未信任；它不等于 App-held root 的实际执行策略。桌面工具明确拒绝控制 Codex App，本轮没有改用脚本或信任数据库绕过，也不再反复要求发送同一探针。尚未为本机 App root 预留真实业务 delivery，不能把入口探针说成订阅处理通过。
 
 ### 本轮 N5 延迟对账、N4 归档拒绝与 N5 配文停止点（2026-11-03）
 
@@ -219,6 +219,16 @@ Mini 已启用完整 `d2a0dae` 运行时；两个授权目标的全部账本经�
 | 编译 CLI 通道集成 | `test_local_channel` 退出码 0。 | 编译 CLI 合成检查结果；不代表真实微信发送。 |
 
 上述日志位于本地忽略目录。新增的显式已知旧图片草稿传递修复，又经脚本 183、仓库外安装包 208 检查通过；Rust 与原生代码未再改变。N4/N5 配文归档不触发 GUI；新按钮修复的真实发送及新图后配文仍待验收。
+
+### 最新部署、权限与连接边界（2026-11-03）
+
+`175358d` 的[完整 CI 41653534116](https://github.com/cyl19970726/wx-cli/actions/runs/41653534116)四项全部成功；Mini Python 3.9 独立安装检查的脚本 183、已安装包 208 通过。CLI/Python 激活再次证明旧账本、owner/epoch、暂停和已签名助手不变。Rust 与原生代码相对 `41789f7` 无变化；新增 Python 边界复验并传递显式旧图片草稿，不推断或清除未知内容。
+
+Candidate 4 的必要按钮修复单独构建、签名并在原路径更新，保留完整旧签名 app 和配置回退。首次激活在权限错误处回退，原失败记录保留；第二次明确安装新版但保持桌面暂停，全部旧账本不变。独立退出证明确认 inspect helper 已退出、无未决 marker。正常系统设置中的开关刷新之后，程序新鲜检查仍为 Accessibility、Screen Recording、Post Events 全 false，不能宣称授权恢复或发送通过。已请求仅刷新原 Candidate 4 条目，没有新增 Candidate 5。
+
+原私聊 delivery 3 最后核对仍为 `pending`、epoch 15，与当前 owner 相符，无 lease、turn reservation 或更早待办阻塞。现有证据不能继续沿用旧“busy”结论，也不足以证明原 Session 当前空闲。准备的原受管 Session 有界恢复检查在 **SSH 建立连接阶段**超时，远端程序没有执行，没有领取、开始回合或替换 Session。
+
+随后同一授权目标的 SSH 和屏幕共享端口探测均失败；Tailscale 的逻辑在线状态不能替代实际可达性。UU 仍显示旧远程画面和本地计时，窗口输入多次报 `noWindowsAvailable`；移动指针或返回成功不能证明远端设置已改变。最后核对时没有运行的采集、发送或 notifier；断连后没有再次核实当前进程状态。N6 新图与配文仅准备了私有测试材料，尚未上传、入队或发送。待连接恢复后，先检查原状态与新助手权限，再继续现场验收。E21。
 
 ## 私有证据索引
 
@@ -246,5 +256,7 @@ Mini 已启用完整 `d2a0dae` 运行时；两个授权目标的全部账本经�
 - E18：N4 Copy 拒绝归档的首次严格证明因生产单空格格式被拒、无变更核对及解析器兼容修复记录；包含 41789 对原 N4 的限定归档成功及全部原始文件、attempt 和草稿未变证明。
 - E19：原 N5 配文的 prepare 成功、精确首次 Send OCR 错误、`prepared` state、marker 缺失与原文字草稿保留证据；包含原 N5 配文限定归档成功；不包含任何配文重发。
 - E20：本轮 CI4017 的 Rust fixture 端口竞争失败与其他三项成功历史；本地完整矩阵通过日志为 `.local/button-guard-full-rust.log`、`.local/button-guard-final-scripts.log`、`.local/button-guard-installed.log`、`.local/button-guard-final-native.log`，以及 `test_local_channel` 编译 CLI 退出码 0 的检查结果。包含 41789 四项 CI 成功、Mini 安装及两个原请求限定归档证明；后续发送结果另行记录。
+
+- E21：175358d 的完整 CI、Mini 安装与激活；新签名原生助手的回退/安装/退出证明、实际权限 false、原 delivery 3 元数据以及 SSH 建立连接失败的本地证据。没有新图片发送或原私聊恢复执行记录。
 
 真实身份、Session/turn 引用、token、配置、截图与数据库保留在各自宿主的忽略/私有验收目录；公共仓库仅记录上述汇总。
