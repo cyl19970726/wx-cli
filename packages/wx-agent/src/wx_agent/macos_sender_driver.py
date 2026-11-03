@@ -1023,6 +1023,11 @@ def _image_rejection_snapshot(ui, tid):
         "new-image-before-click", "new-image-before-select", "new-image-before-copy",
         "new-image-copy-ready", "new-image-image-fallback-ready",
         "new-image-image-fallback-before-click", "new-image-image-fallback-before-copy"))
+    return _rejection_artifact_snapshot(ui, tid, required, optional)
+
+
+def _rejection_artifact_snapshot(ui, tid, required, optional):
+    """Shared bounded private reads; each archive supplies its own strict set."""
     snapshot = {}
     total = 0
     for index, path in enumerate(ui.iterdir()):
@@ -1055,14 +1060,14 @@ def _image_rejection_snapshot(ui, tid):
         snapshot[path.name] = (hashlib.sha256(raw).hexdigest(), before.st_dev, before.st_ino,
                                before.st_mtime_ns, before.st_ctime_ns)
     if not required <= set(snapshot):
-        raise Refused("incomplete original IMAGE rejection trace")
+        raise Refused("incomplete original rejection trace")
     return snapshot
 
 
 def _known_image_copy_rejection(error):
     if not isinstance(error, str) or len(error) > 2048:
         return False
-    match = re.fullmatch(r"Composer Copy did not replace image sentinel exactly once \(types:([A-Za-z0-9_.+,-]+)\)", error)
+    match = re.fullmatch(r"Composer Copy did not replace image sentinel exactly once \(types: ?([A-Za-z0-9_.+,-]+)\)", error)
     if match is None:
         return False
     types = match.group(1).split(",")
@@ -1155,6 +1160,122 @@ def image_rejection_preflight(request, config):
         if _image_rejection_snapshot(ui, tid) != before:
             raise Refused("original IMAGE evidence changed during proof")
     return {"protocol_version": 1, "image_rejection_protocol_version": 1, "prepare_rejection_proven": True}
+
+
+TEXT_BUTTON_REJECTION_ERROR = "Expected exactly one visible Send label in lower conversation pane"
+
+
+def _text_button_rejection_snapshot(ui, tid):
+    required = {tid + suffix for suffix in (
+        ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-evidence.json",
+        ".prepare-visual.job.json", ".prepare-visual.result.json", ".visual-state.json",
+        ".submit-visual.job.json", ".submit-visual.result.json")}
+    optional = {tid + "-focus." + suffix for suffix in (
+        "focus-attempted.json", "focus-polls.json", "before-search-click.png",
+        "before-search-select.png", "before-search-paste.png", "before-search-copy.png",
+        "search-copy-ready.png", "focus-initial.png", "focus-search-result-main.png",
+        "focus-search-result-popup.png", "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png", "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png", "focus-search-after-click.png")}
+    optional.update(tid + "." + step + ".png" for step in (
+        "prepare-start", "old-draft-before-click", "old-draft-before-select",
+        "old-draft-before-copy", "old-draft-copy-ready", "old-draft-empty-check",
+        "old-draft-empty-check-1", "old-draft-empty-check-2", "replace-draft-before-paste",
+        "new-draft-before-click", "new-draft-before-select", "new-draft-before-copy", "new-draft-copy-ready",
+        "submit-draft-before-click", "submit-draft-before-select", "submit-draft-before-copy",
+        "submit-draft-copy-ready", "before-submit"))
+    return _rejection_artifact_snapshot(ui, tid, required, optional)
+
+
+def text_button_rejection_preflight(request, config):
+    """Recognize one prepared TEXT button-guard rejection, never retry it."""
+    fields = {"protocol_version", "text_button_rejection_protocol_version", "content_kind", "request_id",
+              "attempt_number", "channel_id", "session_id", "account", "talker", "text"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("text_button_rejection_protocol_version")) is not int
+            or request["text_button_rejection_protocol_version"] != 1
+            or request.get("content_kind") != "text"
+            or type(request.get("attempt_number")) is not int or request["attempt_number"] != 1
+            or "target_name" not in config):
+        raise Refused("TEXT button rejection protocol differs")
+    tid = request_ok(request, config, 1)
+    ui = config["ui_dir"]
+    private(ui, directory=True)
+    if ui.resolve(strict=True) != ui:
+        raise Refused("TEXT rejection UI root is not canonical")
+    with recovery_sender_lock(ui / "sender.lock"):
+        deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        before = _text_button_rejection_snapshot(ui, tid)
+        report = _read_artifact(ui / (tid + ".client-result.json"))
+        if (report.get("id") != tid or report.get("request_id") != request["request_id"]
+                or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
+                or any(report.get(k) != request[k] for k in ("channel_id", "session_id"))
+                or report.get("stage") != "prepared" or report.get("status") != "indeterminate"
+                or any(k in report for k in ("media_prepared", "media_submitted", "event_cursor", "recovery_from_attempt", "observation",
+                            "ui_submit_seconds", "submit_action_seconds", "verification_seconds"))):
+            raise Refused("original TEXT report is not the prepared button rejection")
+        inspect_id, focus_id = tid + "-inspect", tid + "-focus"
+        inspect_job = _read_artifact(ui / (inspect_id + ".inspect.job.json"))
+        inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+        if (inspect_job != {"id": inspect_id, "action": "inspect"}
+                or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+                or inspected.get("ok") is not True):
+            raise Refused("original TEXT inspect proof differs")
+        window_id, frame = inspect_ok(inspected, config)
+        if any(not math.isfinite(frame[k]) for k in ("x", "y", "width", "height")):
+            raise Refused("original TEXT inspect geometry differs")
+        focused = _read_artifact(ui / (focus_id + ".result.json"))
+        focus_job = _read_artifact(ui / (focus_id + ".focus-group.job.json"))
+        expected_focus = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+                          "targetKind": config.get("conversation_kind", "group"),
+                          "expectedPID": config["expected_pid"], "expectedWindowID": window_id,
+                          "expectedFrame": frame, "conversationListRect": config["conversation_list_rect"],
+                          "searchPoint": config["search_point"]}
+        if (json.dumps(focus_job, sort_keys=True) != json.dumps(expected_focus, sort_keys=True)
+                or focused.get("id") != focus_id or focused.get("action") != "focus-group"
+                or focused.get("ok") is not True or not _permissions_ok(focused.get("permissions"))):
+            raise Refused("original TEXT focus request differs")
+        try:
+            focus_proof = focus_result_ok(focused, config, focus_id, window_id, frame)
+        except Uncertain as exc:
+            raise Refused("original TEXT focus is not confirmed") from exc
+        if (report.get("target_kind") != config.get("conversation_kind", "group")
+                or report.get("focus_evidence_id") != focus_id
+                or report.get("focus_category") != focus_proof["category"]):
+            raise Refused("original TEXT report focus binding differs")
+        expected_job = dict(_prepare_command(request, config, window_id, frame, focus_id), id=tid, action="prepare-visual")
+        job = _read_artifact(ui / (tid + ".prepare-visual.job.json"))
+        submit_job = _read_artifact(ui / (tid + ".submit-visual.job.json"))
+        if (json.dumps(job, sort_keys=True) != json.dumps(expected_job, sort_keys=True)
+                or json.dumps(submit_job, sort_keys=True) != json.dumps(dict(expected_job, action="submit-visual"), sort_keys=True)):
+            raise Refused("original TEXT jobs differ from frozen text or calibration")
+        prepared = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+        if (prepared.get("id") != tid or prepared.get("action") != "prepare-visual"
+                or prepared.get("ok") is not True or prepared.get("prepared") is not True
+                or not _permissions_ok(prepared.get("permissions"))
+                or any(k in prepared for k in ("media_prepared", "media_submitted", "submitted", "event_cursor", "error"))):
+            raise Refused("original TEXT native preparation is not positive")
+        rejected = _read_artifact(ui / (tid + ".submit-visual.result.json"))
+        if (set(rejected) != {"id", "ok", "error", "permissions"} or rejected.get("id") != tid
+                or rejected.get("ok") is not False or rejected.get("error") != TEXT_BUTTON_REJECTION_ERROR
+                or not _permissions_ok(rejected.get("permissions"))
+                or report.get("error") != "submit outcome uncertain: " + helper_reason(rejected)):
+            raise Refused("native submit did not stop at the exact first text button guard")
+        expected_state = dict(expected_job, stage="prepared"); expected_state.pop("action")
+        state = _read_artifact(ui / (tid + ".visual-state.json"))
+        if json.dumps(state, sort_keys=True) != json.dumps(expected_state, sort_keys=True):
+            raise Refused("native TEXT state is not exactly the original prepared transaction")
+        if _helper_is_live(tid, deadline):
+            raise Refused("original TEXT helper is still live")
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        if _text_button_rejection_snapshot(ui, tid) != before:
+            raise Refused("original TEXT evidence changed during proof")
+    return {"protocol_version": 1, "text_button_rejection_protocol_version": 1, "button_rejection_proven": True}
 
 
 @contextmanager
@@ -1588,6 +1709,24 @@ def run(request, config):
 def main(argv=None):
     os.umask(0o077)
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--text-button-rejection-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "text_button_rejection_protocol_version": 1,
+                          "prepared_text_only": True, "submit_marker_forbidden": True}, separators=(",", ":")))
+        return 0
+    if argv == ["--text-button-rejection-preflight"]:
+        result = {"protocol_version": 1, "text_button_rejection_protocol_version": 1, "button_rejection_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = text_button_rejection_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["button_rejection_proven"] else 1
     if argv == ["--image-rejection-capabilities"]:
         print(json.dumps({"protocol_version": 1, "image_rejection_protocol_version": 1,
                           "prepare_copy_rejection_only": True, "no_submit_evidence_required": True},

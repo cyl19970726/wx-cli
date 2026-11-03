@@ -571,6 +571,57 @@ pub(super) fn check_image_abandon_capabilities(
     Ok(())
 }
 
+pub(super) fn check_text_button_rejection_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--text-button-rejection-capabilities",
+        None,
+        timeout,
+        None,
+    )?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("text_button_rejection_protocol_version") == Some(&json!(1))
+            && object.get("prepared_text_only") == Some(&json!(true))
+            && object.get("submit_marker_forbidden") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(
+            invalid("driver lacks prepared text button rejection review capability").into(),
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn check_text_button_rejection_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--text-button-rejection-preflight",
+        Some(payload),
+        timeout,
+        Some(lock_fd),
+    )?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("text_button_rejection_protocol_version") == Some(&json!(1))
+            && object.get("button_rejection_proven") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver did not prove the prepared text button rejection").into());
+    }
+    Ok(())
+}
+
 pub(super) fn check_image_abandon_preflight(
     driver: &Path,
     payload: &[u8],

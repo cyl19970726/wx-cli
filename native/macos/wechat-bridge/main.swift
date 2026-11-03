@@ -409,36 +409,33 @@ private func requireDraft(_ image: CGImage, rect: CGRect, expected: String) thro
     }
 }
 
-private func requireSendButton(_ image: CGImage, point: CGPoint) throws {
-    let lowerPane = CGRect(x: CGFloat(image.width) * 0.30,
-                           y: CGFloat(image.height) * 0.84,
-                           width: CGFloat(image.width) * 0.70,
-                           height: CGFloat(image.height) * 0.16).integral
-    let allLabels = try screenshotText(image, rect: lowerPane).map(normalizedDraft)
-    guard VisualParameters.uniqueSendLabel(allLabels, atButton: false) else {
-        throw Failure("Expected exactly one visible Send label in lower conversation pane")
-    }
-    guard let crop = VisualParameters.sendButtonCrop(at: point,
+private func requireSendButton(_ image: CGImage, point: CGPoint, composerRect: CGRect) throws {
+    guard let lowerPane = VisualParameters.sendButtonPane(imageWidth: image.width, imageHeight: image.height),
+          let crop = VisualParameters.sendButtonCrop(at: point,
         imageWidth: image.width, imageHeight: image.height) else {
         throw Failure("Calibrated Send button point is outside captured window")
     }
-    guard let buttonImage = image.cropping(to: crop) else {
-        throw Failure("Calibrated Send button crop is unavailable")
+    func candidates(in rect: CGRect) throws -> [HeaderOCRCandidate] {
+        guard let cropped = image.cropping(to: rect) else {
+            throw Failure("Send button OCR crop is unavailable")
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: cropped).perform([request])
+        return (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
+            guard let text = result.topCandidates(1).first?.string else { return nil }
+            let bounds = result.boundingBox
+            return HeaderOCRCandidate(text: normalizedDraft(text), bounds: CGRect(
+                x: rect.minX + bounds.minX * rect.width,
+                y: rect.minY + (1 - bounds.maxY) * rect.height,
+                width: bounds.width * rect.width, height: bounds.height * rect.height))
+        }
     }
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    request.recognitionLanguages = ["zh-Hans", "en-US"]
-    request.usesLanguageCorrection = false
-    try VNImageRequestHandler(cgImage: buttonImage).perform([request])
-    let candidates = (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
-        guard let text = result.topCandidates(1).first?.string else { return nil }
-        let bounds = result.boundingBox
-        return HeaderOCRCandidate(text: normalizedDraft(text), bounds: CGRect(
-            x: crop.minX + bounds.minX * crop.width,
-            y: crop.minY + (1 - bounds.maxY) * crop.height,
-            width: bounds.width * crop.width, height: bounds.height * crop.height))
-    }
-    guard VisualParameters.sendLabelAtButton(candidates, point: point, crop: crop) else {
+    guard try VisualParameters.sendButtonConfirmed(wideLabels: candidates(in: lowerPane),
+        buttonLabels: candidates(in: crop), point: point, composerRect: composerRect,
+        imageWidth: image.width, imageHeight: image.height) else {
         throw Failure("Unique Send label not confirmed at button point")
     }
 }
@@ -1104,14 +1101,14 @@ private func runVisual(_ command: Command) async throws -> [String: Any] {
         _ = try await readSelectedDraft(state, step: "submit-draft", expected: state.text)
     }
     let (window, image, lockStatus) = try await freshVisual(state, step: "before-submit", draft: nil)
-    try requireSendButton(image, point: state.buttonPoint.point)
+    try requireSendButton(image, point: state.buttonPoint.point, composerRect: state.composerRect.rect)
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(state.id).submit-attempted.json"))
     var attempted = state
     attempted.stage = "submit-attempted"
     try writeStage(attempted)
     let (currentWindow, currentImage, _) = try await freshVisual(state, step: "submit-immediate", draft: nil)
     guard currentWindow.windowID == window.windowID else { throw Failure("Window changed before final click") }
-    try requireSendButton(currentImage, point: state.buttonPoint.point)
+    try requireSendButton(currentImage, point: state.buttonPoint.point, composerRect: state.composerRect.rect)
     try mouseClick(globalPoint(state.buttonPoint.point, window: currentWindow))
     attempted.stage = "submitted-unverified"
     try writeStage(attempted)

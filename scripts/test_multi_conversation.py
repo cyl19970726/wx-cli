@@ -949,7 +949,7 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
                 "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame, "source": "search", "category": "group-chats", "selectedAt": 1},
             tid + ".prepare-visual.job.json": prepare,
             tid + ".prepare-visual.result.json": {"id": tid, "ok": False, "permissions": permissions,
-                "error": "Composer Copy did not replace image sentinel exactly once (types:public.png,public.tiff,public.file-url)"},
+                "error": "Composer Copy did not replace image sentinel exactly once (types: public.file-url,public.tiff)"},
             tid + ".visual-state.json": visual}
         for name, value in artifacts.items(): sender.private_create(self.ui / name, value)
         evidence = self.ui / (tid + ".client-result.json")
@@ -1032,6 +1032,7 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         for index, (operation, result, successful) in enumerate((
                 ("send", "abandoned_pre_submit", False),
                 ("send", "image_prepare_rejected", False),
+                ("send", "text_button_guard_rejected", False),
                 ("send", "focus_completed", False),
                 ("focus", "ui_observed", False),
                 ("send", "ui_observed", True),
@@ -1109,6 +1110,128 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         self.assertIsNotNone(self.coordinator("dispatch", "status")["paused_reason"])
         self.assertEqual(self.outbox("group", "show", "--request-id", "ordinary-image-readiness-failure")["attempt_number"],0)
         self.assertEqual(self.outbox("private", "show", "--request-id", "text-must-wait-for-desktop-review")["attempt_number"],0)
+
+    def test_archive_private_text_button_rejection_keeps_original_caption_and_batch_history(self):
+        from scripts.test_macos_sender_driver import TextButtonRejectionTests
+        from wx_agent import macos_sender_driver as sender
+        channel = self.channels["private"]
+        batch = "original-private-image-caption"
+        image = self.queue("private", "observed-parent-image", image=True, batch_id=batch, part_index=0)
+        request = "original-private-caption-button-rejection"
+        caption = self.queue("private", request, batch_id=batch, part_index=1)
+        child = self.queue("private", "caption-dependent-followup", batch_id=batch, part_index=2)
+        out_path = channel["state"] / "outgoing.sqlite3"
+        with sqlite3.connect(out_path) as db:
+            frozen_text = db.execute('SELECT text FROM outgoing_intent WHERE request_id=?',(request,)).fetchone()[0]
+        # Model the already-observed image cursor and known original TEXT guard
+        # failure as synthetic history; no send/GUI command creates this state.
+        with sqlite3.connect(channel["state"] / "channel.sqlite3") as db:
+            db.execute('UPDATE channel_binding SET encrypted_snapshot=1')
+            latest = db.execute('SELECT COALESCE(MAX(cursor),0) FROM channel_events').fetchone()[0]
+            for cursor in range(latest + 1, 15):
+                message = {"sender": "synthetic_self" if cursor == 14 else "synthetic_member", "talker": channel["talker"],
+                           "msg_type": 3 if cursor == 14 else 1, "create_time": int(time.time()) - 20,
+                           "content": {"Image": {"md5": "a" * 32}} if cursor == 14 else {"Text": "fixture context"}}
+                db.execute("INSERT INTO channel_events(kind,server_id,message_json) VALUES ('message_observed',?,?)",(1000+cursor,json.dumps(message)))
+        binding = self.cli("channel",channel["state"],"status")["binding"]
+        native_root = self.root / "text-button-native-fixture"; native_root.mkdir(mode=0o700)
+        old_request, config, old_tid = TextButtonRejectionTests().fixture(native_root)
+        tid = "send-" + hashlib.sha256((binding["channel_id"] + "\0" + request).encode()).hexdigest()[:48]
+        mapping = {old_request["request_id"]: request, old_request["channel_id"]: binding["channel_id"],
+                   old_request["session_id"]: binding["session_id"], old_request["account"]: binding["account"],
+                   old_request["talker"]: binding["talker"], old_request["text"]: frozen_text}
+        def rewrite(value):
+            if isinstance(value, dict): return {k:rewrite(v) for k,v in value.items()}
+            if isinstance(value, list): return [rewrite(v) for v in value]
+            if isinstance(value, str): return mapping.get(value, value.replace(old_tid,tid))
+            return value
+        artifacts = []
+        for path in native_root.iterdir():
+            if not path.name.startswith(old_tid): continue
+            target = self.ui / path.name.replace(old_tid,tid)
+            if path.suffix == ".png":
+                target.write_bytes(path.read_bytes()); target.chmod(0o600)
+            else:
+                sender.private_create(target,rewrite(json.loads(path.read_bytes())) if path.stat().st_size else {})
+                if not path.stat().st_size: target.write_bytes(b'')
+            artifacts.append(target)
+        config.update(ui_dir=str(self.ui),channel_state_dir=str(channel["state"]),wx_cli=str(BINARY),binding=binding)
+        cfg = self.root / "text-button-proof-config.json"; sender.private_create(cfg,config)
+        evidence = self.ui / (tid + ".client-result.json")
+        timestamp = int(time.time())
+        with sqlite3.connect(out_path) as db:
+            db.execute('UPDATE managed_control SET gate=1')
+            db.execute("UPDATE outgoing_intent SET status='ui_observed',attempt_number=1,result_evidence='synthetic parent image cursor 14' WHERE request_id='observed-parent-image'")
+            db.execute("INSERT INTO outgoing_attempt(request_id,attempt_number,status,result_evidence,claimed_at,finished_at) VALUES ('observed-parent-image',1,'indeterminate','synthetic parent image cursor 14',?,?)",(timestamp-20,timestamp-18))
+            db.execute("UPDATE outgoing_intent SET status='indeterminate',attempt_number=1,result_evidence=? WHERE request_id=?",(str(evidence),request))
+            db.execute("INSERT INTO outgoing_attempt(request_id,attempt_number,status,result_evidence,claimed_at,finished_at) VALUES (?,1,'indeterminate',?,?,?)",(request,str(evidence),timestamp-10,timestamp))
+            db.execute('UPDATE managed_control SET gate=0')
+        coord_path = self.ui / "coordinator.sqlite3"
+        with sqlite3.connect(coord_path) as db:
+            db.execute("UPDATE dispatch SET status='done',result='ui_observed' WHERE id=?",(image["dispatch_id"],))
+            db.execute("UPDATE dispatch SET status='unknown',result='indeterminate',token='original-token',worker='original-worker',lease_until=? WHERE id=?",(timestamp-1,caption["dispatch_id"]))
+            db.execute("UPDATE surface SET paused_reason='original private text button guard'")
+        configured = self.coordinator("configure","--conversation-id",channel["id"],"--expected-epoch",channel["epoch"],
+            "--owner","owner_private","--input","push","--reply-policy","authorized")
+        channel["epoch"] = configured["epoch"]
+        proof_driver = channel["state"] / "conversation-sender"
+        proof_driver.write_text("#!" + sys.executable + "\nimport json,sys\nfrom pathlib import Path\nfrom unittest import mock\n" +
+            "sys.path.insert(0," + repr(str(ROOT / "packages/wx-agent/src")) + ")\nfrom wx_agent import macos_sender_driver as driver\n" +
+            "if sys.argv[1:]==['--text-button-rejection-capabilities']:\n    sys.exit(driver.main(sys.argv[1:]))\n" +
+            "if sys.argv[1:]!=['--text-button-rejection-preflight']:\n    sys.exit(9)\n" +
+            "config=json.loads(Path(" + repr(str(cfg)) + ").read_text());config['ui_dir']=Path(config['ui_dir'])\n" +
+            "with mock.patch.object(driver,'_helper_is_live',return_value=False), mock.patch.object(driver,'bridge',side_effect=AssertionError('no GUI copy or send')):\n" +
+            "    try:\n        proof=driver.text_button_rejection_preflight(json.load(sys.stdin),config)\n" +
+            "    except (driver.Refused,driver.Uncertain,OSError,ValueError,KeyError,TypeError):\n        sys.exit(3)\nprint(json.dumps(proof))\n")
+        proof_driver.chmod(0o700)
+        with sqlite3.connect(out_path) as db:
+            original_intents = db.execute('SELECT * FROM outgoing_intent ORDER BY request_id').fetchall()
+            original_attempts = db.execute('SELECT * FROM outgoing_attempt ORDER BY request_id,attempt_number').fetchall()
+        before = {p.name:p.read_bytes() for p in artifacts}
+        command = ("dispatch","archive-text-button-rejection","--dispatch-id",caption["dispatch_id"],
+                   "--expected-attempt",1,"--reason","reviewed exact first text button guard rejection")
+        self.coordinator("dispatch","abandon-unsent","--dispatch-id",caption["dispatch_id"],"--expected-attempt",1,
+                         "--reason","prepared text guard is outside existing abandon mode",okay=False)
+        for suffix, update in ((".submit-visual.result.json", {"error":"Send button not found"}),
+                               (".submit-visual.job.json", {"text":"changed frozen body"}),
+                               (".visual-state.json", {"stage":"submit-attempted"})):
+            path = self.ui / (tid + suffix)
+            sender.private_update(path,dict(sender.private_read(path),**update))
+            self.coordinator(*command,okay=False)
+            path.write_bytes(before[path.name]);path.chmod(0o600)
+        missing = self.ui / (tid + ".prepare-visual.result.json")
+        missing.unlink(); self.coordinator(*command,okay=False)
+        missing.write_bytes(before[missing.name]);missing.chmod(0o600)
+        marker = self.ui / (tid + ".submit-attempted.json"); marker.touch(mode=0o600)
+        self.coordinator(*command,okay=False);marker.unlink()
+        extra = self.ui / (tid + "-a2.client-result.json");sender.private_create(extra,{})
+        self.coordinator(*command,okay=False);extra.unlink()
+        for name in ("executor.lock","sender.lock"):
+            path = self.ui / name;path.touch(mode=0o600,exist_ok=True)
+            with path.open() as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                self.coordinator(*command,okay=False)
+        result = self.coordinator(*command)
+        self.assertEqual((result["status"],result["result"],result["outbox_status"]),("done","text_button_guard_rejected","indeterminate"))
+        self.coordinator(*command,okay=False)
+        with sqlite3.connect(out_path) as db:
+            self.assertEqual(db.execute('SELECT * FROM outgoing_intent ORDER BY request_id').fetchall(),original_intents)
+            self.assertEqual(db.execute('SELECT * FROM outgoing_attempt ORDER BY request_id,attempt_number').fetchall(),original_attempts)
+        self.assertEqual(before,{p.name:p.read_bytes() for p in artifacts})
+        with sqlite3.connect(coord_path) as db:
+            self.assertEqual(db.execute('SELECT epoch,token,worker,lease_until FROM dispatch WHERE id=?',(caption["dispatch_id"],)).fetchone(),
+                             (1,'original-token','original-worker',timestamp-1))
+            self.assertEqual(db.execute('SELECT paused_reason FROM surface').fetchone()[0],'original private text button guard')
+        self.coordinator("dispatch","restore-queued","--dispatch-id",child["dispatch_id"],"--reason","review must not convert text archive into batch success")
+        fresh = self.queue("private","new-independent-private-message",batch_id="new-private-business-message",part_index=0)
+        self.assertEqual(self.coordinator("dispatch","claim","--worker","text-button-check")["status"],"paused")
+        self.coordinator("dispatch","review","--reason","explicit synthetic private desktop review")
+        claim = self.coordinator("dispatch","claim","--worker","text-button-check")
+        self.assertEqual(claim["dispatch_id"],fresh["dispatch_id"])
+        with sqlite3.connect(coord_path) as db:
+            self.assertEqual(db.execute('SELECT status,result FROM dispatch WHERE id=?',(child["dispatch_id"],)).fetchone(),
+                             ('blocked','batch_predecessor_not_sent'))
+        self.assertFalse(self.log.exists(),"archiving and claiming must not execute a send driver")
 
     def test_priority_expiry_and_same_id_scheduling_conflict(self):
         from wx_agent import dispatch

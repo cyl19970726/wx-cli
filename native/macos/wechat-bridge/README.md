@@ -179,13 +179,18 @@ uses this fallback. Both visual stages must retain the same reference. Without
 the option, the existing blank-image check applies. Recalibrate after any UI
 appearance or geometry change; do not capture an unknown draft as a reference.
 
-The Send-button OCR accepts the exact labels `Send` or `发送`. There must be
-exactly one accepted label in the lower conversation pane, and the 68×34 crop
-centered on the calibrated button point must contain that label alone. The
+The Send-button OCR accepts the exact labels `Send` or `发送`. The 68×34 crop
+centered on the calibrated button point must contain exactly one OCR label,
+which must be one of those exact labels. The
 tight crop excludes adjacent toolbar glyphs that can otherwise become extra
 OCR text. The label's recognized center must also be within 16px horizontally
-and 10px vertically of the click point. Duplicate labels, mixed-language
-duplicates, extended labels and labels outside the button crop still refuse.
+and 10px vertically of the click point. Broad lower-pane OCR only rejects
+additional exact Send labels whose complete bounds fit neither the button crop
+nor the declared composer. A draft may contain `Send` or `发送`; broad OCR may
+also miss or misread the real button. Exact candidates with clipped or invalid
+bounds still refuse, as do duplicate, extended or misplaced tight-crop labels.
+The click point must be outside the composer, and the button label must not be
+wholly inside it. The button crop may partially overlap the composer.
 
 The app requires its output directory and parent to be owned by the current
 user, non-symlinks, and mode `0700`. Runtime output stays in

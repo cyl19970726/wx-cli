@@ -228,6 +228,15 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// Retire one prepared TEXT first-button-guard rejection without replay.
+    ArchiveTextButtonRejection {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Archive only a proven pre-submit attempt; retain its unknown outbox state forever.
     AbandonUnsent {
         #[arg(long)]
@@ -1721,6 +1730,9 @@ fn known_image_copy_rejection(value: &Value) -> bool {
     else {
         return false;
     };
+    // The Swift producer emits one ASCII space after the colon. Retain the
+    // older zero-space spelling, but never trim arbitrary whitespace.
+    let types = types.strip_prefix(' ').unwrap_or(types);
     let parts: Vec<&str> = types.split(',').collect();
     parts
         .iter()
@@ -1946,6 +1958,368 @@ fn archive_image_copy_rejection(
     tx.commit()?;
     Ok(
         json!({"dispatch_id":id,"status":"done","result":"image_prepare_rejected",
+        "outbox_status":"indeterminate","attempt_number":1}),
+    )
+}
+const TEXT_BUTTON_REJECTION_ERROR: &str =
+    "Expected exactly one visible Send label in lower conversation pane";
+
+fn text_button_rejection_snapshot(
+    root: &Path,
+    tid: &str,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    let required = [
+        ".client-result.json",
+        "-inspect.inspect.job.json",
+        "-inspect.result.json",
+        "-focus.focus-group.job.json",
+        "-focus.result.json",
+        "-focus.focus-evidence.json",
+        ".prepare-visual.job.json",
+        ".prepare-visual.result.json",
+        ".visual-state.json",
+        ".submit-visual.job.json",
+        ".submit-visual.result.json",
+    ];
+    let focus = [
+        "focus-attempted.json",
+        "focus-polls.json",
+        "before-search-click.png",
+        "before-search-select.png",
+        "before-search-paste.png",
+        "before-search-copy.png",
+        "search-copy-ready.png",
+        "focus-initial.png",
+        "focus-search-result-main.png",
+        "focus-search-result-popup.png",
+        "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png",
+        "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png",
+        "focus-search-after-click.png",
+    ];
+    let visual = [
+        "prepare-start",
+        "old-draft-before-click",
+        "old-draft-before-select",
+        "old-draft-before-copy",
+        "old-draft-copy-ready",
+        "old-draft-empty-check",
+        "old-draft-empty-check-1",
+        "old-draft-empty-check-2",
+        "replace-draft-before-paste",
+        "new-draft-before-click",
+        "new-draft-before-select",
+        "new-draft-before-copy",
+        "new-draft-copy-ready",
+        "submit-draft-before-click",
+        "submit-draft-before-select",
+        "submit-draft-before-copy",
+        "submit-draft-copy-ready",
+        "before-submit",
+    ];
+    let mut allowed = std::collections::BTreeSet::new();
+    for suffix in required {
+        allowed.insert(format!("{tid}{suffix}"));
+    }
+    for suffix in focus {
+        allowed.insert(format!("{tid}-focus.{suffix}"));
+    }
+    for suffix in visual {
+        allowed.insert(format!("{tid}.{suffix}.png"));
+    }
+    let mut snapshot = std::collections::BTreeMap::new();
+    let mut total = 0;
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid("TEXT rejection directory exceeds bounded proof"));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&format!("{tid}.")) && !name.starts_with(&format!("{tid}-")) {
+            continue;
+        }
+        if !allowed.contains(&name) {
+            return Err(invalid(
+                "submit marker, later/extra attempt or conflicting TEXT artifact exists",
+            ));
+        }
+        let bytes = image_rejection_read(
+            &entry.path(),
+            if name.ends_with(".png") {
+                16 * 1024 * 1024
+            } else {
+                65536
+            },
+        )?;
+        total += bytes.len();
+        if total > 128 * 1024 * 1024 {
+            return Err(invalid("TEXT rejection evidence exceeds bounded proof"));
+        }
+        snapshot.insert(name, hex::encode(Sha256::digest(&bytes)));
+    }
+    if required
+        .iter()
+        .any(|suffix| !snapshot.contains_key(&format!("{tid}{suffix}")))
+    {
+        return Err(invalid(
+            "incomplete original prepared TEXT button rejection trace",
+        ));
+    }
+    Ok(snapshot)
+}
+
+fn archive_text_button_rejection(
+    root: &Path,
+    id: i64,
+    expected_attempt: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "TEXT rejection archive requires original attempt 1 and bounded reason",
+        ));
+    }
+    private(root, true)?;
+    if root.canonicalize()? != root {
+        return Err(invalid("TEXT rejection root must be canonical"));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; TEXT rejection retained"));
+        }
+        locks.push(lock);
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (conversation,request,status,result,operation,dispatch_channel,dispatch_epoch): (String,String,String,Option<String>,String,String,i64) = tx.query_row(
+        "SELECT conversation_id,request_id,status,result,operation,channel_id,epoch FROM dispatch WHERE id=?1",[id],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "unknown"
+        || result.as_deref() != Some("indeterminate")
+        || operation != "send"
+        || active.is_some()
+    {
+        return Err(invalid(
+            "only an idle original indeterminate TEXT dispatch may be archived",
+        ));
+    }
+    let b = binding(&tx, &conversation)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid("original TEXT managed root differs"));
+    }
+    if b.control != "active" || dispatch_channel != b.channel_id {
+        return Err(invalid("TEXT rejection binding is not active"));
+    }
+    private(&b.state.join("outgoing.sqlite3"), false)?;
+    let mut outbox = Connection::open_with_flags(
+        b.state.join("outgoing.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let out = outbox.transaction()?;
+    let (evidence,text,owner,epoch): (String,String,String,i64) = out.query_row(
+        "SELECT result_evidence,text,managed_owner,managed_epoch FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='text' AND status='indeterminate' AND attempt_number=1",
+        params![request,b.channel_id,b.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    if owner != b.owner || epoch != dispatch_epoch {
+        return Err(invalid("original TEXT owner/dispatch epoch differs"));
+    }
+    let attempts: i64 = out.query_row(
+        "SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?1",
+        [&request],
+        |r| r.get(0),
+    )?;
+    let original: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=1 AND status='indeterminate' AND result_evidence=?2 AND finished_at IS NOT NULL AND finished_at>=claimed_at AND recovery_from_attempt IS NULL AND recovery_prior_status IS NULL)",params![request,evidence],|r|r.get(0))?;
+    if attempts != 1 || !original {
+        return Err(invalid(
+            "TEXT archive requires the finished original attempt",
+        ));
+    }
+    let observations: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_observation')",[],|r|r.get(0))?;
+    if observations {
+        let observed: bool = out.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outgoing_observation WHERE request_id=?1)",
+            [&request],
+            |r| r.get(0),
+        )?;
+        if observed {
+            return Err(invalid("late TEXT observation already exists"));
+        }
+    }
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if Path::new(&evidence) != report_path {
+        return Err(invalid("original TEXT report path differs"));
+    }
+    let before = text_button_rejection_snapshot(root, &tid)?;
+    let report: Value = serde_json::from_slice(&image_rejection_read(&report_path, 65536)?)?;
+    if report["id"] != tid
+        || report["request_id"] != request
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["attempt_number"] != 1
+        || report["status"] != "indeterminate"
+        || report["stage"] != "prepared"
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "recovery_from_attempt",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+        ]
+        .iter()
+        .any(|k| report.get(*k).is_some())
+    {
+        return Err(invalid(
+            "original TEXT report is not a prepared button rejection",
+        ));
+    }
+    let read_json = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{tid}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let prep = read_json(".prepare-visual.result.json")?;
+    let rejected = read_json(".submit-visual.result.json")?;
+    let visual = read_json(".visual-state.json")?;
+    let prepare_job = read_json(".prepare-visual.job.json")?;
+    let submit_job = read_json(".submit-visual.job.json")?;
+    let permissions = |value: &Value| {
+        ["accessibility", "screenRecording", "postEvents"]
+            .iter()
+            .all(|key| value["permissions"][*key] == true)
+    };
+    if prep["id"] != tid
+        || prep["action"] != "prepare-visual"
+        || prep["ok"] != true
+        || prep["prepared"] != true
+        || !permissions(&prep)
+        || rejected.as_object().is_none_or(|o| o.len() != 4)
+        || rejected["id"] != tid
+        || rejected["ok"] != false
+        || rejected["error"] != TEXT_BUTTON_REJECTION_ERROR
+        || !permissions(&rejected)
+        || report["error"] != "submit outcome uncertain: Send button not confirmed"
+        || visual["id"] != tid
+        || visual["stage"] != "prepared"
+        || visual["text"] != text
+        || prepare_job["id"] != tid
+        || prepare_job["action"] != "prepare-visual"
+        || prepare_job["text"] != text
+        || submit_job["id"] != tid
+        || submit_job["action"] != "submit-visual"
+        || submit_job["text"] != text
+        || [
+            "media",
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "submitted",
+        ]
+        .iter()
+        .any(|key| visual.get(*key).is_some())
+        || [
+            "media_prepared",
+            "media_submitted",
+            "submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|key| prep.get(*key).is_some())
+    {
+        return Err(invalid(
+            "native TEXT proof is not the exact prepared first-button rejection",
+        ));
+    }
+    let mut expected_submit = prepare_job.clone();
+    expected_submit["action"] = json!("submit-visual");
+    let mut expected_visual = prepare_job.clone();
+    expected_visual
+        .as_object_mut()
+        .ok_or_else(|| invalid("invalid TEXT prepare job"))?
+        .remove("action");
+    expected_visual["stage"] = json!("prepared");
+    if expected_submit != submit_job || expected_visual != visual {
+        return Err(invalid(
+            "TEXT jobs, frozen body or prepared native state conflict",
+        ));
+    }
+    let channel = load_binding(&b.state)?;
+    let payload = serde_json::to_vec(
+        &json!({"protocol_version":1,"text_button_rejection_protocol_version":1,
+        "content_kind":"text","request_id":request,"attempt_number":1,"channel_id":b.channel_id,
+        "session_id":b.session_id,"account":channel.account,"talker":channel.talker,"text":text}),
+    )?;
+    let driver = b.state.join("conversation-sender");
+    private(
+        driver
+            .parent()
+            .ok_or_else(|| invalid("missing driver parent"))?,
+        true,
+    )?;
+    let meta = fs::symlink_metadata(&driver)?;
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid("registered TEXT archive driver is not private"));
+    }
+    super::outgoing::check_text_button_rejection_capabilities(&driver, Duration::from_secs(20))?;
+    super::outgoing::check_text_button_rejection_preflight(
+        &driver,
+        &payload,
+        Duration::from_secs(25),
+        locks[1].as_raw_fd(),
+    )?;
+    if text_button_rejection_snapshot(root, &tid)? != before {
+        return Err(invalid("TEXT rejection artifacts changed during proof"));
+    }
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid("original TEXT managed root changed during proof"));
+    }
+    // Both database reservations and shared desktop locks remain held. No
+    // outbox/attempt write, epoch change, pause clearing or retry is permitted.
+    let updated = tx.execute("UPDATE dispatch SET status='done',result='text_button_guard_rejected',updated_at=?2 WHERE id=?1 AND status='unknown' AND result='indeterminate'",params![id,now()])?;
+    if updated != 1 {
+        return Err(invalid("TEXT rejection dispatch CAS failed"));
+    }
+    tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+        params![format!("text_button_guard_rejected: {reason}"),now()])?;
+    block_unsent_batch_descendants(&tx)?;
+    out.commit()?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id":id,"status":"done","result":"text_button_guard_rejected",
         "outbox_status":"indeterminate","attempt_number":1}),
     )
 }
@@ -2693,6 +3067,11 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 expected_attempt,
                 reason,
             } => archive_image_copy_rejection(root, dispatch_id, expected_attempt, &reason)?,
+            DispatchAction::ArchiveTextButtonRejection {
+                dispatch_id,
+                expected_attempt,
+                reason,
+            } => archive_text_button_rejection(root, dispatch_id, expected_attempt, &reason)?,
             DispatchAction::AbandonUnsent {
                 dispatch_id,
                 reason,
@@ -2818,6 +3197,41 @@ mod tests {
         let b = load_binding(state).unwrap();
         let db = Connection::open(state.join("outgoing.sqlite3")).unwrap();
         db.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,content_kind,status,managed_owner,managed_epoch,created_at,updated_at) VALUES(?1,?2,?3,'fixture','text','queued','owner1',?4,?5,?5)",params![request,b.channel_id,b.session_id,epoch,now()]).unwrap();
+    }
+    #[test]
+    fn image_copy_rejection_accepts_producer_spacing_only() {
+        let prefix = "Composer Copy did not replace image sentinel exactly once (types:";
+        for types in [
+            " public.file-url,public.tiff",
+            "public.file-url,public.tiff",
+        ] {
+            assert!(known_image_copy_rejection(&json!(format!(
+                "{prefix}{types})"
+            ))));
+        }
+        for types in [
+            "  public.tiff",
+            "\tpublic.tiff",
+            "\npublic.tiff",
+            "\u{a0}public.tiff",
+            "",
+            " ",
+            " public.file-url",
+            "public.file-url",
+            " public.tiff,",
+            " public.tiff, public.png",
+        ] {
+            assert!(
+                !known_image_copy_rejection(&json!(format!("{prefix}{types})"))),
+                "unexpected types spelling: {types:?}"
+            );
+        }
+        assert!(!known_image_copy_rejection(&json!(
+            "Other error (types: public.tiff)"
+        )));
+        assert!(!known_image_copy_rejection(&json!(format!(
+            "{prefix} public.tiff) trailing"
+        ))));
     }
     #[test]
     fn image_setup_refusal_requires_exact_claim_and_only_completion_releases_surface() {

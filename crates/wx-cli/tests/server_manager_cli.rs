@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,8 @@ const TEST_KEY_HEX: &str = "abababababababababababababababababababababababababab
 const TEST_ACCOUNT_ID: &str = "wxid_test_account";
 const TALKER: &str = "wxid_alice";
 const MSG_TABLE: &str = "Msg_29a6db07e8bbdb53f5d54cc3c309f3f1";
+
+static SERVER_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_wx-cli")
@@ -44,9 +47,9 @@ fn help_surface_exposes_server_group_only() {
 fn server_run_status_restart_and_stop_round_trip() {
     let fixture = create_fixture();
     let runtime_root = fixture.path().join("runtime");
-    let _guard = ManagedServerGuard::new(runtime_root.clone());
+    let guard = ManagedServerGuard::new(runtime_root.clone());
     let account_dir = fixture.path().join(TEST_ACCOUNT_ID);
-    let port = find_open_port();
+    let port = guard.port;
 
     let run = Command::new(bin())
         .args([
@@ -163,9 +166,9 @@ fn server_run_status_restart_and_stop_round_trip() {
 fn stale_runtime_state_is_reported_and_recovered() {
     let fixture = create_fixture();
     let runtime_root = fixture.path().join("runtime");
-    let _guard = ManagedServerGuard::new(runtime_root.clone());
+    let guard = ManagedServerGuard::new(runtime_root.clone());
     let account_dir = fixture.path().join(TEST_ACCOUNT_ID);
-    let port = find_open_port();
+    let port = guard.port;
 
     let run_args = [
         "server",
@@ -227,9 +230,9 @@ fn stale_runtime_state_is_reported_and_recovered() {
 fn live_worker_with_bad_health_does_not_spawn_duplicate_and_can_be_stopped() {
     let fixture = create_fixture();
     let runtime_root = fixture.path().join("runtime");
-    let _guard = ManagedServerGuard::new(runtime_root.clone());
+    let guard = ManagedServerGuard::new(runtime_root.clone());
     let account_dir = fixture.path().join(TEST_ACCOUNT_ID);
-    let port = find_open_port();
+    let port = guard.port;
 
     let run_args = [
         "server",
@@ -292,11 +295,25 @@ fn live_worker_with_bad_health_does_not_spawn_duplicate_and_can_be_stopped() {
 
 struct ManagedServerGuard {
     runtime_root: PathBuf,
+    port: u16,
+    // The worker binds only after database initialization. A bind-to-zero
+    // probe cannot reserve its port through that handoff, so coordinate these
+    // fixtures from port selection through restart/recovery and final cleanup.
+    // Fields are dropped after Drop::drop stops the worker, retaining the lock
+    // until no other fixture can collide with this one's still-live server.
+    _port_lease: MutexGuard<'static, ()>,
 }
 
 impl ManagedServerGuard {
     fn new(runtime_root: PathBuf) -> Self {
-        Self { runtime_root }
+        let port_lease = SERVER_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            runtime_root,
+            port: find_open_port(),
+            _port_lease: port_lease,
+        }
     }
 }
 

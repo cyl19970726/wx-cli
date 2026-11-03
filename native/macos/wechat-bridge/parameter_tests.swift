@@ -7,6 +7,7 @@ import ImageIO
     static func main() {
         emptyComposerChecks()
         imageMediaChecks()
+        sendButtonContextChecks()
         for label in ["Send", "发送"] {
             precondition(VisualParameters.uniqueSendLabel([label], atButton: true))
             precondition(VisualParameters.uniqueSendLabel(["Toolbar", label], atButton: false))
@@ -369,6 +370,69 @@ import ImageIO
         try! Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: path)
         refused(EmptyComposerReference(path: path.path,
             sha256: SHA256.hash(data: try! Data(contentsOf: path)).map { String(format: "%02x", $0) }.joined()))
+    }
+
+    static func sendButtonContextChecks() {
+        let point = CGPoint(x: 829, y: 606)
+        let composer = CGRect(x: 308, y: 497, width: 559, height: 93)
+        let button = HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 819, y: 601, width: 26, height: 12))
+        func accepts(_ wide: [HeaderOCRCandidate], _ narrow: [HeaderOCRCandidate]? = nil,
+                     composerRect: CGRect? = nil) -> Bool {
+            VisualParameters.sendButtonConfirmed(wideLabels: wide, buttonLabels: narrow ?? [button],
+                point: point, composerRect: composerRect ?? composer, imageWidth: 880, imageHeight: 640)
+        }
+        precondition(accepts([])) // Wide OCR may miss or misread the real button.
+        precondition(accepts([HeaderOCRCandidate(text: "Other", bounds: button.bounds)]))
+        precondition(accepts([button]))
+        let draft = HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 330, y: 548, width: 26, height: 12))
+        precondition(accepts([draft]))
+        precondition(accepts([draft, button]))
+        precondition(accepts([HeaderOCRCandidate(text: "Send", bounds: draft.bounds)]))
+        precondition(!accepts([draft, button], composerRect:
+            CGRect(x: 308, y: 497, width: 559, height: 130)))
+        // A crop may overlap the composer while its click and label retain
+        // distinct button roles. The real calibration overlaps by one pixel.
+        precondition(VisualParameters.sendButtonCrop(at: point, imageWidth: 880, imageHeight: 640)!
+            .intersects(composer))
+        precondition(accepts([]))
+        // Broad OCR missing the real button must not turn draft text into one.
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [draft],
+            point: CGPoint(x: 343, y: 554), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        // Exercise each role fence independently, within the original center tolerances.
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [
+            HeaderOCRCandidate(text: "发送", bounds: CGRect(x: 819, y: 591, width: 26, height: 8))],
+            point: CGPoint(x: 829, y: 588), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [
+            HeaderOCRCandidate(text: "发送", bounds: CGRect(x: 819, y: 580, width: 26, height: 8))],
+            point: CGPoint(x: 829, y: 592), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        // Full boxes must fit a declared region, not just intersect its edge.
+        for bounds in [CGRect(x: 700, y: 605, width: 26, height: 12),
+                       CGRect(x: 330, y: 584, width: 26, height: 12),
+                       CGRect(x: 786, y: 601, width: 26, height: 12),
+                       CGRect(x: 330, y: 532, width: 26, height: 12),
+                       CGRect(x: 870, y: 601, width: 26, height: 12),
+                       CGRect(x: 330, y: 548, width: -26, height: 12),
+                       CGRect(x: CGFloat.nan, y: 548, width: 26, height: 12)] {
+            precondition(!accepts([HeaderOCRCandidate(text: "Send", bounds: bounds)]))
+        }
+        precondition(!accepts([], []))
+        precondition(!accepts([], [button, button]))
+        precondition(!accepts([], [button, HeaderOCRCandidate(text: "Send", bounds: button.bounds)]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送文件", bounds: button.bounds)]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "Send now", bounds: button.bounds)]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 859, y: 601, width: 20, height: 12))]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 795, y: 601, width: 12, height: 12))]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 819, y: 601, width: 0, height: 12))]))
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [button],
+            point: CGPoint(x: 10, y: 606), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.sendLabelAtButton([button], point: CGPoint(x: 780, y: 606),
+            crop: VisualParameters.sendButtonCrop(at: point, imageWidth: 880, imageHeight: 640)!))
+        precondition(!accepts([], composerRect: CGRect(x: 308, y: 497, width: 600, height: 93)))
     }
 
     static func imageMediaChecks() {

@@ -238,7 +238,7 @@ def main(argv=None):
     review.add_argument("--reason", required=True)
     review.add_argument("--confirm-desktop-safe", action="store_true", required=True)
     review.add_argument("--restore-unattempted", type=int)
-    for name in ("abandon-unsent", "archive-image-copy-rejection"):
+    for name in ("abandon-unsent", "archive-image-copy-rejection", "archive-text-button-rejection"):
         archive = sub.add_parser(name)
         archive.add_argument("--dispatch-id", type=int, required=True)
         archive.add_argument("--expected-attempt", type=int, required=True)
@@ -277,7 +277,7 @@ def main(argv=None):
             value = call(binary, root, "dispatch", "resume")
         elif args.action == "review":
             value = review_surface(binary, root, args.reason, args.confirm_desktop_safe, args.restore_unattempted)
-        elif args.action in ("abandon-unsent", "archive-image-copy-rejection"):
+        elif args.action in ("abandon-unsent", "archive-image-copy-rejection", "archive-text-button-rejection"):
             # Rust holds both locks through native proof and scheduler commit.
             value = call(binary, root, "dispatch", args.action, "--dispatch-id", args.dispatch_id,
                          "--expected-attempt", args.expected_attempt, "--reason", args.reason)

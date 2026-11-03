@@ -1486,7 +1486,7 @@ class ImageCopyRejectionTests(unittest.TestCase):
         driver.private_create(ui / (tid + ".prepare-visual.job.json"), job)
         driver.private_create(ui / (tid + ".prepare-visual.result.json"), {
             "id": tid, "ok": False,
-            "error": "Composer Copy did not replace image sentinel exactly once (types:public.png,public.tiff,public.file-url)",
+            "error": "Composer Copy did not replace image sentinel exactly once (types: public.file-url,public.tiff)",
             "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
         visual = dict(job, stage="prepare-attempted", text=""); visual.pop("action")
         driver.private_create(ui / (tid + ".visual-state.json"), visual)
@@ -1530,6 +1530,12 @@ class ImageCopyRejectionTests(unittest.TestCase):
                 with self.assertRaises(driver.Refused): driver.abandon_preflight(old, config)
 
     def test_known_error_requires_exact_phrase_and_raster_type(self):
+        prefix = "Composer Copy did not replace image sentinel exactly once (types:"
+        for types in (" public.file-url,public.tiff", "public.file-url,public.tiff"):
+            self.assertTrue(driver._known_image_copy_rejection(prefix + types + ")"))
+        for types in ("  public.tiff", "\tpublic.tiff", "\npublic.tiff", "\u00a0public.tiff",
+                      "", " ", " public.file-url", "public.file-url", " public.tiff,", " public.tiff, public.png"):
+            self.assertFalse(driver._known_image_copy_rejection(prefix + types + ")"), repr(types))
         for error in ("Composer Copy did not replace image sentinel exactly once",
                       "Composer Copy did not replace image sentinel exactly once (types:public.file-url)",
                       "Composer Copy did not replace image sentinel exactly once (types:public.png) trailing",
@@ -1603,6 +1609,149 @@ class ImageCopyRejectionTests(unittest.TestCase):
                     driver.private_update(path, driver.private_read(path))
                 return value
             with mock.patch.object(driver, "_image_rejection_snapshot", side_effect=changed):
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
+class TextButtonRejectionTests(unittest.TestCase):
+    def fixture(self, directory):
+        request, config, tid = ImageAbandonProofTests().fixture(directory)
+        request.pop("abandon_protocol_version")
+        request.update(text_button_rejection_protocol_version=1, content_kind="text", text="Synthetic original caption body")
+        request["talker"] = "synthetic_friend"
+        config["binding"]["talker"] = request["talker"]
+        config.update(conversation_kind="private", target_name="Synthetic Friend", target_group="Synthetic Friend", expected_draft="",
+            composer_rect={"x": 320, "y": 500, "width": 400, "height": 80}, button_point={"x": 800, "y": 610})
+        ui = config["ui_dir"]
+        focus = tid + "-focus"
+        frame = {"x": 100, "y": 100, "width": 880, "height": 640}
+        permissions = {"accessibility": True, "screenRecording": True, "postEvents": True}
+        driver.private_update(ui / (focus + ".focus-group.job.json"), {
+            "id": focus, "action": "focus-group", "targetGroup": config["target_group"], "targetKind": "private",
+            "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame,
+            "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]})
+        driver.private_update(ui / (focus + ".result.json"), {
+            "id": focus, "action": "focus-group", "ok": True, "focused": True, "alreadySelected": False,
+            "source": "search", "targetKind": "private", "focusEvidenceID": focus, "category": "contacts", "permissions": permissions})
+        driver.private_create(ui / (focus + ".focus-evidence.json"), {
+            "id": focus, "targetGroup": config["target_group"], "targetKind": "private", "expectedPID": 42,
+            "expectedWindowID": 21, "expectedFrame": frame, "source": "search", "category": "contacts", "selectedAt": 1})
+        driver.private_update(ui / (focus + ".focus-polls.json"), [{"elapsedMs": 250, "windowCount": 2,
+            "popupPresent": True, "popupSelected": True, "windows": [{"id": 21, **frame}, {"id": 22, **frame}]}])
+        driver.private_update(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 1,
+            "channel_id": request["channel_id"], "session_id": request["session_id"],
+            "stage": "prepared", "status": "indeterminate", "error": "submit outcome uncertain: Send button not confirmed",
+            "focus_evidence_id": focus, "focus_category": "contacts", "target_kind": "private"})
+        job = dict(driver._prepare_command(request, config, 21, frame, focus), id=tid, action="prepare-visual")
+        driver.private_create(ui / (tid + ".prepare-visual.job.json"), job)
+        driver.private_create(ui / (tid + ".prepare-visual.result.json"), {
+            "id": tid, "action": "prepare-visual", "ok": True, "prepared": True, "permissions": permissions})
+        state = dict(job, stage="prepared"); state.pop("action")
+        driver.private_create(ui / (tid + ".visual-state.json"), state)
+        driver.private_create(ui / (tid + ".submit-visual.job.json"), dict(job, action="submit-visual"))
+        driver.private_create(ui / (tid + ".submit-visual.result.json"), {
+            "id": tid, "ok": False, "error": "Expected exactly one visible Send label in lower conversation pane", "permissions": permissions})
+        import base64
+        (ui / (tid + ".before-submit.png")).write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+        (ui / (tid + ".before-submit.png")).chmod(0o600)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status") as status, \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("no GUI/copy/send")), \
+             mock.patch.object(driver, "_guard_helper", wraps=driver._guard_helper) as guard:
+            proof = driver.text_button_rejection_preflight(request, config)
+            self.assertEqual(status.call_count, 2)
+            self.assertTrue(all(call.kwargs.get("clear") is False for call in guard.call_args_list))
+            return proof
+
+    def test_exact_native_prepared_rejection_is_read_only_and_separate_from_old_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            before = {p.name:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in Path(directory).iterdir()}
+            self.assertEqual(self.prove(request, config), {
+                "protocol_version": 1, "text_button_rejection_protocol_version": 1, "button_rejection_proven": True})
+            self.assertEqual(before,{p.name:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in Path(directory).iterdir()})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), mock.patch.object(driver, "status"):
+                old = {k:v for k,v in request.items() if k not in ("text_button_rejection_protocol_version", "content_kind")}
+                with self.assertRaises(driver.Refused): driver.prove_unsent(dict(old, attempt_number=2, recovery_from_attempt=1), config, 2, 999999999)
+                with self.assertRaises(driver.Refused): driver.abandon_preflight(request, config)
+            self.assertFalse((config["ui_dir"] / (tid + ".submit-attempted.json")).exists())
+
+    def test_separate_capability_and_silent_negative_protocol(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--text-button-rejection-capabilities"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {"protocol_version": 1, "text_button_rejection_protocol_version": 1,
+            "prepared_text_only": True, "submit_marker_forbidden": True})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(b"{}"))), contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--text-button-rejection-preflight"]), 1)
+        self.assertEqual(json.loads(output.getvalue()), {"protocol_version": 1, "text_button_rejection_protocol_version": 1, "button_rejection_proven": False})
+
+    def test_missing_proof_or_present_marker_later_submit_and_extra_artifacts_refuse(self):
+        for suffix in (".submit-attempted.json", ".submit-immediate.png", ".submit-after-click.png", ".late-observed.json",
+                       "-a2.client-result.json", "-a3-inspect.result.json", ".unknown.json"):
+            with self.subTest(extra=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(config["ui_dir"] / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        for suffix in (".client-result.json", "-inspect.result.json", "-focus.focus-evidence.json",
+                       ".prepare-visual.result.json", ".submit-visual.job.json", ".submit-visual.result.json", ".visual-state.json"):
+            with self.subTest(missing=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                (config["ui_dir"] / (tid + suffix)).unlink()
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_actual_error_alias_state_permissions_body_and_binding_must_all_match(self):
+        mutations = (
+            (".client-result.json", {"stage": "submit_clicked"}), (".client-result.json", {"status": "ui_observed"}),
+            (".client-result.json", {"observation": {}}), (".client-result.json", {"event_cursor": 15}),
+            (".client-result.json", {"error": "Send button not confirmed"}), (".client-result.json", {"attempt_number": 2}),
+            (".prepare-visual.result.json", {"prepared": False}), (".prepare-visual.result.json", {"permissions": {}}),
+            (".prepare-visual.result.json", {"action": "submit-visual"}), (".prepare-visual.result.json", {"media_prepared": {}}),
+            (".submit-visual.result.json", {"error": "Expected exactly one visible Send label in lower conversation pane "}),
+            (".submit-visual.result.json", {"error": "Send label is not at calibrated point"}),
+            (".submit-visual.result.json", {"ok": True, "submitted": True}), (".submit-visual.result.json", {"permissions": {}}),
+            (".visual-state.json", {"stage": "submit-attempted"}), (".visual-state.json", {"stage": "submitted-unverified"}),
+            (".visual-state.json", {"text": "changed body"}), (".prepare-visual.job.json", {"text": "changed body"}),
+            (".submit-visual.job.json", {"text": "changed body"}), (".submit-visual.job.json", {"expectedPID": 43}),
+            ("-focus.focus-evidence.json", {"targetKind": "group"}), ("-inspect.result.json", {"weChatPID": 43}),
+        )
+        for suffix, updates in mutations:
+            with self.subTest(suffix=suffix, updates=updates), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = config["ui_dir"] / (tid + suffix)
+                driver.private_update(path, dict(driver.private_read(path), **updates))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            for updates in ({"text": "other body"}, {"talker": "another_friend"}, {"attempt_number": 2},
+                            {"text_button_rejection_protocol_version": True}, {"content_kind": "image"}):
+                with self.subTest(request=updates), self.assertRaises(driver.Refused): self.prove(dict(request, **updates), config)
+
+    def test_live_helper_locks_and_slow_proof_rewrite_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            for path in (config["ui_dir"] / (tid + ".submit-visual.result.json"),):
+                path.chmod(0o644)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+                path.chmod(0o600)
+            with (config["ui_dir"] / "sender.lock").open() as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+            with mock.patch.object(driver, "_helper_is_live", return_value=True), mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.text_button_rejection_preflight(request, config)
+            original = driver._text_button_rejection_snapshot
+            calls = []
+            def rewrite(*args):
+                snapshot = original(*args); calls.append(None)
+                if len(calls) == 1:
+                    path = config["ui_dir"] / (tid + ".submit-visual.result.json")
+                    driver.private_update(path, driver.private_read(path))
+                return snapshot
+            with mock.patch.object(driver, "_text_button_rejection_snapshot", side_effect=rewrite):
                 with self.assertRaises(driver.Refused): self.prove(request, config)
 
 
