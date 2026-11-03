@@ -72,7 +72,7 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 
-文字和图片按全局就绪顺序执行，同会话前项失败会阻止后项越过。图文使用相同 `--batch-id` 和从 0 开始的 `--part-index`；即使 part 1 先入队，也等 part 0 成功。每部分独立 request ID，不提供原子图文事务。`--priority 0/1/2` 分别表示显式人工、普通业务、主动通知；只影响下次选择，等待超过 300 秒优先按先来顺序，不能越过同会话因果前项。`--expires-at UNIX_SECONDS` 冻结期限，过期返回 owner 检查，不消耗 attempt。图片冻结、输入变化拒绝、像素与出站内容核验沿用[图片合同](IMAGE_SEND_VALIDATION_20261024.md)。队列与 `focus` 共用暂停语义，不在另一个发送中途切窗。
+文字和图片按全局就绪顺序执行，同会话前项失败会阻止后项越过。图文使用相同 `--batch-id` 和从 0 开始的 `--part-index`；即使 part 1 先入队，也等 part 0 成功。前置部分必须是 `done` 且 operation 为 send、result 为 `ui_observed` 或 `recipient_confirmed`；仅有 `done` 不够，`abandoned_pre_submit`、`image_prepare_rejected`、`text_button_guard_rejected` 均不满足依赖。终止归档的 batch 后件保留阻塞，重新授权也不能把归档当成发送成功；显式桌面审查后，新独立批次可以进入正常就绪选择。每部分独立 request ID，不提供原子图文事务。`--priority 0/1/2` 分别表示显式人工、普通业务、主动通知；只影响下次选择，等待超过 300 秒优先按先来顺序，不能越过同会话因果前项。`--expires-at UNIX_SECONDS` 冻结期限，过期返回 owner 检查，不消耗 attempt。图片冻结、输入变化拒绝、像素与出站内容核验沿用[图片合同](IMAGE_SEND_VALIDATION_20261024.md)。队列与 `focus` 共用暂停语义，不在另一个发送中途切窗。
 
 `ui_observed` 仍只是本地出站观察。普通成功后无需人工逐条确认才能发送下一项。不明结果保存原 ID、attempt 和证据并暂停桌面；读取与思考仍可继续。`dispatch resume` 不能把未知项恢复为可发。确认旧 helper 已退出、桌面与草稿安全后，可显式执行：
 
@@ -169,4 +169,46 @@ wx-cli outbox --state-dir /ABS/private/channel reconcile-image-event \
 
 该命令不调用 sender、不点击、不重发。它在共享锁和当前代际保护下核对完整原始时间窗、原生准备/提交/截图以及冻结图片与源缓存的解码内容；不能靠选择较早 cursor 隐藏同窗内第二张图片。成功新增不可修改的 observation 与独立报告，推进 intent 的当前 `ui_observed` 状态并结束原调度；原 `indeterminate` attempt 和原报告保持不变，`outbox show` 用 `late_observation` 解释这一差异。桌面暂停仍须显式核查解除。结果仍是本地观察，独立收件另记。
 
-`dispatch archive-image-copy-rejection` 是另一条限定的操作员核查：仅处理首次图片在已知旧版 Copy 计数错误处被原生 prepare 拒绝、完整原生证据一致且没有提交或后续 attempt 的情形。它使用单独的只读证明协议，将调度归档为 `image_prepare_rejected`，保留原不明 outbox、attempt、草稿和证据；不声明发送成功，也不授权重试。原 `abandon-unsent` 的图片准备前边界不变。两类归档均不满足 batch 的发送成功前置条件，原配文不会因此自动放行。
+## 已知原生拒绝的独立归档合同
+
+以下入口用于操作员在完整只读证据下退役**原调度阻塞**。它们不重试、不清空或替换草稿，不把原 outbox/attempt/client report 改为成功、未发送或可重发，也不自动解除暂停。先核对安装版本、原 dispatch ID、原 attempt 1、当前绑定/owner/control 和私有原生文件；源码、合成检查或一次失败归档都不能证明现场已启用修复。
+
+两条命令均由注册 driver 提供独立 capability/preflight，Rust 持有原 `executor.lock` 与 `sender.lock`，核对当前/已结束的原 attempt、规范私有文件、冻结内容和 SHA，并在慢证明后重复核查，以数据库 CAS 结束同一 dispatch。缺失、链接文件、越界/过大文件、身份/正文/媒体/校准冲突、后续 attempt、迟到观察、提交后痕迹或活跃 helper 均拒绝。证明期间只读，不启动 GUI、复制、发送或原生助手。
+
+### 图片 Copy 计数拒绝
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json archive-image-copy-rejection \
+  --dispatch-id ORIGINAL_IMAGE_DISPATCH_ID --expected-attempt 1 \
+  --reason '已核对首次图片 prepare 的已知 Copy 拒绝及完整无 submit 证据'
+```
+
+只接受 report `group_focused/indeterminate`、Native prepare `ok=false`，以及精确旧错误 `Composer Copy did not replace image sentinel exactly once (types: TYPE_LIST)`。生产形式在冒号后有**一个 ASCII 空格**；兼容旧零空格形式，不接受任意空白。实际类型列表必须包含 `public.png` 或 `public.tiff`，不能用空列表、仅文件 URL 或其他错误替代。prepare job 的冻结图片、inspect/focus、目标类型、PID/窗口/frame、当前配置与 visual inputs 必须一致；state 只能是 `prepare-attempted`，不能已有 prepared 像素、Copy 类型、submit job/result/marker 或提交状态。
+
+driver 合同为 `--image-rejection-capabilities` / `--image-rejection-preflight`。成功只记原 dispatch `done/image_prepare_rejected`，原 outbox/attempt 继续 `indeterminate`，原图草稿和原生证据保留。原 `abandon-unsent` 的 `image_before_prepare_only` 边界不变，仍拒绝这类已进入图片准备的错误；不能借图片发送或恢复入口处理。
+
+### 文字首次 Send 按钮防护拒绝
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json archive-text-button-rejection \
+  --dispatch-id ORIGINAL_TEXT_DISPATCH_ID --expected-attempt 1 \
+  --reason '已核对原文字准备成功、首次 Send 按钮防护拒绝且无提交 marker'
+```
+
+此入口只处理第一次文字 attempt 的以下完整组合：
+
+- 原 report 为 `prepared/indeterminate`，别名精确为 `submit outcome uncertain: Send button not confirmed`，且没有 `observation`、`event_cursor` 或确认提交后的计时字段。
+- Native prepare 为 `ok=true/prepared=true`，动作、目标和三项权限证据完整；原 inspect/focus/job/evidence 与当前配置、PID/窗口/frame 一致。
+- prepare/submit job 的冻结文字逐字相同，native visual state 仍为同一事务的 `prepared`；正文、旧草稿预期、目标类型及校准参数均匹配。
+- Native submit 的失败结果仅有 `id`、`ok=false`、`error`、`permissions`，错误精确为 `Expected exactly one visible Send label in lower conversation pane`，三项权限为 true；**`submit-attempted` marker 必须不存在**。
+- 无 `submit-attempted` / `submitted-unverified` state、`submit-immediate` / 点击后痕迹、额外或后续 attempt、迟到观察或活跃 helper。其他错误、准备失败、缺证据或文字改变均不适用。
+
+独立 driver 合同为 `--text-button-rejection-capabilities` / `--text-button-rejection-preflight`；capability 包含 `protocol_version=1`、`text_button_rejection_protocol_version=1`、`prepared_text_only=true`、`submit_marker_forbidden=true`，成功证明只返回相同两个版本字段及 `button_rejection_proven=true`。原文字 `abandon-unsent` / recovery 的合同不变。
+
+成功仅记原 dispatch `done/text_button_guard_rejected`；原 outbox/attempt/client report 仍为 `indeterminate`，已准备的原文字草稿和所有原生文件保持不变，桌面暂停也不变。该结果不声明未发送或送达，不满足同 batch 的发送成功前置条件。原 N5 caption 已有 attempt 1，不能走 `review --restore-unattempted`，不能换 ID 重放。
+
+### 归档后的桌面审查与新业务
+
+归档后仍按本页 `review --confirm-desktop-safe` 合同核查原 helper 已退出、当前窗口/目标/草稿安全；归档本身没有处理遗留草稿。新独立业务请求只有在其自身授权、内容与草稿守卫成立后才可执行，不能把它伪装成旧 N4 或 N5 caption 的恢复。显式替换已知旧图片草稿时，可在私有 sender 配置提供 `expected_draft_media` 的完整冻结图片描述符，与非空 `expected_draft` 互斥。Python 在配置、请求及 prepare 前复验私有文件、类型、大小和摘要，再传递给原生 `expectedDraftMedia`；原生必须先从已核对的 composer 复制并逐像素确认旧图，才允许准备新内容。不得自动推断旧图、清空未知草稿或复用原请求。
+
+原生按钮修复仍必须在**窄按钮区**取得唯一精确 `Send` 并验证校准位置；宽下方面板只排除额外的精确 `Send`，不把草稿中的“发送”字样或非精确标签文本当成第二个按钮。真实额外精确标签、目标/窗口/位置不符仍拒绝。修复不授予弱点击、其他发送入口或重试权限；部署和新图后配文实机验收另记。各原请求、修复部署与 CI 的最新阶段见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md#本轮-n5-延迟对账n4-归档拒绝与-n5-配文停止点2026-11-03)。

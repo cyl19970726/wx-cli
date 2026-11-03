@@ -195,6 +195,16 @@ def validate_media(media):
         raise Refused("frozen image content differs from intent")
 
 
+def validate_expected_draft_media(config):
+    if "expected_draft_media" not in config:
+        return None
+    if config.get("expected_draft", "") != "":
+        raise Refused("expected image and text drafts are mutually exclusive")
+    media = config["expected_draft_media"]
+    validate_media(media)
+    return media
+
+
 def validate_empty_composer_reference(config):
     reference = config.get("empty_composer_reference")
     alternates = config.get("empty_composer_alternates", [])
@@ -306,6 +316,7 @@ def safe_config(config):
     draft = config.get("expected_draft", "")
     if not isinstance(draft, str) or (draft and (len(draft.encode("utf-8")) > 16000 or len(draft) > 2000)):
         raise Refused("invalid expected draft")
+    validate_expected_draft_media(config)
     validate_empty_composer_reference(config)
     return config
 
@@ -392,6 +403,7 @@ def request_ok(request, config, attempt_number=None):
     for key in ("channel_id", "session_id", "account", "talker"):
         if request.get(key) != config["binding"][key]:
             raise Refused("request binding mismatch")
+    validate_expected_draft_media(config)
     if request.get("protocol_version") == 2:
         if request.get("text") not in (None, "") or recovery_from is not None:
             raise Refused("image intent cannot carry text or recovery")
@@ -442,6 +454,7 @@ def _read_artifact(path):
 
 
 def _prepare_command(request, config, window_id=None, frame=None, focus_id=None):
+    expected_media = validate_expected_draft_media(config)
     command = {"targetGroup": config["target_group"], "expectedDraft": config.get("expected_draft", ""),
             "targetKind": config.get("conversation_kind", "group"),
             "focusEvidenceID": focus_id,
@@ -449,6 +462,8 @@ def _prepare_command(request, config, window_id=None, frame=None, focus_id=None)
             "expectedWindowID": window_id if window_id is not None else config.get("expected_window_id"),
             "expectedFrame": frame if frame is not None else config.get("expected_frame"),
             "composerRect": config["composer_rect"], "buttonPoint": config["button_point"]}
+    if expected_media is not None:
+        command["expectedDraftMedia"] = expected_media
     if request.get("media") is not None:
         command["media"] = request["media"]
     else:

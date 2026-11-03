@@ -20,6 +20,76 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SenderTests(unittest.TestCase):
+    def expected_media_fixture(self, root):
+        root = Path(root).resolve()
+        ui = root / "wechat-wx-cli-test" / "ui"
+        ui.mkdir(parents=True, mode=0o700)
+        ui.parent.chmod(0o700)
+        state = root / "state"; state.mkdir(mode=0o700)
+        app = root / "helper.app"
+        helper = app / "Contents/MacOS/WeChatTestBridge"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"synthetic executable"); helper.chmod(0o700)
+        image = state / "known-frozen-image"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nsynthetic frozen image"); image.chmod(0o600)
+        media = driver.image_descriptor(image, require_private=True)
+        config = dict(self.config, protocol_version=1, wx_cli=str(helper), helper_app=str(app),
+            helper_sha256=hashlib.sha256(helper.read_bytes()).hexdigest(), ui_dir=str(ui),
+            channel_state_dir=str(state), target_group="Synthetic Group", expected_pid=42,
+            window_size={"width":880,"height":640}, expected_draft="", expected_draft_media=media,
+            composer_rect={"x":320,"y":500,"width":400,"height":80},
+            button_point={"x":800,"y":610},
+            conversation_list_rect={"x":60,"y":55,"width":240,"height":570},
+            search_point={"x":155,"y":28})
+        return root, config, media, image
+
+    def test_expected_draft_media_validates_and_forwards_original_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, media, _ = self.expected_media_fixture(directory)
+            with mock.patch.object(Path, "home", return_value=root):
+                checked = driver.safe_config(dict(config))
+            command = driver._prepare_command(self.request, checked)
+            self.assertEqual(command["expectedDraftMedia"], media)
+            image_request = dict(self.request, protocol_version=2, text=None, media=media)
+            driver.request_ok(image_request, checked)
+            self.assertEqual(driver._prepare_command(image_request, checked)["expectedDraftMedia"], media)
+            legacy = dict(checked); legacy.pop("expected_draft_media")
+            expected = dict(command); expected.pop("expectedDraftMedia")
+            self.assertEqual(driver._prepare_command(self.request, legacy), expected)
+
+    def test_expected_draft_media_mutation_after_config_refuses_before_prepare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, _, image = self.expected_media_fixture(directory)
+            with mock.patch.object(Path, "home", return_value=root):
+                checked = driver.safe_config(dict(config))
+            image.write_bytes(b"\x89PNG\r\n\x1a\nchanged image")
+            with self.assertRaises(driver.Refused):
+                driver.request_ok(self.request, checked)
+            with self.assertRaises(driver.Refused):
+                driver._prepare_command(self.request, checked)
+
+    def test_expected_draft_media_invalid_descriptor_refuses_in_config_and_prepare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, media, image = self.expected_media_fixture(directory)
+            link = image.with_name("image-link"); link.symlink_to(image)
+            for value in (None, {}, dict(media, sha256="0"*64), dict(media, unexpected=True),
+                          dict(media, path=str(link)), dict(media, size_bytes=True)):
+                changed = dict(config, expected_draft_media=value)
+                with self.subTest(value=value), mock.patch.object(Path, "home", return_value=root):
+                    with self.assertRaises(driver.Refused): driver.safe_config(dict(changed))
+                    with self.assertRaises(driver.Refused): driver._prepare_command(self.request, changed)
+            image.chmod(0o644)
+            with self.assertRaises(driver.Refused): driver._prepare_command(self.request, config)
+
+    def test_expected_draft_media_and_nonempty_text_draft_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, _, _ = self.expected_media_fixture(directory)
+            for text in ("known draft", " "):
+                changed = dict(config, expected_draft=text)
+                with mock.patch.object(Path, "home", return_value=root):
+                    with self.assertRaises(driver.Refused): driver.safe_config(dict(changed))
+                with self.assertRaises(driver.Refused): driver._prepare_command(self.request, changed)
+
     def test_inherited_recovery_lock_must_reacquire_same_locked_description(self):
         with tempfile.TemporaryDirectory() as root:
             lock_path = Path(root) / "sender.lock"

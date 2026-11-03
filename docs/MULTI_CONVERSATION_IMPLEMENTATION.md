@@ -1,6 +1,8 @@
 # 多会话实施与验收记录（更新至 2026-11-03）
 
-实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前已启用 `a9fdce6`，包含此前完成时间防护、核心通道与前台 runner；原生助手未重建。Candidate 3 固定二进制 SHA-256 仍为 `5e2e47ef08789e2eb91dc9388ea11f8e294325127955d877f00a550807946787`。本页区分代码、离线检查、真实读取、Session、GUI 和独立收件证据；旧失败作为历史保留。新版已有原专用 native TUI Session 的全新入站单回合处理及正确传输终态证据；它不覆盖桌面 App 持有的 Session 或实际异机插件。图片聚焦失败的限定归档已在原请求上通过，随后原排队 focus 实际完成；原图片 outbox 的不明 attempt 保留。新的不同图片进入准备阶段后被复制核验拒绝，尚未提交，详见末尾更新。两个授权目标已恢复 `push/observe`，全局桌面发送暂停；不合并、不发布、不向非测试业务群发送。
+实施候选见[草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 已启用 `41789f7` 的 CLI/Python：原私聊 N5 图片已独立收件并在同一原 intent 完成 `exact-pixels` 延迟对账；原 N4 图片及原 N5 配文的限定归档均已实机通过。所有原 outbox、attempt、原生文件和草稿保持原样，没有重发。归档结束的是原调度阻塞，不能记为图片或配文发送成功。
+
+按钮修复已在同一路径更新 Candidate 4，旧签名助手与代码回退证据保留，账本未变；新签名的系统权限正在按正常界面刷新。新的群图片与配文整批、桌面 App 持有的 Session、跨宿主 Session 插件和更广现场故障场景仍待验收。两个授权目标仍为 `push/observe`，桌面发送暂停；24 小时观察已取消，不合并或发布。
 
 最新架构决策：wx-cli 独立提供群订阅和消息投递能力，普通应用可发布通知，Session 经 plugin 消费订阅。当前源码已分离旧 Codex 适配、增加应用 `publisher_id`、项目级原生 Hook 插件、鉴权 RPC/SSH 客户端及有界前台通知 runner。通道与宿主分别验收：原专用 native TUI Session 路径已有新版全新入站闭环；不同物理宿主的只读 inbox API 已通过限定范围的实机检查；桌面 App 持有的原 Session 和实际异机 Session 插件投递仍未通过。
 
@@ -8,11 +10,11 @@
 
 | 批次 | 已有证据 | 未关闭的验收 |
 | --- | --- | --- |
-| P0 图片/文字基线 | 复用图片、生命周期和恢复修复。私聊与测试群文字、测试群四色合成图片曾获独立收件确认；图片源事件 cursor 49。Candidate 3 当前固定安装版本见上方摘要。 | 旧私聊图片尝试仍保留不明状态。较早群图片的准备前调度已严格归档，outbox 不变；新的不同群图片已聚焦并粘贴，但复制核验拒绝，无 submit。归档不提供图片恢复或重试。 |
+| P0 图片/文字基线 | 复用图片、生命周期和恢复修复。私聊与测试群文字、测试群四色合成图片曾获独立收件确认；图片源事件 cursor 49。Candidate 3 当期固定版本见上方历史摘要。 | 旧私聊图片尝试仍保留不明状态。较早群图片的准备前调度已严格归档，outbox 不变；N4 停在 Copy 核验，首次归档格式拒绝保留；41789 修复后已限定归档，原不明 attempt 不变。私聊 N5 图已独立收件并完成原 intent 延迟精确像素对账，原 attempt 1 不变。图后配文整批成功仍未通过；归档不提供恢复或重试。 |
 | P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现；两个授权 channel 并发增量读取成功。最新跨会话入队时，私聊读取与群发送并行。有界接管隔离检查 `complete=true`：同目标双并发 takeover 只有一个 CAS 成功，另一会话读取成功且绑定未变；旧/接管中/迟到发送均被代际拒绝，未产生意图、attempt 或桌面效果；正确 handback 恢复原 owner、`push/observe`、Session 引用和处理水位。 | 人工出站检测的现场复验及更广故障场景仍未闭合；单次有界接管检查不等于长期并发验收。 |
-| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch，含来源代际、batch 顺序、优先级、到期及未知结果保护。最新同群 Q2/Q3 各一次 attempt、`ui_observed`，源 cursor 51/52，第二执行器返回 busy；跨会话队列按 dispatch 22 私聊、23 群串行完成，各一次 attempt，源 cursor 12/54。用户独立确认两组文字的目标、顺序、内容、换行和 emoji 正确；重复 ID 未增加 attempt。 | 图片队列尚未成功；较早图片调度严格归档后，原排队 focus 已完成。新的不同图片在准备阶段停止，不明调度与零 attempt 配文均保留。这些有界场景不替代更广故障注入或长期运行验收。 |
+| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch，含来源代际、batch 顺序、优先级、到期及未知结果保护。最新同群 Q2/Q3 各一次 attempt、`ui_observed`，源 cursor 51/52，第二执行器返回 busy；跨会话队列按 dispatch 22 私聊、23 群串行完成，各一次 attempt，源 cursor 12/54。用户独立确认两组文字的目标、顺序、内容、换行和 emoji 正确；重复 ID 未增加 attempt。 | 原 N5 图片的一次提交、独立收件与原 intent 延迟对账已有证据，但其配文 attempt 1 在第一次按钮防护停止。N4 Copy 拒绝与 N5 配文已完成限定归档，均不记为发送成功，也不放行同 batch 后件。整批成功、更广故障注入与长期运行仍未闭合。 |
 | P3 inbox/Session | Rust 持久批次、处理租约和明确决定已有；底层订阅可重读。`d2a0dae` 的三个项目 Hook 已通过正常原生信任。全新入站在**原专用 native TUI Session** 一个自动回合完成精确回调、冻结 `show/events` 读取和 `skip`；Rust transport 与带完成时间的原生 turn 均为 `completed`，无需操作员恢复，正式私有验收报告 12 项均通过。另一个物理宿主凭限定只读凭据通过真实 SSH 读取该入站，越界读取与发送被拒绝。 | 旧 delivery 的 Rust `interrupted` 历史异常保持原样；只读异机 inbox API 不等于异机 Session 插件投递。桌面 App 持有的业务 Session、实际异机插件路径未通过，私聊旧 pending 保留。 |
-| P4 运行验收 | `36ec086`、`09ea8be`、`d2a0dae` 均四项 CI 通过；前者 Rust 861 passed/11 ignored、脚本 130 passed、最终安装包 184 passed；后两阶段本地及 Mini Python 3.9 安装包分别 193/195 passed、脚本各 130 passed。`a9fdce6` 亦已四项 CI 通过并启用；本地与 Mini 脚本 136 passed、已安装包 195 passed，未重建原生助手。两普通应用受限 SSH 发送及独立收件确认有实机证据；中性采集与新 runner 的 300 秒有界运行均正常退出码 0，所属子进程已退出。 | 实际异机插件投递、桌面 App 持有的 Session、真实图片队列及更广现场故障场景未闭合。完整 24 小时观察已取消，不宣称通过。 |
+| P4 运行验收 | `36ec086`、`09ea8be`、`d2a0dae` 均四项 CI 通过；前者 Rust 861 passed/11 ignored、脚本 130 passed、最终安装包 184 passed；后两阶段本地及 Mini Python 3.9 安装包分别 193/195 passed、脚本各 130 passed。`a9fdce6` 亦已四项 CI 通过并启用；本地与 Mini 脚本 136 passed、已安装包 195 passed，未重建原生助手。两普通应用受限 SSH 发送及独立收件确认有实机证据；中性采集与新 runner 的 300 秒有界运行均正常退出码 0，所属子进程已退出。 | 实际异机插件投递、桌面 App 持有的 Session、真实图后配文整批及更广现场故障场景未闭合。本轮本地完整矩阵已通过，41789 四项 CI 全部成功；CI4017 的端口竞争失败历史保留，现场结果另记；完整 24 小时观察已取消，不宣称通过。 |
 
 ## 工程验证
 
@@ -187,11 +189,36 @@ Mini 已启用完整 `d2a0dae` 运行时；两个授权目标的全部账本经�
 
 用户完成新增条目后，Candidate 4 新鲜检查的 Accessibility、Screen Recording、Post Events 均为 true，微信只有一个主窗口。仅更新两个授权 driver 的助手引用；原 Candidate 3 二进制、全部旧账本和暂停状态未变。
 
-一张不同的私聊 N5 图片随后通过原生准备、冻结源/复制图片的精确像素核验和一次 Send，私聊源事件 cursor 14 为新出站图片，用户已独立确认收到。原 worker 仍以 `indeterminate` 结束，因为其 20 秒核验窗口中 V2 缓存无法解密；原 attempt 1、提交证据及零 attempt 配文全部保留，没有重发。诊断确认该账号 KeyStore 缺少图片密钥，原目录派生工具又存在跨账号回退及密钥预览输出，故未直接使用该宽松入口。
+一张不同的私聊 N5 图片随后通过原生准备、冻结源/复制图片的精确像素核验和一次 Send，私聊源事件 cursor 14 为新出站图片，用户已独立确认收到。原 worker 仍以 `indeterminate` 结束，因为其 20 秒核验窗口中 V2 缓存无法解密；当时原 attempt 1、提交证据及零 attempt 配文全部保留，没有重发；其后的原图延迟对账与配文首次尝试见下一节。诊断确认该账号 KeyStore 缺少图片密钥，原目录派生工具又存在跨账号回退及密钥预览输出，故未直接使用该宽松入口。
 
 后续源码增加严格绑定账号的静默派生、界面动作前的图片配置检查、原已提交图片的延迟正面核验及单独的已知 prepare Copy 拒绝归档。延迟核验保留原 attempt/报告，新增不可修改的观察证据；归档不会将未发送的 batch 父项当成成功。完整本机 Rust 874 passed、11 原有 ignored，Python 仓库脚本 171 passed、仓库外 wheel 208 passed；独立审查发现“选择 cursor 可截断歧义窗口”，已修复为检查完整有界原始时间窗并追加回归。本节工程证据尚未计作后续修复在 Mini 的实际回验通过。
 
 跨宿主验收沿已存在的本机 App root 进行，普通入口和原生队列的无微信探针均实际完成，没有新建或强行 resume Session。当前 CLI 对 linked worktree 的 Hook 来源重定向到同一仓库的主检出目录；安装器已支持显式项目范围，实际三个 Hook 已在正确来源被发现，Skill 与记录仍在指定工作树，没有全局安装。App 内 Hook 信任和该验收聊天的网络设置等待用户正常操作：桌面工具明确拒绝控制 Codex App，本轮没有改用脚本或信任数据库绕过。尚未为本机 App root 预留真实业务 delivery，不能把两次入口探针说成订阅处理通过。
+
+### 本轮 N5 延迟对账、N4 归档拒绝与 N5 配文停止点（2026-11-03）
+
+本节记录本轮最新已证结果与待验收边界。前文的“当时未提交”“配文零 attempt”“候选未部署”等结论保留为各自历史。这里不把工程检查、调度归档、本地观察和用户收件合成一个通过状态。
+
+| 对象 | 已发生的结果 | 保留与未完成边界 |
+| --- | --- | --- |
+| 原私聊 N5 图片 | 原生 prepare 成功、冻结图与 composer 精确像素一致、只执行一次 Send；原 source cursor 14 的出站 Image 存在，用户独立确认收到。随后对**同一原 intent** 的严格延迟内容证明通过，比较结果为 `exact-pixels`。 | 追加新的 observation/报告，原 intent 当前状态归并为 `ui_observed`；原 attempt 1 与原 client report 仍为 `indeterminate`，没有新增 attempt、重发或替换 request。收件确认与本地对账是两份证据，不等于图后配文整批成功。E17。 |
+| 原群 N4 图片 | 原生 prepare 的已知 Copy 计数拒绝仍是原停止点。首次归档前严格证明因生产错误字符串在 `types:` 后有一个 ASCII 空格、旧解析器只接受零空格而被拒。 | 首次归档未修改原调度/outbox/attempt/原生文件。源码已兼容生产单空格及旧零空格形式，仍拒绝任意空白、空列表、无 PNG/TIFF 或其他错误；41789 已部署，原 N4 的限定归档成功，原 outbox、attempt、文件和草稿不变，没有发送。旧失败报告保留。E18。 |
+| 原私聊 N5 配文 | 原 attempt 1 的 report 停在 `prepared/indeterminate`。Native prepare 为 `ok=true/prepared=true`，submit 返回精确错误 `Expected exactly one visible Send label in lower conversation pane`；Python report 别名为 `submit outcome uncertain: Send button not confirmed`。 | Native visual state 仍是 `prepared`，无 `submit-attempted` marker、无 Send 点击，cursor 14 图片之后无该出站文字事件；已准备的原文字草稿保留。不能恢复或重试原 caption，也不能因原图已收到就改记配文成功。E19。 |
+| 文本按钮拒绝归档 | 源码新增独立 `archive-text-button-rejection` 合同，必须证明上述原始准备成功与第一次按钮防护拒绝，且无 marker、提交后状态、迟到观察或后续 attempt。 | 成功时仅将原 dispatch 记为 `done/text_button_guard_rejected`；不改原 outbox/attempt/client report，不清草稿、不解除暂停，不声明未发送或已送达。41789 已在原 N5 配文上归档成功，原 outbox、attempt、证据及草稿均未改变。操作合同见[限定归档说明](MANAGED_CONVERSATIONS.md#已知原生拒绝的独立归档合同)。 |
+
+按钮 OCR 修复仍须保留：**窄按钮区唯一精确 `Send`，并核对其校准位置**。宽下方面板的检查仅排除额外的精确 `Send` 标签；不能仅因草稿中含“发送”文字或非精确标签文本，就推断出现第二个 Send 按钮。窗口、目标、草稿及位置保护都不放宽；不改成宽松点击、其他入口或自动重试。原生修复已构建并在同一路径更新 Candidate 4，保留旧签名助手且账本未变；新签名的系统权限正在刷新，不同 payload/目标的新 N6 图后配文尚未发送。归档后的新独立业务消息仍需显式桌面/草稿安全审查；原 N5 caption 永不重放。
+
+本轮 `CI4017` 的 Rust 作业因测试 fixture 端口竞争失败，其余三项成功；该失败历史保留。41789 的 CI 41651229882 四项全部成功，Mini Python 3.9 脚本 179、安装包 208 通过。CLI/Python 已安装，两条原始拒绝均已限定归档。工程检查、远程 CI、部署和实机验收分别记录，不能相互替代。E20。
+
+| 本轮正式检查 | 已证结果 | 本地证据路径 |
+| --- | --- | --- |
+| 完整 Rust 检查 | 退出码 0；46 个测试汇总共 875 passed、0 failed、11 原有 ignored，构建完成。 | `.local/button-guard-full-rust.log` |
+| 仓库脚本 | 179 passed。 | `.local/button-guard-final-scripts.log` |
+| 仓库外已安装 wheel | 208 passed；wheel 安装、入口与安装后测试通过。 | `.local/button-guard-installed.log` |
+| 原生助手候选 | 参数与命名剪贴板检查、arm64 构建、签名验证均通过，退出码 0。 | `.local/button-guard-final-native.log` |
+| 编译 CLI 通道集成 | `test_local_channel` 退出码 0。 | 编译 CLI 合成检查结果；不代表真实微信发送。 |
+
+上述日志位于本地忽略目录。新增的显式已知旧图片草稿传递修复，又经脚本 183、仓库外安装包 208 检查通过；Rust 与原生代码未再改变。N4/N5 配文归档不触发 GUI；新按钮修复的真实发送及新图后配文仍待验收。
 
 ## 私有证据索引
 
@@ -214,5 +241,10 @@ Mini 已启用完整 `d2a0dae` 运行时；两个授权目标的全部账本经�
 - E15：真实采集进程 SIGTERM、同配置重启、最终健康/子进程回收及已有待办/attempt 不变；不包含停采期间新消息积压或网络故障。
 
 - E16：`d825999` 图片 Copy 修复的本机/异机构建、参数与签名证据，以及独立候选未启动、未激活、旧助手和发件账本不变的准备记录。
+
+- E17：原 N5 图片的一次原生提交、用户独立收件、source cursor 14 与同一原 intent 的 `exact-pixels` 延迟对账；原 attempt/client report 与追加观察报告分别保留在私有验收目录。
+- E18：N4 Copy 拒绝归档的首次严格证明因生产单空格格式被拒、无变更核对及解析器兼容修复记录；包含 41789 对原 N4 的限定归档成功及全部原始文件、attempt 和草稿未变证明。
+- E19：原 N5 配文的 prepare 成功、精确首次 Send OCR 错误、`prepared` state、marker 缺失与原文字草稿保留证据；包含原 N5 配文限定归档成功；不包含任何配文重发。
+- E20：本轮 CI4017 的 Rust fixture 端口竞争失败与其他三项成功历史；本地完整矩阵通过日志为 `.local/button-guard-full-rust.log`、`.local/button-guard-final-scripts.log`、`.local/button-guard-installed.log`、`.local/button-guard-final-native.log`，以及 `test_local_channel` 编译 CLI 退出码 0 的检查结果。包含 41789 四项 CI 成功、Mini 安装及两个原请求限定归档证明；后续发送结果另行记录。
 
 真实身份、Session/turn 引用、token、配置、截图与数据库保留在各自宿主的忽略/私有验收目录；公共仓库仅记录上述汇总。
