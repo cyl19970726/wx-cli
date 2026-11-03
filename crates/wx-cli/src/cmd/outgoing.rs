@@ -2168,15 +2168,19 @@ mod tests {
                 normal.display()
             ),
         );
-        assert!(recover_unsent_with_timeout(
+        let refusal = recover_unsent_with_timeout(
             &state,
             &binding,
             "preflight_refusal",
             1,
             &driver,
-            Duration::from_secs(2)
+            Duration::from_secs(10),
         )
-        .is_err());
+        .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "driver did not prove the previous attempt unsent"
+        );
         let input: serde_json::Value =
             serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
         assert_eq!(input["text"], "original body");

@@ -91,7 +91,7 @@ wx-agent dispatch --config /ABS/private/conversations.json abandon-unsent \
   --reason '已核对原尝试在图片准备前停止及完整原生证据'
 ```
 
-文字原有证明路径保持不变。新增的**图片特例**仅接受第一次 attempt 1、当前 outbox `indeterminate`、报告停在 `inspected`，且原 inspect/focus/polls 完整证明同一个已知的六秒搜索弹层未枚举错误。缺少或矛盾的记录、`group_focused`、图片准备/状态/提交痕迹、后续 attempt、未退出的 helper 均拒绝；图片 driver 使用单独的 `--abandon-capabilities` / `--abandon-preflight` 只读合同，不借用图片发送或恢复入口。成功只把原 dispatch 标为 `done/abandoned_pre_submit`，保留原图片意图、attempt、`indeterminate` 和证据；随后仍须按 `review` 合同审查桌面，才能让其他合格队列项继续。**这不授权重试原图片，也不证明图片已发出。**新增图片特例目前仅是未提交、未部署的候选代码；本页命令须等实际安装版本和原证据核验后才可用于现场。
+文字原有证明路径保持不变。新增的**图片特例**仅接受第一次 attempt 1、当前 outbox `indeterminate`、报告停在 `inspected`，且原 inspect/focus/polls 完整证明同一个已知的六秒搜索弹层未枚举错误。缺少或矛盾的记录、`group_focused`、图片准备/状态/提交痕迹、后续 attempt、未退出的 helper 均拒绝；图片 driver 使用单独的 `--abandon-capabilities` / `--abandon-preflight` 只读合同，不借用图片发送或恢复入口。成功只把原 dispatch 标为 `done/abandoned_pre_submit`，保留原图片意图、attempt、`indeterminate` 和证据；随后仍须按 `review` 合同审查桌面，才能让其他合格队列项继续。**这不授权重试原图片，也不证明图片已发出。**该特例已在 `a9fdce6` 安装版本的原始准备前图片尝试上通过实机证明，原 outbox 和原生证据保持不变。后来停在 `group_focused` 的不同图片尝试被排除在此合同之外；每次仍须核对现场安装版本与原证据，不能把归档当成发送或恢复。
 
 若是执行器在 attempt 之前退出，原 outbox 确实仍为零次尝试、原 owner/epoch 未变，可在同一次安全核查加 `--restore-unattempted DISPATCH_ID` 恢复该原请求。任何已有 attempt 的意图都不能走此入口。未关联发件箱证据的本人出站被视为可能人工发言：只接管对应会话并更新 epoch，不暂停其他会话；正在尝试的出站先等待结果再关联，不直接误判为人工。
 

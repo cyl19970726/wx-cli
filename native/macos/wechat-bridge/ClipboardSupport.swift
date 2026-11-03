@@ -100,3 +100,19 @@ func setClipboardImage(_ image: LoadedImage, snapshot: ClipboardSnapshot) throws
     }
     return board.changeCount
 }
+
+// A Copy may change pasteboard ownership more than once. Prove the final
+// raster, not a particular number of ownership changes.
+func copiedImageReplacingSentinel(from board: NSPasteboard, ownedCount: Int,
+                                  sentinel: String, expected: ImagePixels) throws -> (String, Int) {
+    let count = board.changeCount
+    guard count > ownedCount, board.string(forType: .string) != sentinel,
+          board.changeCount == count else {
+        throw ClipboardFailure("Image Copy did not replace sentinel with stable clipboard ownership (before: \(ownedCount), after: \(count))")
+    }
+    let type = try MediaSupport.copiedImage(from: board, expected: expected)
+    guard board.changeCount == count else {
+        throw ClipboardFailure("Clipboard changed during image decoding")
+    }
+    return (type, count)
+}

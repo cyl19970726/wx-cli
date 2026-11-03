@@ -133,8 +133,12 @@ frame before any desktop action. Limits are 16 MiB encoded, 8192 pixels per
 side, and 40 million pixels total. EXIF orientation is normalized into the
 decoded pixels before paste. It pastes native PNG/TIFF pasteboard data,
 then copies from the composer and requires a decoded, exact sRGB pixel digest
-match. A thumbnail, changed pixels, an unreadable image, or a copy with file,
-text, rich-text or other non-image pasteboard types stops the transaction.
+match. A thumbnail, changed pixels, an unreadable image, or a copy without
+exactly one decodable raster item stops the transaction. Rich metadata and file
+URLs may accompany that raster but are never used as image data or opened.
+Image Copy must replace the clipboard sentinel. Its change count must advance
+and remain stable through decoding, a short delay, and a fresh target frame;
+the number of ownership changes is not fixed ([NSPasteboard.changeCount](https://developer.apple.com/documentation/appkit/nspasteboard/changecount)).
 Submit loads and verifies the same source again,
 requires the prepared pixel digest, and copies the composer image again before
 the existing single Send click. No image resize or recompression tolerance is

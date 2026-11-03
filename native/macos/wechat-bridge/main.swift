@@ -685,8 +685,7 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
         try key(8, command: true)
         try await Task.sleep(nanoseconds: 250_000_000)
         let board = NSPasteboard.general
-        var copiedCount = board.changeCount
-        let copiedTypes = board.pasteboardItems?.flatMap { $0.types.map(\.rawValue) } ?? []
+        let copiedCount = board.changeCount
         if copiedCount == owned && board.string(forType: .string) == sentinel {
             let (currentWindow, _, _) = try await freshVisual(state, step: "\(step)-image-fallback-ready", draft: nil)
             guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
@@ -708,18 +707,19 @@ private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
             }
             try imageContextCopy(imagePoint, expectedPID: state.expectedPID)
             try await Task.sleep(nanoseconds: 250_000_000)
-            copiedCount = board.changeCount
         }
-        guard copiedCount == owned + 1 else {
-            throw Failure("Composer Copy did not replace image sentinel exactly once (types: \(copiedTypes.joined(separator: ",")))")
+        let (type, provenCount) = try copiedImageReplacingSentinel(
+            from: board, ownedCount: owned, sentinel: sentinel, expected: image.pixels)
+        verifiedCopyCount = provenCount
+        try await Task.sleep(nanoseconds: 200_000_000)
+        guard board.changeCount == provenCount else {
+            throw Failure("Clipboard changed after image evidence capture")
         }
-        let type = try MediaSupport.copiedImage(from: board, expected: image.pixels)
-        verifiedCopyCount = copiedCount
         _ = try await freshVisual(state, step: "\(step)-copied", draft: nil)
-        guard board.changeCount == copiedCount else {
+        guard board.changeCount == provenCount else {
             throw Failure("Clipboard changed during image evidence capture")
         }
-        try snapshot.restore(ifCurrentCount: copiedCount)
+        try snapshot.restore(ifCurrentCount: provenCount)
         return type
     } catch {
         let board = NSPasteboard.general

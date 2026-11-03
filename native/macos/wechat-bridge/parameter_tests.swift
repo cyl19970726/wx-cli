@@ -394,6 +394,7 @@ import ImageIO
         let loaded = try! MediaSupport.load(input)
         precondition(loaded.pixels.width == width && loaded.pixels.height == height)
         precondition(loaded.pixels == (try! MediaSupport.decode(png, allowedTypes: ["public.png"])).1)
+        imageCopyReplacementChecks(loaded: loaded, png: png)
         let jpegBuffer = NSMutableData()
         let jpegDestination = CGImageDestinationCreateWithData(jpegBuffer, "public.jpeg" as CFString, 1, nil)!
         CGImageDestinationAddImage(jpegDestination, image, nil)
@@ -493,5 +494,71 @@ import ImageIO
         refused(ImageMedia(path: path.path,
                            sha256: MediaSupport.digest(try! Data(contentsOf: path)),
                            mimeType: "image/png", sizeBytes: 8))
+    }
+
+    static func imageCopyReplacementChecks(loaded: LoadedImage, png: Data) {
+        let board = NSPasteboard(name: NSPasteboard.Name("codex-image-copy-proof-" + UUID().uuidString))
+        board.clearContents()
+        precondition(board.setString("original", forType: .string))
+        let snapshot = try! ClipboardSnapshot.capture(board: board)
+        let sentinel = "private-image-sentinel"
+        let owned = try! setClipboardString(sentinel, snapshot: snapshot)
+
+        func refused(_ ownedCount: Int, _ pixels: ImagePixels = loaded.pixels) {
+            do {
+                _ = try copiedImageReplacingSentinel(from: board, ownedCount: ownedCount,
+                    sentinel: sentinel, expected: pixels)
+                preconditionFailure("unsafe image Copy evidence accepted")
+            } catch {}
+        }
+        func imageItem() -> NSPasteboardItem {
+            let item = NSPasteboardItem()
+            precondition(item.setData(png, forType: .png))
+            return item
+        }
+
+        refused(owned) // unchanged sentinel
+        board.clearContents()
+        precondition(board.setString(sentinel, forType: .string))
+        refused(owned) // count advanced, sentinel still present
+        board.clearContents()
+        precondition(board.writeObjects([imageItem()]))
+        let copiedCount = board.changeCount
+        precondition(copiedCount == owned + 2)
+        let (type, provenCount) = try! copiedImageReplacingSentinel(
+            from: board, ownedCount: owned, sentinel: sentinel, expected: loaded.pixels)
+        precondition(type == "public.png" && provenCount == copiedCount)
+        refused(copiedCount) // unchanged ownership
+        refused(copiedCount + 1) // backwards ownership
+        refused(owned, ImagePixels(width: loaded.pixels.width, height: loaded.pixels.height,
+            sha256: String(repeating: "0", count: 64)))
+
+        let sentinelImage = imageItem()
+        precondition(sentinelImage.setString(sentinel, forType: .string))
+        board.clearContents()
+        precondition(board.writeObjects([sentinelImage]))
+        refused(owned) // raster present, but sentinel is still advertised
+
+        board.clearContents()
+        precondition(board.writeObjects([imageItem(), imageItem()]))
+        refused(owned) // multiple image items
+        board.clearContents()
+        precondition(board.setString("not raster", forType: .string))
+        refused(owned) // no image bytes
+        board.clearContents()
+        precondition(board.setString("file:///tmp/image.png", forType: .fileURL))
+        refused(owned) // a file URL is not decoded image evidence
+
+        board.clearContents()
+        precondition(board.writeObjects([imageItem()]))
+        let stableCount = try! copiedImageReplacingSentinel(from: board, ownedCount: owned,
+            sentinel: sentinel, expected: loaded.pixels).1
+        board.clearContents()
+        precondition(board.setString("external change", forType: .string))
+        do {
+            try snapshot.restore(ifCurrentCount: stableCount)
+            preconditionFailure("external clipboard change was overwritten")
+        } catch {}
+        precondition(board.string(forType: .string) == "external change")
     }
 }
