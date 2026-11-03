@@ -18,7 +18,7 @@
 
 项目内 [wechat-group-agent skill](.agents/skills/wechat-group-agent/SKILL.md) 教 Agent 如何操作上述 CLI。skill 不自带后台监听器，也不会为手动会话启动模型；MCP 尚未实现，后续若开发应复用同一套状态和协议。
 
-通道订阅与 Agent Session 接入分开：wx-cli 保存事件、订阅进度和发送队列，Session 插件负责通知原 Session 并消费事件。现有 `channel subscribe` 可独立使用；当前 Codex 受管适配器是可选接入实验，完整桌面/跨宿主插件尚未交付。边界和现有命令见[订阅与 Session 插件](docs/CHANNEL_SUBSCRIPTIONS.md)。
+通道能力与 Agent Session 接入分开：wx-cli 保存事件、订阅进度和发送队列，普通应用可直接通过 CLI 提交授权的群通知，Session 插件负责通知原 Session 并消费事件。订阅、应用发件和插件共用通道状态；当前 Codex 受管适配器是可选接入实验，完整桌面/跨宿主插件及面向独立远程应用的鉴权发送 API 尚未交付。边界和现有命令见[通道订阅、应用发件与 Session 插件](docs/CHANNEL_SUBSCRIPTIONS.md)。
 
 Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。未迁移会话继续使用原 controller 协调；托管会话通过 `configure` 显式迁移，使用 `wx-agent inbox` 和 `dispatch` 共享处理记录及桌面队列。受管 Session 已有同 thread 跨重启工具调用探针；正在被桌面 App 持有的业务 Session 暂只支持主动 CLI。MCP 尚未实现。
 

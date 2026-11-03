@@ -1,6 +1,6 @@
 # 微信通道独立，Session 通过插件接入
 
-wx-cli / 通道服务负责授权微信会话的采集、订阅、持久 inbox 与共享发送队列；Session 插件负责消费订阅、通知原 Agent Session，并把明确处理决定或发送意图交回通道。微信通道不负责创建、恢复或持有模型 Session。这是 2026-11-03 用户澄清后的架构边界，合同与现有入口见[订阅与 Session 插件](CHANNEL_SUBSCRIPTIONS.md)。
+wx-cli / 通道服务负责授权微信会话的采集、订阅、持久 inbox 与共享发送队列。普通应用可直接提交发送意图；Session 插件消费订阅、通知原 Agent Session，并把明确处理决定或发送意图交回同一通道。微信通道不负责创建、恢复或持有模型 Session。这是 2026-11-03 用户澄清后的架构边界，合同与现有入口见[通道订阅、应用发件与 Session 插件](CHANNEL_SUBSCRIPTIONS.md)。
 
 现有 `channel subscribe` 能独立输出事件，`coordinator inbox` 能保存待办和处理决定；Codex app-server 编排是当前 Python 包中的可选适配实验，尚未完成插件拆分、任意桌面 Session 或跨宿主接入。下面的代码结构和历史机制说明仍是实际实现，不把目标边界写成已完成迁移。
 

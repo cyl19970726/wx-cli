@@ -1,6 +1,6 @@
-# 微信通道订阅与 Session 插件的边界
+# 微信通道：订阅、应用发件与 Session 插件
 
-wx-cli 提供微信消息、订阅进度和发送队列；Session 插件消费这些能力，并负责与所在 Agent 宿主衔接。订阅一个群不要求 wx-cli 创建、恢复或持有一个模型会话。此边界依据 2026-11-03 的用户澄清；当前代码和实测状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+wx-cli 提供微信消息、订阅进度和发送队列。普通业务应用可以直接提交发送意图；Session 插件也是调用方，另外负责与 Agent 宿主衔接。订阅或发送都不要求 wx-cli 创建、恢复或持有模型会话。此边界依据 2026-11-03 的用户澄清；当前代码和实测状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
 
 ## 一条消息怎样到达 Session
 
@@ -14,6 +14,7 @@ flowchart LR
     P -->|宿主提供的通知或排队接口| A[原 Agent Session]
     A -->|经插件读取 delivery 对应事件| S
     A -->|显式处理决定 / 发送意图| Q[Rust 决定记录与 outbox]
+    B[普通业务应用] -->|授权的发送意图| Q
     Q --> D[共享桌面发送队列]
     D --> WX
 ```
@@ -21,6 +22,23 @@ flowchart LR
 采集器先把事件保存到 channel。插件即使离线，事件和待处理批次仍保留；插件重新连接后从原进度续读。插件通知 Session 有待办，Session 再取得这一批消息并处理。通知成功不代表已处理，模型回答也不会直接成为微信消息。
 
 Session 的模型、上下文、工具和忙闲状态由 Agent 宿主拥有。插件可以使用宿主支持的事件回调、消息队列或轮询入口；wx-cli 不规定某一种宿主，也不把 `thread/resume` 当成订阅协议。现有 Codex app-server 适配器是一种可选接入实验。
+
+## 普通应用也能向群发消息
+
+普通应用可以只使用发送能力，无需订阅消息或经过 Session 插件。例如，业务系统在自身事务完成后，提交一条给已授权群的通知。应用提供明确的 conversation ID、稳定 request ID 和正文；通道冻结意图、返回排队状态，再由共享桌面执行器切换到目标群发送。应用按原 request ID 查询结果，不因排队或超时创建第二条同义通知。
+
+现有高层入口已经可由应用以子进程调用，正文走 stdin、结果为 JSON；项目中它的可执行名是 `wx-agent`，同属 wx-cli 通道实现，不要求启动模型：
+
+```sh
+wx-agent conversations --config /ABS/private/conversations.json send \
+  --id CONVERSATION --owner CURRENT_OWNER --expected-epoch EPOCH \
+  --request-id app-notification-001 --text-stdin --no-wait < /ABS/private/message.txt
+wx-agent dispatch --config /ABS/private/conversations.json status
+```
+
+多个应用和 Session 插件共用原 outbox、dispatch 和桌面执行器；不各自建立 GUI 发送器。文字队列、切换会话及幂等保护已有[实机证据](MULTI_CONVERSATION_IMPLEMENTATION.md)；这不是对任何业务应用接入都已验收的承诺。图片队列仍按本轮决定后置。
+
+当前发送约束是会话既有 owner 和 epoch，owner 是协作身份而非应用凭证；调用方不能为了发通知临时替换会话 owner。后续的独立应用身份及按群发送范围应由接入层表达，与收件业务 owner 分开；获得发送权限不同时授予读取和处理消息的权限。现有同机可信应用可复用获准的 CLI 入口，面向独立远程应用的鉴权发送 API 尚未实现，不能把上游查询 HTTP 服务当成该发送 API。
 
 ## 两部分各自负责什么
 
