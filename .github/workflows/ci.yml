@@ -36,6 +36,7 @@ jobs:
           python -m unittest scripts.test_multi_conversation
           scripts.test_application_integration scripts.test_gateway_integration
           scripts.test_plugin_integration scripts.test_plugin_adversarial
+          scripts.test_image_observation
       - name: Sender contract against compiled CLI events
         env:
           PYTHONPATH: packages/wx-agent/src

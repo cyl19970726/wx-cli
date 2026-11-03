@@ -906,6 +906,210 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
         self.assertEqual(self.outbox("private", "show", "--request-id", "batch-image-after-failure")
                          ["attempt_number"], 0)
 
+    def test_archive_original_image_copy_rejection_preserves_history_and_blocks_caption(self):
+        from wx_agent import macos_sender_driver as sender
+        channel = self.channels["group"]
+        request = "known-original-image-copy-rejection"
+        parent = self.queue("group", request, image=True, batch_id="original-copy-rejected-batch", part_index=0)
+        caption = self.queue("group", "caption-of-rejected-image", batch_id="original-copy-rejected-batch", part_index=1)
+        out_path = channel["state"] / "outgoing.sqlite3"
+        with sqlite3.connect(out_path) as db:
+            media = dict(zip(("path", "sha256", "mime_type", "size_bytes"), db.execute(
+                "SELECT media_path,media_sha256,media_mime_type,media_size_bytes FROM outgoing_intent WHERE request_id=?", (request,)).fetchone()))
+        with sqlite3.connect(channel["state"] / "channel.sqlite3") as db:
+            db.execute('UPDATE channel_binding SET encrypted_snapshot=1')
+        binding = self.cli("channel", channel["state"], "status")["binding"]
+        tid = "send-" + hashlib.sha256((binding["channel_id"] + "\0" + request).encode()).hexdigest()[:48]
+        focus, inspect = tid + "-focus", tid + "-inspect"
+        frame = {"x": 100, "y": 100, "width": 880, "height": 640}
+        permissions = {"accessibility": True, "screenRecording": True, "postEvents": True}
+        config = {"ui_dir": str(self.ui), "channel_state_dir": str(channel["state"]), "wx_cli": str(BINARY),
+                  "binding": binding, "target_name": "Synthetic Group", "target_group": "Synthetic Group",
+                  "conversation_kind": "group", "expected_pid": 42, "expected_draft": "",
+                  "window_size": {"width": 880, "height": 640},
+                  "conversation_list_rect": {"x": 60, "y": 55, "width": 240, "height": 570},
+                  "search_point": {"x": 155, "y": 28}, "composer_rect": {"x": 320, "y": 500, "width": 400, "height": 80},
+                  "button_point": {"x": 800, "y": 610}}
+        prepare = dict(sender._prepare_command({"media": media}, config, 21, frame, focus), id=tid, action="prepare-visual")
+        visual = dict(prepare, text="", stage="prepare-attempted"); visual.pop("action")
+        artifacts = {
+            tid + ".client-result.json": {"id": tid, "request_id": request, "attempt_number": 1,
+                "channel_id": binding["channel_id"], "session_id": binding["session_id"],
+                "stage": "group_focused", "status": "indeterminate", "error": "helper rejected action",
+                "target_kind": "group", "focus_evidence_id": focus, "focus_category": "group-chats"},
+            inspect + ".inspect.job.json": {"id": inspect, "action": "inspect"},
+            inspect + ".result.json": {"id": inspect, "action": "inspect", "ok": True, "weChatPID": 42,
+                "windows": [{"id": 21, "frame": frame}], "permissions": permissions, "session": {"onConsole": True, "locked": False}},
+            focus + ".focus-group.job.json": {"id": focus, "action": "focus-group", "targetGroup": "Synthetic Group",
+                "targetKind": "group", "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame,
+                "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]},
+            focus + ".result.json": {"id": focus, "action": "focus-group", "ok": True, "focused": True,
+                "alreadySelected": False, "source": "search", "targetKind": "group", "focusEvidenceID": focus, "category": "group-chats", "permissions": permissions},
+            focus + ".focus-evidence.json": {"id": focus, "targetGroup": "Synthetic Group", "targetKind": "group",
+                "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame, "source": "search", "category": "group-chats", "selectedAt": 1},
+            tid + ".prepare-visual.job.json": prepare,
+            tid + ".prepare-visual.result.json": {"id": tid, "ok": False, "permissions": permissions,
+                "error": "Composer Copy did not replace image sentinel exactly once (types:public.png,public.tiff,public.file-url)"},
+            tid + ".visual-state.json": visual}
+        for name, value in artifacts.items(): sender.private_create(self.ui / name, value)
+        evidence = self.ui / (tid + ".client-result.json")
+        timestamp = int(time.time())
+        # Seed only the synthetic historical attempt. No driver/send command is
+        # used to manufacture the original failure or perform the archive.
+        with sqlite3.connect(out_path) as db:
+            db.execute('UPDATE managed_control SET gate=1')
+            db.execute("UPDATE outgoing_intent SET status='indeterminate',attempt_number=1,result_evidence=? WHERE request_id=?", (str(evidence),request))
+            db.execute("INSERT INTO outgoing_attempt(request_id,attempt_number,status,result_evidence,claimed_at,finished_at) VALUES (?,1,'indeterminate',?,?,?)", (request,str(evidence),timestamp-10,timestamp))
+            db.execute('UPDATE managed_control SET gate=0')
+        coord_path = self.ui / "coordinator.sqlite3"
+        with sqlite3.connect(coord_path) as db:
+            db.execute("UPDATE dispatch SET status='unknown',result='indeterminate' WHERE id=?", (parent["dispatch_id"],))
+            db.execute("UPDATE surface SET paused_reason='original Copy rejection'")
+        configured = self.coordinator("configure", "--conversation-id", channel["id"], "--expected-epoch", channel["epoch"],
+            "--owner", "owner_group", "--input", "push", "--reply-policy", "authorized")
+        channel["epoch"] = configured["epoch"]
+        cfg = self.root / "image-rejection-proof-config.json"; sender.private_create(cfg, config)
+        package_src = ROOT / "packages/wx-agent/src"
+        proof_driver = channel["state"] / "conversation-sender"
+        proof_driver.write_text("#!" + sys.executable + "\n" +
+            "import json,sys\nfrom pathlib import Path\nfrom unittest import mock\n" +
+            "sys.path.insert(0," + repr(str(package_src)) + ")\nfrom wx_agent import macos_sender_driver as driver\n" +
+            "if sys.argv[1:]==['--image-rejection-capabilities']:\n    sys.exit(driver.main(sys.argv[1:]))\n" +
+            "if sys.argv[1:]!=['--image-rejection-preflight']:\n    sys.exit(9)\n" +
+            "config=json.loads(Path(" + repr(str(cfg)) + ").read_text())\nconfig['ui_dir']=Path(config['ui_dir'])\n" +
+            "with mock.patch.object(driver,'_helper_is_live',return_value=False), mock.patch.object(driver,'bridge',side_effect=AssertionError('no GUI allowed')):\n" +
+            "    try:\n        proof=driver.image_rejection_preflight(json.load(sys.stdin),config)\n" +
+            "    except (driver.Refused,driver.Uncertain,OSError,ValueError,KeyError,TypeError):\n        sys.exit(3)\n" +
+            "print(json.dumps(proof))\n")
+        proof_driver.chmod(0o700)
+        with sqlite3.connect(out_path) as db:
+            original_intent = db.execute('SELECT * FROM outgoing_intent WHERE request_id=?',(request,)).fetchall()
+            original_attempt = db.execute('SELECT * FROM outgoing_attempt WHERE request_id=?',(request,)).fetchall()
+        before = {name:(self.ui / name).read_bytes() for name in artifacts}
+        command = ("dispatch", "archive-image-copy-rejection", "--dispatch-id", parent["dispatch_id"],
+                   "--expected-attempt", 1, "--reason", "reviewed exact original raster Copy rejection")
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", parent["dispatch_id"], "--expected-attempt", 1,
+                         "--reason", "old before-prepare protocol must still refuse", okay=False)
+        self.coordinator("dispatch", "archive-image-copy-rejection", "--dispatch-id", parent["dispatch_id"],
+                         "--expected-attempt", 2, "--reason", "later attempts cannot use first-attempt archive", okay=False)
+        submit_marker = self.ui / (tid + ".submit-attempted.json")
+        submit_marker.touch(mode=0o600)
+        self.coordinator(*command, okay=False); submit_marker.unlink()
+        prepare_path = self.ui / (tid + ".prepare-visual.job.json")
+        wrong_media = dict(media, sha256="0" * 64)
+        sender.private_update(prepare_path, dict(prepare, media=wrong_media))
+        self.coordinator(*command, okay=False)
+        prepare_path.write_bytes(before[prepare_path.name]); prepare_path.chmod(0o600)
+        # N5-style successful native preparation/submission cannot use this archive.
+        report_path = self.ui / (tid + ".client-result.json")
+        sender.private_update(report_path, dict(artifacts[report_path.name], stage="submit_clicked", media_prepared={}))
+        self.coordinator(*command, okay=False); report_path.write_bytes(before[report_path.name]); report_path.chmod(0o600)
+        result = self.coordinator(*command)
+        self.assertEqual(result["result"], "image_prepare_rejected")
+        self.assertEqual(result["outbox_status"], "indeterminate")
+        with sqlite3.connect(out_path) as db:
+            self.assertEqual(db.execute('SELECT * FROM outgoing_intent WHERE request_id=?',(request,)).fetchall(),original_intent)
+            self.assertEqual(db.execute('SELECT * FROM outgoing_attempt WHERE request_id=?',(request,)).fetchall(),original_attempt)
+        self.assertEqual(before,{name:(self.ui / name).read_bytes() for name in artifacts})
+        with sqlite3.connect(coord_path) as db:
+            self.assertEqual(db.execute('SELECT epoch FROM dispatch WHERE id=?',(parent["dispatch_id"],)).fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT paused_reason FROM surface').fetchone()[0],'original Copy rejection')
+        self.coordinator("dispatch", "restore-queued", "--dispatch-id", caption["dispatch_id"],
+            "--reason", "reauthorizing cannot release rejected image caption")
+        new = self.queue("group", "independent-after-copy-rejection", batch_id="new-independent-batch", part_index=0)
+        self.assertEqual(self.coordinator("dispatch", "claim", "--worker", "synthetic-rejection-check")["status"],"paused")
+        self.coordinator("dispatch", "review", "--reason", "independent synthetic desktop safety review")
+        claimed = self.coordinator("dispatch", "claim", "--worker", "synthetic-rejection-check")
+        self.assertEqual(claimed["dispatch_id"],new["dispatch_id"])
+        with sqlite3.connect(coord_path) as db:
+            self.assertEqual(db.execute('SELECT status,result FROM dispatch WHERE id=?',(caption["dispatch_id"],)).fetchone(),
+                             ('blocked','batch_predecessor_not_sent'))
+        self.assertEqual(self.outbox("group", "show", "--request-id", "caption-of-rejected-image")["attempt_number"],0)
+        self.assertFalse(self.log.exists(),"archive and claim must never invoke a send driver")
+
+    def test_batch_prerequisite_requires_successful_send_instead_of_merely_done(self):
+        coord_path = self.ui / "coordinator.sqlite3"
+        for index, (operation, result, successful) in enumerate((
+                ("send", "abandoned_pre_submit", False),
+                ("send", "image_prepare_rejected", False),
+                ("send", "focus_completed", False),
+                ("focus", "ui_observed", False),
+                ("send", "ui_observed", True),
+                ("send", "recipient_confirmed", True))):
+            with self.subTest(operation=operation, result=result):
+                batch = "synthetic-prerequisite-" + str(index)
+                parent = self.queue("group", "prerequisite-" + str(index), batch_id=batch, part_index=0)
+                child = self.queue("group", "dependent-caption-" + str(index), batch_id=batch, part_index=1)
+                # Model historical dispatch outcomes without invoking a driver.
+                with sqlite3.connect(coord_path) as db:
+                    db.execute("UPDATE dispatch SET status='done',operation=?,result=? WHERE id=?",
+                               (operation,result,parent["dispatch_id"]))
+                independent = None
+                if not successful:
+                    independent = self.queue("group", "independent-batch-" + str(index),
+                        batch_id="independent-prerequisite-" + str(index), part_index=0)
+                claimed = self.coordinator("dispatch", "claim", "--worker", "synthetic-prerequisite-check")
+                expected = child if successful else independent
+                self.assertEqual(claimed["dispatch_id"],expected["dispatch_id"])
+                if not successful:
+                    with sqlite3.connect(coord_path) as db:
+                        self.assertEqual(db.execute('SELECT status,result FROM dispatch WHERE id=?',
+                            (child["dispatch_id"],)).fetchone(),('blocked','batch_predecessor_not_sent'))
+                with sqlite3.connect(coord_path) as db:
+                    db.execute("UPDATE dispatch SET status='done',result='ui_observed' WHERE id=?",(expected["dispatch_id"],))
+                    db.execute('UPDATE surface SET active_dispatch=NULL')
+        self.assertFalse(self.log.exists(),"prerequisite checks never execute a driver")
+
+    def test_image_setup_refusal_keeps_zero_attempts_without_pausing_other_conversation(self):
+        from wx_agent import dispatch
+        group = self.channels["group"]
+        image = self.queue("group", "setup-unavailable-image", image=True, batch_id="setup-unavailable-batch", part_index=0)
+        self.queue("group", "caption-waits-for-image-setup", batch_id="setup-unavailable-batch", part_index=1)
+        self.queue("private", "unrelated-text-after-image-setup")
+        driver = group["state"] / "conversation-sender"
+        touched = self.root / "image-desktop-or-send-touched"
+        driver.write_text("#!" + sys.executable + "\n" +
+            "import json,os,sys\nfrom pathlib import Path\n" +
+            "if sys.argv[1:]==['--dispatch-preflight']:\n" +
+            "    result=({'ready':False,'reason_code':'image_verification_unavailable','desktop_touched':False} if os.environ.get('WX_PREFLIGHT_CONTENT_KIND')=='image' else {'ready':True})\n" +
+            "    print(json.dumps(result));sys.exit(0)\n" +
+            "Path(" + repr(str(touched)) + ").write_text('unexpected desktop or send')\nsys.exit(9)\n")
+        driver.chmod(0o700)
+        before = self.outbox("group", "show", "--request-id", "setup-unavailable-image")
+        result = dispatch.drain(BINARY, self.ui)
+        self.assertEqual(result["results"][0]["status"],"blocked")
+        self.assertEqual(result["results"][0]["result"],"image_verification_unavailable")
+        self.assertFalse(result["results"][0]["surface_paused"])
+        self.assertEqual(self.outbox("group", "show", "--request-id", "setup-unavailable-image"),before)
+        self.assertEqual(self.outbox("group", "show", "--request-id", "caption-waits-for-image-setup")["attempt_number"],0)
+        with sqlite3.connect(group["state"] / "outgoing.sqlite3") as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?',("setup-unavailable-image",)).fetchone()[0],0)
+        status = self.coordinator("dispatch", "status")
+        self.assertIsNone(status["paused_reason"])
+        self.assertIsNone(status["active_dispatch"])
+        saved = [row for row in status["dispatches"] if row["dispatch_id"]==image["dispatch_id"]][0]
+        self.assertEqual((saved["status"],saved["result"]),("blocked","image_verification_unavailable"))
+        self.assertEqual(self.outbox("private", "show", "--request-id", "unrelated-text-after-image-setup")["status"],"ui_observed")
+        self.assertFalse(touched.exists())
+        # A later drain cannot implicitly restore this blocked zero-attempt job.
+        dispatch.drain(BINARY, self.ui)
+        self.assertEqual(self.outbox("group", "show", "--request-id", "setup-unavailable-image"),before)
+        self.assertFalse(touched.exists())
+
+    def test_other_image_preflight_failure_still_pauses_shared_surface(self):
+        from wx_agent import dispatch
+        group = self.channels["group"]
+        self.queue("group", "ordinary-image-readiness-failure", image=True)
+        self.queue("private", "text-must-wait-for-desktop-review")
+        driver = group["state"] / "conversation-sender"
+        driver.write_text("#!" + sys.executable + "\nimport json,sys\n" +
+            "if sys.argv[1:]==['--dispatch-preflight']:\n    print(json.dumps({'ready':False}));sys.exit(0)\nsys.exit(9)\n")
+        driver.chmod(0o700)
+        dispatch.drain(BINARY, self.ui)
+        self.assertIsNotNone(self.coordinator("dispatch", "status")["paused_reason"])
+        self.assertEqual(self.outbox("group", "show", "--request-id", "ordinary-image-readiness-failure")["attempt_number"],0)
+        self.assertEqual(self.outbox("private", "show", "--request-id", "text-must-wait-for-desktop-review")["attempt_number"],0)
+
     def test_priority_expiry_and_same_id_scheduling_conflict(self):
         from wx_agent import dispatch
         self.queue("group", "priority-low", priority=2)

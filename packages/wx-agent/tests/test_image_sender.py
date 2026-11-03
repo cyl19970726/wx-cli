@@ -67,13 +67,13 @@ class ImageSenderTests(unittest.TestCase):
             self.path.write_bytes(PNG+b'changed')
         return result
 
-    def run_driver(self):
+    def run_driver(self, observe=None):
         with mock.patch.object(driver, 'status', return_value=5), \
              mock.patch.object(driver, '_helper_is_live', return_value=False), \
              mock.patch.object(driver, 'verify_target'), \
              mock.patch.object(driver, 'bridge', side_effect=self.bridge), \
              mock.patch.object(driver, 'channel', return_value=''), \
-             mock.patch.object(driver, 'observe', return_value=6):
+             mock.patch.object(driver, 'observe', side_effect=observe, return_value=6):
             return driver.run(self.request,self.config)
 
     def test_image_protocol_refuses_missing_changed_mixed_recovery_and_dirty_draft(self):
@@ -180,8 +180,23 @@ class ImageSenderTests(unittest.TestCase):
             return tick[0]
         def channel(config,deadline,*args):
             return json.dumps(self.image_event(6)) if args[0]=='events' else ''
+        details = {}
         with mock.patch.object(driver,'channel',side_effect=channel), \
              mock.patch.object(driver.time,'monotonic',side_effect=now), \
              mock.patch.object(driver.time,'sleep'), \
              mock.patch.object(driver,'verify_image_event',side_effect=driver.Refused('not ready')):
-            self.assertIsNone(driver.observe(self.config,self.request,5,5))
+            self.assertIsNone(driver.observe(self.config,self.request,5,5,details))
+        self.assertEqual(details['image_events_observed'],1)
+        self.assertGreater(details['content_verification_failures'],0)
+
+    def test_observed_image_with_incomplete_content_proof_keeps_original_uncertainty(self):
+        def unverified(config,request,before,deadline,details):
+            details.update(image_events_observed=1,content_verification_failures=1)
+            return None
+        result=self.run_driver(observe=unverified)
+        self.assertEqual(result['status'],'indeterminate')
+        report=json.loads(Path(result['evidence']).read_text())
+        self.assertEqual(report['error'],'outgoing image row observed; image content verification incomplete')
+        self.assertEqual(self.actions.count('submit-visual'),1)
+        with self.assertRaises(driver.Uncertain):self.run_driver()
+        self.assertEqual(self.actions.count('submit-visual'),1)

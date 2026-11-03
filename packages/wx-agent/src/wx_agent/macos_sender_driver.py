@@ -1003,6 +1003,160 @@ def abandon_preflight(request, config):
             "unsent_proven": True, "before_prepare": True}
 
 
+def _image_rejection_snapshot(ui, tid):
+    """Bounded immutable inputs for the separate historical rejection proof."""
+    required = {tid + suffix for suffix in (
+        ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-evidence.json",
+        ".prepare-visual.job.json", ".prepare-visual.result.json", ".visual-state.json")}
+    optional = {tid + "-focus." + suffix for suffix in (
+        "focus-attempted.json", "focus-polls.json", "before-search-click.png",
+        "before-search-select.png", "before-search-paste.png", "before-search-copy.png",
+        "search-copy-ready.png", "focus-initial.png", "focus-search-result-main.png",
+        "focus-search-result-popup.png", "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png", "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png", "focus-search-after-click.png")}
+    optional.update(tid + "." + step + ".png" for step in (
+        "prepare-start", "old-draft-before-click", "old-draft-before-select",
+        "old-draft-before-copy", "old-draft-copy-ready", "old-draft-empty-check",
+        "old-draft-empty-check-1", "old-draft-empty-check-2", "replace-draft-before-paste",
+        "new-image-before-click", "new-image-before-select", "new-image-before-copy",
+        "new-image-copy-ready", "new-image-image-fallback-ready",
+        "new-image-image-fallback-before-click", "new-image-image-fallback-before-copy"))
+    snapshot = {}
+    total = 0
+    for index, path in enumerate(ui.iterdir()):
+        if index >= 10000:
+            raise Refused("UI directory exceeds bounded proof")
+        if not (path.name.startswith(tid + ".") or path.name.startswith(tid + "-")):
+            continue
+        if path.name not in required | optional:
+            raise Refused("unexpected, submit, later attempt or late observation evidence exists")
+        if path.resolve(strict=True) != path:
+            raise Refused("noncanonical rejection evidence")
+        private(path)
+        limit = MAX_IMAGE_BYTES if path.suffix == ".png" else 65536
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_size > limit):
+                raise Refused("unsafe rejection evidence")
+            raw = stream.read(limit + 1)
+            after = os.fstat(stream.fileno())
+        if (len(raw) != before.st_size or len(raw) > limit
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise Refused("rejection evidence changed while reading")
+        total += len(raw)
+        if total > 128 * 1024 * 1024:
+            raise Refused("rejection evidence exceeds bounded proof")
+        snapshot[path.name] = (hashlib.sha256(raw).hexdigest(), before.st_dev, before.st_ino,
+                               before.st_mtime_ns, before.st_ctime_ns)
+    if not required <= set(snapshot):
+        raise Refused("incomplete original IMAGE rejection trace")
+    return snapshot
+
+
+def _known_image_copy_rejection(error):
+    if not isinstance(error, str) or len(error) > 2048:
+        return False
+    match = re.fullmatch(r"Composer Copy did not replace image sentinel exactly once \(types:([A-Za-z0-9_.+,-]+)\)", error)
+    if match is None:
+        return False
+    types = match.group(1).split(",")
+    return (all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", item) for item in types)
+            and bool({"public.png", "public.tiff"} & set(types)))
+
+
+def image_rejection_preflight(request, config):
+    """Archive eligibility only. Never claims unsent, delivery or retry authority."""
+    fields = {"protocol_version", "image_rejection_protocol_version", "content_kind", "request_id",
+              "attempt_number", "channel_id", "session_id", "account", "talker", "media"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("image_rejection_protocol_version")) is not int
+            or request["image_rejection_protocol_version"] != 1
+            or request.get("content_kind") != "image"
+            or type(request.get("attempt_number")) is not int or request["attempt_number"] != 1
+            or "target_name" not in config):
+        raise Refused("IMAGE copy rejection protocol differs")
+    tid = request_ok(dict(request, protocol_version=2), config, 1)
+    ui = config["ui_dir"]
+    private(ui, directory=True)
+    if ui.resolve(strict=True) != ui:
+        raise Refused("IMAGE rejection UI root is not canonical")
+    if (config.get("channel_state_dir") is not None
+            and Path(request["media"]["path"]) != Path(config["channel_state_dir"]) / "outgoing-media" / request["request_id"]):
+        raise Refused("IMAGE rejection media is not the original frozen path")
+    with recovery_sender_lock(ui / "sender.lock"):
+        deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        before = _image_rejection_snapshot(ui, tid)
+        report = _read_artifact(ui / (tid + ".client-result.json"))
+        if (report.get("id") != tid or report.get("request_id") != request["request_id"]
+                or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
+                or any(report.get(k) != request[k] for k in ("channel_id", "session_id"))
+                or report.get("stage") != "group_focused" or report.get("status") != "indeterminate"
+                or any(k in report for k in ("media_prepared", "media_submitted", "event_cursor", "recovery_from_attempt"))):
+            raise Refused("original IMAGE report is not the known prepare rejection")
+        inspect_id, focus_id = tid + "-inspect", tid + "-focus"
+        inspect_job = _read_artifact(ui / (inspect_id + ".inspect.job.json"))
+        inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+        if (inspect_job != {"id": inspect_id, "action": "inspect"}
+                or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+                or inspected.get("ok") is not True):
+            raise Refused("original IMAGE inspect proof differs")
+        window_id, frame = inspect_ok(inspected, config)
+        if any(not math.isfinite(frame[k]) for k in ("x", "y", "width", "height")):
+            raise Refused("original IMAGE inspect geometry differs")
+        focused = _read_artifact(ui / (focus_id + ".result.json"))
+        focus_job = _read_artifact(ui / (focus_id + ".focus-group.job.json"))
+        expected_focus = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+                          "targetKind": config.get("conversation_kind", "group"),
+                          "expectedPID": config["expected_pid"], "expectedWindowID": window_id,
+                          "expectedFrame": frame, "conversationListRect": config["conversation_list_rect"],
+                          "searchPoint": config["search_point"]}
+        if (json.dumps(focus_job, sort_keys=True) != json.dumps(expected_focus, sort_keys=True)
+                or focused.get("id") != focus_id or focused.get("action") != "focus-group"
+                or focused.get("ok") is not True or not _permissions_ok(focused.get("permissions"))):
+            raise Refused("original IMAGE focus request differs")
+        try:
+            focus_proof = focus_result_ok(focused, config, focus_id, window_id, frame)
+        except Uncertain as exc:
+            raise Refused("original IMAGE focus is not confirmed") from exc
+        if (report.get("target_kind") != config.get("conversation_kind", "group")
+                or report.get("focus_evidence_id") != focus_id
+                or report.get("focus_category") != focus_proof["category"]):
+            raise Refused("original IMAGE report focus binding differs")
+        job = _read_artifact(ui / (tid + ".prepare-visual.job.json"))
+        expected_job = dict(_prepare_command(dict(request, protocol_version=2), config, window_id, frame, focus_id),
+                            id=tid, action="prepare-visual")
+        if json.dumps(job, sort_keys=True) != json.dumps(expected_job, sort_keys=True):
+            raise Refused("original IMAGE prepare job differs from frozen media or calibration")
+        result = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+        if (set(result) != {"id", "ok", "error", "permissions"} or result.get("id") != tid
+                or result.get("ok") is not False or not _known_image_copy_rejection(result.get("error"))
+                or not _permissions_ok(result.get("permissions")) or report.get("error") != helper_reason(result)):
+            raise Refused("native prepare is not the exact known raster Copy rejection")
+        state = _read_artifact(ui / (tid + ".visual-state.json"))
+        expected_state = dict(expected_job, stage="prepare-attempted", text="")
+        expected_state.pop("action")
+        if (any(k in state for k in ("preparedPixelSHA256", "preparedCopyType", "media_prepared", "media_submitted", "event_cursor"))
+                or json.dumps(state, sort_keys=True) != json.dumps(expected_state, sort_keys=True)):
+            raise Refused("native prepare state is prepared, submitted or inconsistent")
+        if _helper_is_live(tid, deadline):
+            raise Refused("original IMAGE helper is still live")
+        validate_media(request["media"])
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        if _image_rejection_snapshot(ui, tid) != before:
+            raise Refused("original IMAGE evidence changed during proof")
+    return {"protocol_version": 1, "image_rejection_protocol_version": 1, "prepare_rejection_proven": True}
+
+
 @contextmanager
 def recovery_sender_lock(lock_path):
     """Accept the coordinator's held lock, or acquire it for standalone recovery."""
@@ -1215,6 +1369,8 @@ def observe(config, request, after, deadline, details=None):
     if details is None:
         details = {}
     details.update(sync_failures=0, events_failures=0, rows_examined=0, start_cursor=after)
+    if request.get("media") is not None:
+        details["image_events_observed"] = 0
     try:
         while time.monotonic() < stop:
             try:
@@ -1232,6 +1388,7 @@ def observe(config, request, after, deadline, details=None):
                                 details["matched_cursor"] = event["cursor"]
                                 return event["cursor"]
                             image_matches.add(event["cursor"])
+                            details["image_events_observed"] = len(image_matches)
                             if image_first_seen is None:
                                 image_first_seen = time.monotonic()
                         if type(event.get("cursor")) is int and event["cursor"] > cursor:
@@ -1305,8 +1462,30 @@ def focus_only(config):
                 "category": focus_proof["category"]}
 
 
-def dispatch_preflight(config):
-    """Check the existing helper and desktop before Rust records an attempt."""
+def dispatch_preflight(config, validate_config=False):
+    """Check image setup first, then the existing guarded desktop preflight."""
+    deadline = time.monotonic() + 15
+    if os.environ.get("WX_PREFLIGHT_CONTENT_KIND") == "image":
+        # This command is owned by the bound channel's adapter. The generic
+        # outbox only sees a nonsecret readiness result; no stdin is consumed.
+        try:
+            binary = executable(str(config["wx_cli"]))
+            state = abs_path(str(config["channel_state_dir"]))
+            private(state, directory=True)
+            if state.resolve(strict=True) != state:
+                raise Refused("noncanonical image verification state")
+            verification = json.loads(call([binary, "outbox", "--state-dir", state,
+                                           "image-verification-status"], deadline, limit=65536))
+            credential_ready = isinstance(verification, dict) and verification.get("credential_ready") is True
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            credential_ready = False
+        if not credential_ready:
+            return {"ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False}
+    # main passes raw private configuration so unavailable image credentials
+    # can return before even inspecting the helper bundle. Existing direct
+    # callers may continue supplying their already validated configuration.
+    if validate_config:
+        config = safe_config(config)
     deadline = time.monotonic() + 15
     with desktop_lock(config):
         _guard_helper(config, deadline)
@@ -1389,6 +1568,8 @@ def run(request, config):
             report["observation"] = observation
             report["verification_seconds"] = observation.get("verification_seconds")
             if observed_cursor is None:
+                if request.get("media") is not None and observation.get("image_events_observed", 0):
+                    raise Uncertain("outgoing image row observed; image content verification incomplete")
                 raise Uncertain("local outgoing row not observed")
             report.update(stage="local_outgoing_observed", status="ui_observed", event_cursor=observed_cursor)
         except Refused as exc:
@@ -1407,6 +1588,26 @@ def run(request, config):
 def main(argv=None):
     os.umask(0o077)
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--image-rejection-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "image_rejection_protocol_version": 1,
+                          "prepare_copy_rejection_only": True, "no_submit_evidence_required": True},
+                         separators=(",", ":")))
+        return 0
+    if argv == ["--image-rejection-preflight"]:
+        result = {"protocol_version": 1, "image_rejection_protocol_version": 1,
+                  "prepare_rejection_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = image_rejection_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["prepare_rejection_proven"] else 1
     if argv == ["--abandon-capabilities"]:
         print(json.dumps({"protocol_version": 1, "abandon_protocol_version": 1,
                           "image_before_prepare_only": True, "pre_submit_proof_required": True},
@@ -1443,7 +1644,7 @@ def main(argv=None):
             cfg = os.environ.get("WX_SENDER_CONFIG")
             if not cfg:
                 raise Refused("WX_SENDER_CONFIG required")
-            result = dispatch_preflight(safe_config(private_read(abs_path(cfg))))
+            result = dispatch_preflight(private_read(abs_path(cfg)), validate_config=True)
         except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError):
             result = {"ready": False}
         print(json.dumps(result, separators=(",", ":")))

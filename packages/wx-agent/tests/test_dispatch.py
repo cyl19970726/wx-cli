@@ -86,6 +86,27 @@ class DispatchRoutingTests(unittest.TestCase):
             self.assertEqual([item.args[0][0] for item in run.call_args_list],
                              [str(root / "private/conversation-sender"), str(root / "group/conversation-sender")])
 
+    def test_intent_only_setup_restore_keeps_unpaused_other_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'group').mkdir()
+            operations=[]
+            def call(_,__,*parts):
+                operations.append(parts)
+                if parts==('status',):return {'conversations':['group']}
+                if parts==('dispatch','status'):
+                    return {'paused_reason':None,'dispatches':[{'dispatch_id':6,'conversation_id':'group','status':'blocked'}]}
+                if parts[:2]==('status','--conversation-id'):
+                    return {'channel_state_dir':str(root/'group')}
+                if parts[:2]==('dispatch','restore-queued'):return {'attempt_number':0}
+                raise AssertionError('unexpected global operation: '+str(parts))
+            result=type('Result',(),{'returncode':0,'stdout':'{"ready":true}'})()
+            with mock.patch.object(dispatch,'call',side_effect=call), \
+                 mock.patch.object(dispatch.subprocess,'run',return_value=result):
+                value=dispatch.review_surface('/synthetic/wx-cli',root,'image setup repaired for original request',True,6)
+            self.assertFalse(value['surface_paused'])
+            self.assertEqual(value['restored_dispatch_id'],6)
+            self.assertFalse(any(parts[:2]==('dispatch','review') for parts in operations))
+
 
 if __name__ == "__main__":
     unittest.main()

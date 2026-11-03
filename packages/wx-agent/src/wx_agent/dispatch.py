@@ -214,6 +214,15 @@ def review_surface(binary, root, reason, confirm_desktop_safe, restore_unattempt
                 raise DispatchError("fresh desktop/helper preflight did not pass")
         if restore_unattempted is not None:
             call(binary,root,"dispatch","restore-queued","--dispatch-id",restore_unattempted,"--reason",reason)
+            queue = call(binary, root, "dispatch", "status")
+            if "paused_reason" in queue and queue["paused_reason"] is None:
+                # An intent-only setup refusal never paused the other targets.
+                # The reviewed original request is restored without inventing a
+                # global pause just to pass through the surface-review command.
+                return {"status": "ready", "restored_dispatch_id": restore_unattempted,
+                        "surface_paused": False,
+                        "unknown_dispatches_retained": sum(
+                            item.get("status") == "unknown" for item in queue.get("dispatches", []))}
         return call(binary, root, "dispatch", "review", "--reason", reason)
 
 
@@ -229,10 +238,11 @@ def main(argv=None):
     review.add_argument("--reason", required=True)
     review.add_argument("--confirm-desktop-safe", action="store_true", required=True)
     review.add_argument("--restore-unattempted", type=int)
-    abandon = sub.add_parser("abandon-unsent")
-    abandon.add_argument("--dispatch-id", type=int, required=True)
-    abandon.add_argument("--expected-attempt", type=int, required=True)
-    abandon.add_argument("--reason", required=True)
+    for name in ("abandon-unsent", "archive-image-copy-rejection"):
+        archive = sub.add_parser(name)
+        archive.add_argument("--dispatch-id", type=int, required=True)
+        archive.add_argument("--expected-attempt", type=int, required=True)
+        archive.add_argument("--reason", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
     run.add_argument("--seconds", type=float, default=3600)
@@ -267,9 +277,9 @@ def main(argv=None):
             value = call(binary, root, "dispatch", "resume")
         elif args.action == "review":
             value = review_surface(binary, root, args.reason, args.confirm_desktop_safe, args.restore_unattempted)
-        elif args.action == "abandon-unsent":
+        elif args.action in ("abandon-unsent", "archive-image-copy-rejection"):
             # Rust holds both locks through native proof and scheduler commit.
-            value = call(binary, root, "dispatch", "abandon-unsent", "--dispatch-id", args.dispatch_id,
+            value = call(binary, root, "dispatch", args.action, "--dispatch-id", args.dispatch_id,
                          "--expected-attempt", args.expected_attempt, "--reason", args.reason)
         else:
             value = call(binary, root, "dispatch", "status")

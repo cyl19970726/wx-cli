@@ -16,7 +16,9 @@ wx-agent-plugin-install \
   --bundle /ABS/distribution/plugins/codex-wechat
 ```
 
-安装器仅合并该项目的 `.codex/hooks.json`，并安装该项目的 `.agents/skills/wechat-inbox/SKILL.md`；安装记录放项目 `.local/`。已有其他 hooks 保留；同参重装幂等，异义内容或用户改动不会被覆盖。承载私有路径的 hooks 和安装记录须由项目忽略规则排除版本管理。安装不会写 `~/.codex`、`~/.agents`、`~/.claude` 或全局插件缓存，也不会自动信任 hook；Codex 宿主仍须按正常流程审查和启用项目 hook。卸载使用同一入口的 `--action uninstall --project /ABS/projects/synthetic-project`，只移除安装记录识别的内容。
+普通项目默认合并该项目的 `.codex/hooks.json`。Linked Git worktree 的原生 Hook 来源位于主 checkout 对应目录；安装器默认在写入前拒绝，并提示所需路径。明确授权共享来源后，在上述命令追加 `--hooks-project /ABS/projects/main-checkout`；子目录项目须指定主 checkout 中相同相对路径的目录。安装器核对同一 Git common repository 和对应路径，拒绝任意其他目录及符号链接。共享 Hook 可能影响关联工作树，私有配置仍须精确限制原 Session 和工作树 CWD。
+
+`--project` 始终承载 `.agents/skills/wechat-inbox/SKILL.md` 和 `.local/` 安装记录；`--hooks-project` 只承载 `.codex/hooks.json`。结果及记录明确列出这两个范围。已有其他 hooks 保留；同参重装幂等，异义内容或用户改动不会被覆盖。Hook 来源中的 hooks 文件和请求项目中的安装记录须分别由 Git 忽略规则排除版本管理。安装不会写 `~/.codex`、`~/.agents`、`~/.claude` 或全局插件缓存，也不会自动信任 hook；Codex 宿主仍须按正常流程审查和启用项目 hook。卸载使用同一入口的 `--action uninstall --project /ABS/projects/synthetic-project`，从记录恢复 Hook 位置，只移除自有三项及安装器创建且未改动的项目 Skill；不含 `hooks_project` 的旧 v1 记录仍按原项目本地位置卸载。
 
 ## 私有配置
 

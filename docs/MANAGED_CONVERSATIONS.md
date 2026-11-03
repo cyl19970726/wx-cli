@@ -139,3 +139,34 @@ wx-agent inbox --config /ABS/private/conversations.json run \
 ## 回退
 
 先停止采集/执行器，核对旧 helper 与 in-flight dispatch，保留所有私有状态。回退代码不回退数据库。旧版对托管 channel 的 attempt 会被拒绝；要读取或处理它们继续使用兼容新版本。没有“删除 marker 即回退”的操作；删除状态、恢复旧 outbox 快照或新建 consumer 都会破坏进度。未迁移会话仍沿用旧入口，迁移后的会话应使用本页流程。
+
+
+## 图片配置与原请求的后续证据
+
+发送图片前可检查绑定账号的核验凭据：
+
+```sh
+wx-cli outbox --state-dir /ABS/private/channel image-verification-status
+```
+
+此状态仅说明配置可用，不能代替图片内容核验。V2 图片优先使用该账号已配置的密钥；缺失时可静默从绑定账号及其唯一匹配配置派生，不尝试其他账号、不输出密钥、不写 KeyStore。V1/XOR 兼容原路径。托管 macOS sender 在界面动作之前检查此条件；缺少配置时原请求保持零 attempt，调度为 `blocked/image_verification_unavailable`，其他会话的桌面发送不因此暂停。配置修好后，通过原 `review --restore-unattempted` 流程恢复原请求。
+
+若原图片已取得完整原生准备、一次提交和像素证据，但当时本地内容核验未完成，先仅对原请求读取核验：
+
+```sh
+wx-cli outbox --state-dir /ABS/private/channel verify-image-event \
+  --request-id ORIGINAL_REQUEST --cursor EXACT_EVENT_CURSOR
+```
+
+新候选的明确操作员入口可补记稍后取得的正面证据：
+
+```sh
+wx-cli outbox --state-dir /ABS/private/channel reconcile-image-event \
+  --request-id ORIGINAL_REQUEST --expected-attempt 1 \
+  --cursor EXACT_EVENT_CURSOR --expected-epoch CURRENT_EPOCH \
+  --reason '已核对原始一次提交、唯一源事件及完整图片内容证据'
+```
+
+该命令不调用 sender、不点击、不重发。它在共享锁和当前代际保护下核对完整原始时间窗、原生准备/提交/截图以及冻结图片与源缓存的解码内容；不能靠选择较早 cursor 隐藏同窗内第二张图片。成功新增不可修改的 observation 与独立报告，推进 intent 的当前 `ui_observed` 状态并结束原调度；原 `indeterminate` attempt 和原报告保持不变，`outbox show` 用 `late_observation` 解释这一差异。桌面暂停仍须显式核查解除。结果仍是本地观察，独立收件另记。
+
+`dispatch archive-image-copy-rejection` 是另一条限定的操作员核查：仅处理首次图片在已知旧版 Copy 计数错误处被原生 prepare 拒绝、完整原生证据一致且没有提交或后续 attempt 的情形。它使用单独的只读证明协议，将调度归档为 `image_prepare_rejected`，保留原不明 outbox、attempt、草稿和证据；不声明发送成功，也不授权重试。原 `abandon-unsent` 的图片准备前边界不变。两类归档均不满足 batch 的发送成功前置条件，原配文不会因此自动放行。

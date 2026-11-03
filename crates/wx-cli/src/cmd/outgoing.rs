@@ -112,6 +112,21 @@ pub enum OutgoingAction {
         #[arg(long)]
         cursor: i64,
     },
+    /// Check only the bound account's image verification credentials; never send.
+    ImageVerificationStatus,
+    /// Reconcile an original submitted image using later positive source evidence; never resend.
+    ReconcileImageEvent {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        cursor: i64,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Claim one queued intent and pass it to a local executable exactly once.
     Send {
         #[arg(long)]
@@ -238,6 +253,28 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
         OutgoingAction::VerifyImageEvent { request_id, cursor } => {
             let result =
                 super::outgoing_verify::verify(state_dir, &binding, &conn, &request_id, cursor)?;
+            println!("{}", result);
+        }
+        OutgoingAction::ImageVerificationStatus => {
+            println!("{}", super::outgoing_verify::readiness(&binding));
+        }
+        OutgoingAction::ReconcileImageEvent {
+            request_id,
+            expected_attempt,
+            cursor,
+            expected_epoch,
+            reason,
+        } => {
+            let result = super::outgoing_observation::reconcile(
+                state_dir,
+                &binding,
+                &mut conn,
+                &request_id,
+                expected_attempt,
+                cursor,
+                expected_epoch,
+                &reason,
+            )?;
             println!("{}", result);
         }
         OutgoingAction::Send { request_id, driver } => {
@@ -467,6 +504,55 @@ pub(super) fn check_recovery_preflight(
     Ok(())
 }
 
+pub(super) fn check_image_rejection_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--image-rejection-capabilities",
+        None,
+        timeout,
+        None,
+    )?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("image_rejection_protocol_version") == Some(&json!(1))
+            && object.get("prepare_copy_rejection_only") == Some(&json!(true))
+            && object.get("no_submit_evidence_required") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver lacks image copy rejection review capability").into());
+    }
+    Ok(())
+}
+
+pub(super) fn check_image_rejection_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--image-rejection-preflight",
+        Some(payload),
+        timeout,
+        Some(lock_fd),
+    )?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("image_rejection_protocol_version") == Some(&json!(1))
+            && object.get("prepare_rejection_proven") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver did not prove the image preparation copy rejection").into());
+    }
+    Ok(())
+}
+
 pub(super) fn check_image_abandon_capabilities(
     driver: &Path,
     timeout: Duration,
@@ -681,6 +767,13 @@ fn invoke_driver_mode(
     if preflight {
         command.arg("--dispatch-preflight");
     }
+    command.env_remove("WX_PREFLIGHT_CONTENT_KIND");
+    let image_preflight = preflight
+        && serde_json::from_slice::<serde_json::Value>(input)
+            .is_ok_and(|value| value["content_kind"] == "image");
+    if image_preflight {
+        command.env("WX_PREFLIGHT_CONTENT_KIND", "image");
+    }
     if let Some(fd) = lock_fd {
         command.env("WX_DESKTOP_LOCK_FD", fd.to_string());
         // The driver retains the same open-file description if its parent dies.
@@ -758,6 +851,17 @@ fn invoke_driver_mode(
         return indeterminate("driver returned invalid JSON");
     };
     if preflight {
+        if image_preflight
+            && value.as_object().is_some_and(|object| object.len() == 3)
+            && value["ready"] == false
+            && value["reason_code"] == "image_verification_unavailable"
+            && value["desktop_touched"] == false
+        {
+            return (
+                AttemptResult::Failed,
+                "image verification unavailable before desktop effects".into(),
+            );
+        }
         return if value.get("ready").and_then(|v| v.as_bool()) == Some(true) {
             (
                 AttemptResult::UiObserved,
@@ -904,13 +1008,34 @@ fn managed_send(
         return Err(invalid("desktop busy; request remains unattempted").into());
     }
     super::coordinator::validate_dispatch(root, state_dir, request_id, dispatch_id, token)?;
-    let (ready, _) = invoke_driver_mode(
+    let binding = load_binding(state_dir)?;
+    let image = is_media_request(state_dir, &binding, request_id)?;
+    let hint: &[u8] = if image {
+        br#"{"content_kind":"image"}"#
+    } else {
+        b"{}"
+    };
+    let (ready, evidence) = invoke_driver_mode(
         driver,
-        b"{}",
+        hint,
         Duration::from_secs(20),
         Some(lock.as_raw_fd()),
         true,
     );
+    if ready == AttemptResult::Failed
+        && evidence == "image verification unavailable before desktop effects"
+    {
+        super::coordinator::mark_image_setup_refusal(
+            root,
+            state_dir,
+            request_id,
+            dispatch_id,
+            token,
+        )?;
+        return Err(
+            invalid("image verification unavailable; original intent remains unattempted").into(),
+        );
+    }
     if ready != AttemptResult::UiObserved {
         super::coordinator::pause_surface(root, "desktop readiness requires review")?;
         return Err(invalid("desktop readiness refused; intent remains unattempted").into());
@@ -1053,6 +1178,7 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
         WHEN OLD.publisher_id IS NOT NEW.publisher_id
         BEGIN SELECT RAISE(ABORT, 'publisher_id is immutable'); END;",
     )?;
+    super::outgoing_observation::ensure_schema(&conn)?;
     Ok(conn)
 }
 
@@ -1346,6 +1472,18 @@ fn show_intent(
     item["part_index"] = json!(scheduling.1);
     item["priority"] = json!(scheduling.2);
     item["expires_at"] = json!(scheduling.3);
+    let observation: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT attempt_number,cursor,recorded_at FROM outgoing_observation
+         WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+            params![request_id, binding.channel_id, binding.session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((attempt, cursor, recorded_at)) = observation {
+        item["late_observation"] = json!({"attempt_number":attempt,"cursor":cursor,
+            "recorded_at":recorded_at,"original_attempt_status":"indeterminate"});
+    }
     Ok(item)
 }
 

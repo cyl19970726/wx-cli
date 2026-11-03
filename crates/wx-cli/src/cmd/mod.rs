@@ -30,4 +30,5 @@ pub mod coordinator;
 pub mod groups;
 pub mod outgoing;
 mod outgoing_media;
+mod outgoing_observation;
 mod outgoing_verify;

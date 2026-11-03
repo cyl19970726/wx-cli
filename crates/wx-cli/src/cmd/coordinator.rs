@@ -219,6 +219,15 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// Retire only the original known IMAGE Copy rejection; never authorize a retry.
+    ArchiveImageCopyRejection {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Archive only a proven pre-submit attempt; retain its unknown outbox state forever.
     AbandonUnsent {
         #[arg(long)]
@@ -560,6 +569,71 @@ pub(crate) fn validate_owner(
     }
     Ok(())
 }
+/// Hold the coordinator write reservation across the outbox commit. The callback
+/// may only reconcile evidence; this grants no desktop/send authority. Outbox is
+/// committed first so a crash can only leave an unknown dispatch to finish.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn with_image_observation_authority<F>(
+    root: &Path,
+    state: &Path,
+    request: &str,
+    owner: &str,
+    origin_epoch: i64,
+    expected_epoch: i64,
+    already_observed: bool,
+    finish: F,
+) -> Result<Value, Box<dyn Error>>
+where
+    F: FnOnce() -> Result<Value, Box<dyn Error>>,
+{
+    let mut db = open(root, false)?;
+    // Open read/write without schema migration: observation must not repair or
+    // manufacture coordinator authority.
+    drop(db);
+    private(&root.join(DB_NAME), false)?;
+    db = Connection::open_with_flags(root.join(DB_NAME), OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    db.busy_timeout(Duration::ZERO)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let conversation: String = tx.query_row(
+        "SELECT conversation_id FROM binding WHERE channel_state_dir=?1",
+        [state.to_string_lossy().as_ref()],
+        |r| r.get(0),
+    )?;
+    let b = binding(&tx, &conversation)?;
+    verify_binding(&b)?;
+    if b.owner != owner || b.epoch != expected_epoch || b.control != "active" {
+        return Err(invalid(
+            "late observation owner/control/current epoch changed",
+        ));
+    }
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let (id, status, result, epoch, channel): (i64,String,Option<String>,i64,String) = tx.query_row(
+        "SELECT id,status,result,epoch,channel_id FROM dispatch WHERE conversation_id=?1 AND request_id=?2 AND operation='send'",
+        params![conversation,request], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    if active.is_some()
+        || epoch != origin_epoch
+        || channel != b.channel_id
+        || !(status == "unknown" && result.as_deref() == Some("indeterminate")
+            || already_observed && status == "done" && result.as_deref() == Some("ui_observed"))
+    {
+        return Err(invalid(
+            "late observation requires original idle unknown dispatch",
+        ));
+    }
+    let value = finish()?;
+    if status == "unknown" {
+        tx.execute("UPDATE dispatch SET status='done',result='ui_observed',updated_at=?2 WHERE id=?1 AND status='unknown' AND result='indeterminate'",params![id,now()])?;
+    }
+    // Deliberately preserve surface pause, control epoch, token/lease and all
+    // control/turn history. An observation is never surface review or resume.
+    tx.commit()?;
+    Ok(value)
+}
+
 fn channel_max(state: &Path) -> Result<i64, Box<dyn Error>> {
     private(state, true)?;
     let path = state.join("channel.sqlite3");
@@ -580,6 +654,7 @@ struct IntentRef {
     part_index: Option<i64>,
     priority: i64,
     expires_at: Option<i64>,
+    content_kind: String,
 }
 impl IntentRef {
     fn ready_for(&self, b: &Binding) -> bool {
@@ -597,8 +672,8 @@ fn intent(b: &Binding, request: &str) -> Result<IntentRef, Box<dyn Error>> {
     let path = b.state.join("outgoing.sqlite3");
     private(&path, false)?;
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    db.query_row("SELECT status,attempt_number,managed_owner,managed_epoch,batch_id,part_index,priority,expires_at FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
-        params![request,b.channel_id,b.session_id],|r| Ok(IntentRef{status:r.get(0)?,attempts:r.get(1)?,owner:r.get(2)?,epoch:r.get(3)?,batch_id:r.get(4)?,part_index:r.get(5)?,priority:r.get(6)?,expires_at:r.get(7)?}))
+    db.query_row("SELECT status,attempt_number,managed_owner,managed_epoch,batch_id,part_index,priority,expires_at,content_kind FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        params![request,b.channel_id,b.session_id],|r| Ok(IntentRef{status:r.get(0)?,attempts:r.get(1)?,owner:r.get(2)?,epoch:r.get(3)?,batch_id:r.get(4)?,part_index:r.get(5)?,priority:r.get(6)?,expires_at:r.get(7)?,content_kind:r.get(8)?}))
         .optional()?.ok_or_else(||invalid("outbox reference is absent or binding mismatched"))
 }
 fn enroll(
@@ -806,6 +881,17 @@ fn reconcile_outbox(root: &Path, id: &str) -> Result<Value, Box<dyn Error>> {
     )
 }
 
+/// A terminal archive is not a successful batch prerequisite. Retain its
+/// unattempted descendants as blocked, including after explicit reauthorization.
+fn block_unsent_batch_descendants(tx: &Transaction<'_>) -> Result<(), Box<dyn Error>> {
+    tx.execute("UPDATE dispatch AS child SET status='blocked',result='batch_predecessor_not_sent',updated_at=?1
+      WHERE child.status='queued' AND child.batch_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM dispatch parent WHERE parent.conversation_id=child.conversation_id
+          AND parent.batch_id=child.batch_id AND parent.part_index<child.part_index
+          AND parent.status='done' AND NOT (parent.operation='send' AND COALESCE(parent.result,'') IN ('ui_observed','recipient_confirmed')))", [now()])?;
+    Ok(())
+}
+
 fn dispatch_claim(root: &Path, worker: &str, lease: i64) -> Result<Value, Box<dyn Error>> {
     check_id(worker)?;
     if !(30..=3600).contains(&lease) {
@@ -837,9 +923,11 @@ fn dispatch_claim(root: &Path, worker: &str, lease: i64) -> Result<Value, Box<dy
         }
         return Ok(json!({"status":"busy","dispatch_id":id}));
     }
+    block_unsent_batch_descendants(&tx)?;
     let candidate:Option<(i64,String,String,String,i64)>=tx.query_row(
-        "SELECT d.id,d.conversation_id,d.request_id,d.operation,d.epoch FROM dispatch d JOIN binding b ON b.conversation_id=d.conversation_id WHERE d.status='queued' AND b.control='active' AND b.epoch=d.epoch AND (d.operation='focus' OR b.reply_policy='authorized') AND NOT EXISTS (SELECT 1 FROM dispatch earlier WHERE earlier.conversation_id=d.conversation_id AND earlier.status IN ('queued','claimed','blocked','unknown') AND NOT (earlier.status='blocked' AND earlier.epoch<>d.epoch AND (earlier.operation='focus' OR earlier.result IN ('owner_epoch_changed','control_epoch_changed','possible_manual_outgoing')) AND earlier.result IN ('focus_failed_requires_review','owner_epoch_changed','control_epoch_changed','possible_manual_outgoing')) AND ((d.batch_id IS NOT NULL AND earlier.batch_id=d.batch_id AND earlier.part_index<d.part_index) OR ((d.batch_id IS NULL OR earlier.batch_id IS NULL OR earlier.batch_id<>d.batch_id) AND earlier.id<d.id))) AND (d.batch_id IS NULL OR (SELECT COUNT(*) FROM dispatch p WHERE p.conversation_id=d.conversation_id AND p.batch_id=d.batch_id AND p.part_index<d.part_index AND p.status='done')=d.part_index) ORDER BY CASE WHEN d.created_at<=?1-300 THEN 0 ELSE 1 END, CASE WHEN d.created_at<=?1-300 THEN d.id ELSE d.priority END,d.id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        "SELECT d.id,d.conversation_id,d.request_id,d.operation,d.epoch FROM dispatch d JOIN binding b ON b.conversation_id=d.conversation_id WHERE d.status='queued' AND b.control='active' AND b.epoch=d.epoch AND (d.operation='focus' OR b.reply_policy='authorized') AND NOT EXISTS (SELECT 1 FROM dispatch earlier WHERE earlier.conversation_id=d.conversation_id AND earlier.status IN ('queued','claimed','blocked','unknown') AND NOT (earlier.status='blocked' AND earlier.result='batch_predecessor_not_sent' AND earlier.batch_id IS NOT NULL AND (d.batch_id IS NULL OR earlier.batch_id<>d.batch_id)) AND NOT (earlier.status='blocked' AND earlier.epoch<>d.epoch AND (earlier.operation='focus' OR earlier.result IN ('owner_epoch_changed','control_epoch_changed','possible_manual_outgoing')) AND earlier.result IN ('focus_failed_requires_review','owner_epoch_changed','control_epoch_changed','possible_manual_outgoing')) AND ((d.batch_id IS NOT NULL AND earlier.batch_id=d.batch_id AND earlier.part_index<d.part_index) OR ((d.batch_id IS NULL OR earlier.batch_id IS NULL OR earlier.batch_id<>d.batch_id) AND earlier.id<d.id))) AND (d.batch_id IS NULL OR (SELECT COUNT(*) FROM dispatch p WHERE p.conversation_id=d.conversation_id AND p.batch_id=d.batch_id AND p.part_index<d.part_index AND p.status='done' AND p.operation='send' AND p.result IN ('ui_observed','recipient_confirmed'))=d.part_index) ORDER BY CASE WHEN d.created_at<=?1-300 THEN 0 ELSE 1 END, CASE WHEN d.created_at<=?1-300 THEN d.id ELSE d.priority END,d.id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
     let Some((id, conversation, request, operation, epoch)) = candidate else {
+        tx.commit()?;
         return Ok(json!({"status":"empty"}));
     };
     let b = binding(&tx, &conversation)?;
@@ -886,6 +974,46 @@ pub(crate) fn validate_dispatch(
 ) -> Result<(), Box<dyn Error>> {
     let db = open(root, false)?;
     validate_dispatch_in(&db, state, request, dispatch_id, token)
+}
+
+/// Record a fenced, zero-attempt image setup refusal. Completion retires this
+/// claim without pausing unrelated conversations; this never records an attempt.
+pub(crate) fn mark_image_setup_refusal(
+    root: &Path,
+    state: &Path,
+    request: &str,
+    dispatch_id: i64,
+    token: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    validate_dispatch_in(&tx, state, request, dispatch_id, token)?;
+    let conversation: String = tx.query_row(
+        "SELECT conversation_id FROM dispatch WHERE id=?1",
+        [dispatch_id],
+        |r| r.get(0),
+    )?;
+    let b = binding(&tx, &conversation)?;
+    let path = b.state.join("outgoing.sqlite3");
+    private(&path, false)?;
+    let mut outbox = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let out = outbox.transaction()?;
+    let eligible: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='image' AND status='managed_media_queued' AND attempt_number=0 AND managed_owner=?4 AND managed_epoch=?5 AND NOT EXISTS(SELECT 1 FROM outgoing_attempt WHERE request_id=?1))",
+        params![request,b.channel_id,b.session_id,b.owner,b.epoch],|r|r.get(0))?;
+    if !eligible {
+        return Err(invalid(
+            "image setup refusal requires a current zero-attempt image",
+        ));
+    }
+    let changed = tx.execute("UPDATE dispatch SET result='image_verification_unavailable',updated_at=?3 WHERE id=?1 AND status='claimed' AND token=?2",params![dispatch_id,token,now()])?;
+    if changed != 1 {
+        return Err(invalid("image setup refusal claim changed"));
+    }
+    // Leave claim, token, surface and original intent intact. execute_one must
+    // still complete this exact claim through the ordinary completion path.
+    out.commit()?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub(crate) fn with_dispatch_authority<T>(
@@ -980,14 +1108,14 @@ fn dispatch_complete(
 ) -> Result<Value, Box<dyn Error>> {
     let mut db = open(root, true)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let row: Option<(String, String, String, String, String)> = tx
+    let row: Option<(String, String, String, String, String, Option<String>)> = tx
         .query_row(
-            "SELECT conversation_id,request_id,operation,status,token FROM dispatch WHERE id=?1",
+            "SELECT conversation_id,request_id,operation,status,token,result FROM dispatch WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()?;
-    let Some((conversation, request, operation, status, saved)) = row else {
+    let Some((conversation, request, operation, status, saved, saved_result)) = row else {
         return Err(invalid("dispatch is absent"));
     };
     if saved != token || status != "claimed" {
@@ -1020,6 +1148,12 @@ fn dispatch_complete(
         match (item.status.as_str(), item.attempts) {
             ("ui_observed", n) if n > 0 => ("done", "ui_observed", false),
             ("recipient_confirmed", n) if n > 0 => ("done", "recipient_confirmed", false),
+            ("managed_media_queued", 0)
+                if saved_result.as_deref() == Some("image_verification_unavailable")
+                    && item.content_kind == "image" =>
+            {
+                ("blocked", "image_verification_unavailable", false)
+            }
             ("managed_queued" | "managed_media_queued", 0) => ("queued", "not_attempted", false),
             ("attempt_recorded", _) => ("unknown", "attempt_recorded", true),
             ("indeterminate", _) => ("unknown", "indeterminate", true),
@@ -1484,6 +1618,335 @@ fn abandon_unsent(
     tx.commit()?;
     Ok(
         json!({"dispatch_id": id, "status": "done", "result": "abandoned_pre_submit", "outbox_status": "indeterminate", "attempt_number": expected_attempt}),
+    )
+}
+// Independent of abandon-unsent: this recognizes one native IMAGE Copy
+// rejection, not a general proof of unsent content or permission to replay.
+fn image_rejection_read(path: &Path, limit: u64) -> Result<Vec<u8>, Box<dyn Error>> {
+    private(path, false)?;
+    if path.canonicalize()? != path {
+        return Err(invalid("noncanonical image rejection evidence"));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || before.uid() != unsafe { libc::geteuid() }
+        || before.permissions().mode() & 0o777 != 0o600
+        || before.len() > limit
+    {
+        return Err(invalid("unsafe image rejection evidence"));
+    }
+    let mut bytes = Vec::new();
+    (&file).take(limit + 1).read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    if bytes.len() as u64 != before.len()
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(invalid("image rejection evidence changed while reading"));
+    }
+    Ok(bytes)
+}
+fn image_rejection_snapshot(
+    root: &Path,
+    tid: &str,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    let mut snapshot = std::collections::BTreeMap::new();
+    let mut total = 0;
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid("image rejection directory exceeds bounded proof"));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&format!("{tid}.")) && !name.starts_with(&format!("{tid}-")) {
+            continue;
+        }
+        if name.contains("submit")
+            || name.starts_with(&format!("{tid}-a"))
+            || name.contains("late-observed")
+            || name.contains("recovery")
+        {
+            return Err(invalid(
+                "submit, late observation or later attempt conflicts with Copy rejection",
+            ));
+        }
+        let bytes = image_rejection_read(
+            &entry.path(),
+            if name.ends_with(".png") {
+                16 * 1024 * 1024
+            } else {
+                65536
+            },
+        )?;
+        total += bytes.len();
+        if total > 128 * 1024 * 1024 {
+            return Err(invalid("image rejection evidence exceeds bounded proof"));
+        }
+        snapshot.insert(name, hex::encode(Sha256::digest(&bytes)));
+    }
+    for suffix in [
+        ".client-result.json",
+        "-inspect.inspect.job.json",
+        "-inspect.result.json",
+        "-focus.focus-group.job.json",
+        "-focus.result.json",
+        "-focus.focus-evidence.json",
+        ".prepare-visual.job.json",
+        ".prepare-visual.result.json",
+        ".visual-state.json",
+    ] {
+        if !snapshot.contains_key(&format!("{tid}{suffix}")) {
+            return Err(invalid("incomplete original IMAGE Copy rejection trace"));
+        }
+    }
+    Ok(snapshot)
+}
+fn known_image_copy_rejection(value: &Value) -> bool {
+    let Some(error) = value.as_str().filter(|s| s.len() <= 2048) else {
+        return false;
+    };
+    let Some(types) = error
+        .strip_prefix("Composer Copy did not replace image sentinel exactly once (types:")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let parts: Vec<&str> = types.split(',').collect();
+    parts
+        .iter()
+        .any(|s| matches!(*s, "public.png" | "public.tiff"))
+        && parts.iter().all(|s| {
+            !s.is_empty()
+                && s.as_bytes()[0].is_ascii_alphanumeric()
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))
+        })
+}
+fn archive_image_copy_rejection(
+    root: &Path,
+    id: i64,
+    expected_attempt: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "IMAGE rejection archive requires original attempt 1 and bounded reason",
+        ));
+    }
+    private(root, true)?;
+    if root.canonicalize()? != root {
+        return Err(invalid("IMAGE rejection root must be canonical"));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; IMAGE rejection retained"));
+        }
+        locks.push(lock);
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (conversation,request,status,result,operation,dispatch_channel,dispatch_epoch): (String,String,String,Option<String>,String,String,i64) = tx.query_row(
+        "SELECT conversation_id,request_id,status,result,operation,channel_id,epoch FROM dispatch WHERE id=?1",[id],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "unknown"
+        || result.as_deref() != Some("indeterminate")
+        || operation != "send"
+        || active.is_some()
+    {
+        return Err(invalid(
+            "only an idle original indeterminate IMAGE dispatch may be archived",
+        ));
+    }
+    let b = binding(&tx, &conversation)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid("original IMAGE managed root differs"));
+    }
+    if b.control != "active" || dispatch_channel != b.channel_id {
+        return Err(invalid("IMAGE rejection binding is not active"));
+    }
+    private(&b.state.join("outgoing.sqlite3"), false)?;
+    let mut outbox = Connection::open_with_flags(
+        b.state.join("outgoing.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let out = outbox.transaction()?;
+    let (evidence,media_path,media_sha,mime,size,owner,epoch): (String,String,String,String,i64,String,i64) = out.query_row(
+        "SELECT result_evidence,media_path,media_sha256,media_mime_type,media_size_bytes,managed_owner,managed_epoch FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='image' AND status='indeterminate' AND attempt_number=1",
+        params![request,b.channel_id,b.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+    if owner != b.owner || epoch != dispatch_epoch {
+        return Err(invalid("original IMAGE owner/dispatch epoch differs"));
+    }
+    let attempts: i64 = out.query_row(
+        "SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?1",
+        [&request],
+        |r| r.get(0),
+    )?;
+    let original: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=1 AND status='indeterminate' AND result_evidence=?2 AND finished_at IS NOT NULL AND finished_at>=claimed_at AND recovery_from_attempt IS NULL AND recovery_prior_status IS NULL)",params![request,evidence],|r|r.get(0))?;
+    if attempts != 1 || !original {
+        return Err(invalid(
+            "IMAGE archive requires the finished original attempt",
+        ));
+    }
+    let observations: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_observation')",[],|r|r.get(0))?;
+    if observations {
+        let observed: bool = out.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outgoing_observation WHERE request_id=?1)",
+            [&request],
+            |r| r.get(0),
+        )?;
+        if observed {
+            return Err(invalid("late IMAGE observation already exists"));
+        }
+    }
+    let media = super::outgoing_media::Media {
+        path: PathBuf::from(media_path),
+        sha256: media_sha,
+        mime_type: match mime.as_str() {
+            "image/png" => "image/png",
+            "image/jpeg" => "image/jpeg",
+            _ => return Err(invalid("invalid frozen IMAGE type")),
+        },
+        size_bytes: u64::try_from(size)?,
+    };
+    if media.path != super::outgoing_media::frozen_path(&b.state, &request)? {
+        return Err(invalid("IMAGE frozen path differs"));
+    }
+    super::outgoing_media::verify(&media)?;
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if Path::new(&evidence) != report_path {
+        return Err(invalid("original IMAGE report path differs"));
+    }
+    let before = image_rejection_snapshot(root, &tid)?;
+    let report: Value = serde_json::from_slice(&image_rejection_read(&report_path, 65536)?)?;
+    if report["id"] != tid
+        || report["request_id"] != request
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["attempt_number"] != 1
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "recovery_from_attempt",
+        ]
+        .iter()
+        .any(|k| report.get(*k).is_some())
+    {
+        return Err(invalid(
+            "original IMAGE report is not a prepare Copy rejection",
+        ));
+    }
+    let prep: Value = serde_json::from_slice(&image_rejection_read(
+        &root.join(format!("{tid}.prepare-visual.result.json")),
+        65536,
+    )?)?;
+    let visual: Value = serde_json::from_slice(&image_rejection_read(
+        &root.join(format!("{tid}.visual-state.json")),
+        65536,
+    )?)?;
+    if prep["id"] != tid
+        || prep["ok"] != false
+        || !known_image_copy_rejection(&prep["error"])
+        || visual["id"] != tid
+        || visual["stage"] != "prepare-attempted"
+        || visual["media"] != media.descriptor()
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+        ]
+        .iter()
+        .any(|k| visual.get(*k).is_some())
+    {
+        return Err(invalid("native IMAGE prepare rejection differs"));
+    }
+    let channel = load_binding(&b.state)?;
+    let payload = serde_json::to_vec(
+        &json!({"protocol_version":1,"image_rejection_protocol_version":1,
+        "content_kind":"image","request_id":request,"attempt_number":1,"channel_id":b.channel_id,
+        "session_id":b.session_id,"account":channel.account,"talker":channel.talker,"media":media.descriptor()}),
+    )?;
+    let driver = b.state.join("conversation-sender");
+    private(
+        driver
+            .parent()
+            .ok_or_else(|| invalid("missing driver parent"))?,
+        true,
+    )?;
+    let meta = fs::symlink_metadata(&driver)?;
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid("registered IMAGE archive driver is not private"));
+    }
+    super::outgoing::check_image_rejection_capabilities(&driver, Duration::from_secs(20))?;
+    super::outgoing::check_image_rejection_preflight(
+        &driver,
+        &payload,
+        Duration::from_secs(25),
+        locks[1].as_raw_fd(),
+    )?;
+    if image_rejection_snapshot(root, &tid)? != before {
+        return Err(invalid("IMAGE rejection artifacts changed during proof"));
+    }
+    super::outgoing_media::verify(&media)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid("original IMAGE managed root changed during proof"));
+    }
+    // Both database reservations and shared desktop locks remain held. No
+    // outbox/attempt write, epoch change, pause clearing or retry is permitted.
+    let updated = tx.execute("UPDATE dispatch SET status='done',result='image_prepare_rejected',updated_at=?2 WHERE id=?1 AND status='unknown' AND result='indeterminate'",params![id,now()])?;
+    if updated != 1 {
+        return Err(invalid("IMAGE rejection dispatch CAS failed"));
+    }
+    tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+        params![format!("image_prepare_rejected: {reason}"),now()])?;
+    block_unsent_batch_descendants(&tx)?;
+    out.commit()?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id":id,"status":"done","result":"image_prepare_rejected",
+        "outbox_status":"indeterminate","attempt_number":1}),
     )
 }
 pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Error>> {
@@ -2225,6 +2688,11 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 dispatch_id,
                 reason,
             } => restore_queued(root, dispatch_id, &reason)?,
+            DispatchAction::ArchiveImageCopyRejection {
+                dispatch_id,
+                expected_attempt,
+                reason,
+            } => archive_image_copy_rejection(root, dispatch_id, expected_attempt, &reason)?,
             DispatchAction::AbandonUnsent {
                 dispatch_id,
                 reason,
@@ -2350,6 +2818,65 @@ mod tests {
         let b = load_binding(state).unwrap();
         let db = Connection::open(state.join("outgoing.sqlite3")).unwrap();
         db.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,content_kind,status,managed_owner,managed_epoch,created_at,updated_at) VALUES(?1,?2,?3,'fixture','text','queued','owner1',?4,?5,?5)",params![request,b.channel_id,b.session_id,epoch,now()]).unwrap();
+    }
+    #[test]
+    fn image_setup_refusal_requires_exact_claim_and_only_completion_releases_surface() {
+        let (_tmp, state, root) = fixture();
+        enroll(
+            &root,
+            "conversation1",
+            &state,
+            "owner1",
+            InputMode::Push,
+            ReplyPolicy::Authorized,
+        )
+        .unwrap();
+        queued(&state, "setup-image", 1);
+        enqueue(&root, "conversation1", "setup-image", 1, false).unwrap();
+        let claim = dispatch_claim(&root, "worker1", 120).unwrap();
+        let id = claim["dispatch_id"].as_i64().unwrap();
+        let token = claim["token"].as_str().unwrap();
+        assert!(
+            mark_image_setup_refusal(&root, &state, "setup-image", id, token).is_err(),
+            "text is not an image setup refusal"
+        );
+        let out = Connection::open(state.join("outgoing.sqlite3")).unwrap();
+        out.execute("UPDATE outgoing_intent SET content_kind='image',status='managed_media_queued' WHERE request_id='setup-image'",[]).unwrap();
+        assert!(mark_image_setup_refusal(&root, &state, "setup-image", id, "wrong-token").is_err());
+        assert!(mark_image_setup_refusal(&root, &state, "wrong-request", id, token).is_err());
+        let before = dispatch_status(&root).unwrap();
+        mark_image_setup_refusal(&root, &state, "setup-image", id, token).unwrap();
+        let marked = dispatch_status(&root).unwrap();
+        assert_eq!(marked["active_dispatch"], before["active_dispatch"]);
+        assert_eq!(marked["surface_epoch"], before["surface_epoch"]);
+        assert!(marked["paused_reason"].is_null());
+        assert_eq!(marked["dispatches"][0]["status"], "claimed");
+        assert_eq!(
+            marked["dispatches"][0]["result"],
+            "image_verification_unavailable"
+        );
+        validate_dispatch(&root, &state, "setup-image", id, token).unwrap();
+        let complete = dispatch_complete(&root, id, token, None).unwrap();
+        assert_eq!(complete["status"], "blocked");
+        assert_eq!(complete["result"], "image_verification_unavailable");
+        assert_eq!(complete["surface_paused"], false);
+        assert!(dispatch_status(&root).unwrap()["active_dispatch"].is_null());
+        assert!(mark_image_setup_refusal(&root, &state, "setup-image", id, token).is_err());
+        assert_eq!(
+            out.query_row("SELECT COUNT(*) FROM outgoing_attempt", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            out.query_row(
+                "SELECT attempt_number FROM outgoing_intent WHERE request_id='setup-image'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
     #[test]
     fn paused_pull_events_are_reconciled_and_draft_resumes_without_rewinding() {

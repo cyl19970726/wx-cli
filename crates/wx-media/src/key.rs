@@ -170,6 +170,255 @@ pub fn derive_v2_key_from_dir(data_dir: &Path) -> Result<[u8; 16], MediaError> {
     Ok(derive_v2_aes_key(&uin, &wxid))
 }
 
+/// Derive a key only from the explicitly bound account's unique local config.
+///
+/// Unlike the legacy directory API, this never infers an identity from login
+/// directories or falls back to another account's config. It neither prints
+/// secret material nor reads or writes a KeyStore. A four-character account
+/// suffix is required to select the config even when `self_wxid == account_id`.
+pub fn derive_v2_key_for_account(
+    data_dir: &Path,
+    account_id: &str,
+    self_wxid: &str,
+) -> Result<[u8; 16], MediaError> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        strict_account::derive(data_dir, account_id, self_wxid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (data_dir, account_id, self_wxid);
+        Err(MediaError::InvalidFormat {
+            reason: "strict account image-key derivation is unsupported on this platform".into(),
+        })
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod strict_account {
+    use std::fs::{self, Metadata, OpenOptions};
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::{Component, Path};
+
+    use base64::Engine;
+
+    use super::{derive_v2_aes_key, extract_account_suffix, MediaError};
+
+    const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+    // O_NOFOLLOW | O_NONBLOCK from the Darwin/Linux open(2) ABI. These keep
+    // opening a replaced config from following a symlink or blocking on a FIFO.
+    #[cfg(target_os = "macos")]
+    const SAFE_OPEN_FLAGS: i32 = 0x0100 | 0x0004;
+    #[cfg(target_os = "linux")]
+    const SAFE_OPEN_FLAGS: i32 = 0x20000 | 0x0800;
+
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    fn invalid(reason: &'static str) -> MediaError {
+        MediaError::InvalidFormat {
+            reason: reason.into(),
+        }
+    }
+
+    fn canonical(path: &Path) -> bool {
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+            && fs::canonicalize(path).is_ok_and(|resolved| resolved == path)
+    }
+
+    fn directory(path: &Path, uid: u32) -> Result<Metadata, MediaError> {
+        let meta = fs::symlink_metadata(path).map_err(|_| {
+            invalid("selected-account image configuration directory is unavailable")
+        })?;
+        if !meta.is_dir() || meta.uid() != uid || !canonical(path) {
+            return Err(invalid(
+                "selected-account image configuration directory is unsafe",
+            ));
+        }
+        Ok(meta)
+    }
+
+    fn safe_config(meta: &Metadata, uid: u32) -> bool {
+        meta.is_file()
+            && meta.uid() == uid
+            && meta.nlink() == 1
+            && meta.mode() & 0o022 == 0
+            && meta.len() <= MAX_CONFIG_BYTES
+    }
+
+    fn unchanged(a: &Metadata, b: &Metadata) -> bool {
+        a.dev() == b.dev()
+            && a.ino() == b.ino()
+            && a.uid() == b.uid()
+            && a.gid() == b.gid()
+            && a.mode() == b.mode()
+            && a.nlink() == b.nlink()
+            && a.len() == b.len()
+            && a.mtime() == b.mtime()
+            && a.mtime_nsec() == b.mtime_nsec()
+            && a.ctime() == b.ctime()
+            && a.ctime_nsec() == b.ctime_nsec()
+    }
+
+    pub(super) fn derive(
+        data_dir: &Path,
+        account_id: &str,
+        self_wxid: &str,
+    ) -> Result<[u8; 16], MediaError> {
+        if data_dir.file_name().and_then(|name| name.to_str()) != Some(account_id)
+            || self_wxid.is_empty()
+        {
+            return Err(invalid("selected-account image-key identity mismatch"));
+        }
+        let suffix = extract_account_suffix(account_id)
+            .ok_or_else(|| invalid("selected-account image-key suffix is unavailable"))?;
+        if account_id != self_wxid
+            && account_id.strip_prefix(self_wxid) != Some(format!("_{suffix}").as_str())
+        {
+            return Err(invalid("selected-account image-key identity mismatch"));
+        }
+        // SAFETY: geteuid has no arguments and only reports process ownership.
+        let uid = unsafe { geteuid() };
+        let mut directories = vec![(data_dir.to_path_buf(), directory(data_dir, uid)?)];
+        let mut roots = vec![data_dir.join("app_data/radium/ilink")];
+        if let Some(documents) = data_dir.parent().and_then(Path::parent) {
+            roots.push(documents.join("app_data/radium/ilink"));
+        }
+        let mut configs = Vec::new();
+        for root in roots {
+            match fs::symlink_metadata(&root) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    return Err(invalid(
+                        "selected-account image configuration is unavailable",
+                    ))
+                }
+                Ok(_) => {}
+            }
+            directories.push((root.clone(), directory(&root, uid)?));
+            let entries = fs::read_dir(&root)
+                .map_err(|_| invalid("selected-account image configuration is unreadable"))?;
+            for entry in entries {
+                let entry = entry
+                    .map_err(|_| invalid("selected-account image configuration is unreadable"))?;
+                if !entry
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(suffix.as_bytes())
+                {
+                    continue;
+                }
+                let account_config = entry.path();
+                directories.push((account_config.clone(), directory(&account_config, uid)?));
+                let kvcomm = account_config.join("kvcomm");
+                match fs::symlink_metadata(&kvcomm) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => {
+                        return Err(invalid(
+                            "selected-account image configuration is unavailable",
+                        ))
+                    }
+                    Ok(_) => {}
+                }
+                directories.push((kvcomm.clone(), directory(&kvcomm, uid)?));
+                let config = kvcomm.join("config.ini");
+                let meta = match fs::symlink_metadata(&config) {
+                    Ok(meta) => meta,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => {
+                        return Err(invalid(
+                            "selected-account image configuration is unavailable",
+                        ))
+                    }
+                };
+                if !safe_config(&meta, uid) || !canonical(&config) {
+                    return Err(invalid(
+                        "selected-account image configuration file is unsafe",
+                    ));
+                }
+                configs.push((config, meta));
+            }
+        }
+        if configs.len() != 1 {
+            return Err(invalid(
+                "selected-account image configuration is missing or ambiguous",
+            ));
+        }
+        let (path, selected) = &configs[0];
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(SAFE_OPEN_FLAGS)
+            .open(path)
+            .map_err(|_| invalid("selected-account image configuration cannot be opened safely"))?;
+        let before = file
+            .metadata()
+            .map_err(|_| invalid("selected-account image configuration metadata is unavailable"))?;
+        if !safe_config(&before, uid) || !unchanged(selected, &before) {
+            return Err(invalid(
+                "selected-account image configuration changed before reading",
+            ));
+        }
+        let mut bytes = Vec::new();
+        (&file)
+            .take(MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid("selected-account image configuration cannot be read safely"))?;
+        let after = file
+            .metadata()
+            .map_err(|_| invalid("selected-account image configuration metadata is unavailable"))?;
+        let current = fs::symlink_metadata(path)
+            .map_err(|_| invalid("selected-account image configuration changed during reading"))?;
+        if bytes.len() as u64 != before.len()
+            || !unchanged(&before, &after)
+            || !unchanged(&before, &current)
+            || !canonical(path)
+        {
+            return Err(invalid(
+                "selected-account image configuration changed during reading",
+            ));
+        }
+        for (path, before) in directories {
+            if !unchanged(&before, &directory(&path, uid)?) {
+                return Err(invalid(
+                    "selected-account image configuration directory changed",
+                ));
+            }
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| invalid("selected-account image configuration is malformed"))?;
+        let values: Vec<_> = text
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .filter(|(name, _)| name.trim() == "last_uin")
+            .map(|(_, value)| value.trim())
+            .collect();
+        if values.len() != 1 {
+            return Err(invalid(
+                "selected-account image configuration has missing or duplicate UIN",
+            ));
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(values[0])
+            .map_err(|_| invalid("selected-account image configuration has malformed UIN"))?;
+        if decoded.is_empty()
+            || !decoded.iter().all(u8::is_ascii_digit)
+            || !decoded.iter().any(|byte| *byte != b'0')
+        {
+            return Err(invalid(
+                "selected-account image configuration has invalid UIN",
+            ));
+        }
+        let uin = std::str::from_utf8(&decoded)
+            .map_err(|_| invalid("selected-account image configuration has invalid UIN"))?;
+        Ok(derive_v2_aes_key(uin, self_wxid))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

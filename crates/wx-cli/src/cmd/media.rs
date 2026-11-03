@@ -46,8 +46,6 @@ pub fn cmd_media(action: MediaAction) -> Result<(), Box<dyn std::error::Error>> 
             } else if let Some(ref dir) = data_dir {
                 let key = wx_media::derive_v2_key_from_dir(dir)
                     .map_err(|e| format!("V2 key derivation from --data-dir failed: {e}"))?;
-                let key_preview = String::from_utf8_lossy(&key[..8]);
-                eprintln!("Derived V2 key from UIN+WXID: {key_preview}...");
                 Some(key)
             } else {
                 None

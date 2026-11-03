@@ -1450,5 +1450,233 @@ class ImageAbandonProofTests(unittest.TestCase):
                 with self.assertRaises(driver.Refused): self.prove(request, config)
 
 
+class ImageCopyRejectionTests(unittest.TestCase):
+    def fixture(self, directory):
+        request, config, tid = ImageAbandonProofTests().fixture(directory)
+        request.pop("abandon_protocol_version")
+        request["image_rejection_protocol_version"] = 1
+        ui = config["ui_dir"]
+        state = ui / "state"; state.mkdir(mode=0o700)
+        frozen = state / "outgoing-media"; frozen.mkdir(mode=0o700)
+        image = frozen / request["request_id"]
+        import base64
+        raw = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        image.write_bytes(raw); image.chmod(0o600)
+        request["media"] = driver.image_descriptor(image, require_private=True)
+        config.update(channel_state_dir=state, expected_draft="",
+                      composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                      button_point={"x": 800, "y": 610}, helper_app="new-helper-4")
+        focus = tid + "-focus"
+        frame = {"x": 100, "y": 100, "width": 880, "height": 640}
+        driver.private_update(ui / (focus + ".result.json"), {
+            "id": focus, "action": "focus-group", "ok": True, "focused": True,
+            "alreadySelected": False, "source": "search", "targetKind": "group",
+            "focusEvidenceID": focus, "category": "group-chats",
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+        driver.private_create(ui / (focus + ".focus-evidence.json"), {
+            "id": focus, "targetGroup": config["target_group"], "targetKind": "group",
+            "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame,
+            "source": "search", "category": "group-chats", "selectedAt": 1})
+        driver.private_update(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 1,
+            "channel_id": request["channel_id"], "session_id": request["session_id"],
+            "stage": "group_focused", "status": "indeterminate", "error": "helper rejected action",
+            "focus_evidence_id": focus, "focus_category": "group-chats", "target_kind": "group"})
+        job = dict(driver._prepare_command(request, config, 21, frame, focus), id=tid, action="prepare-visual")
+        driver.private_create(ui / (tid + ".prepare-visual.job.json"), job)
+        driver.private_create(ui / (tid + ".prepare-visual.result.json"), {
+            "id": tid, "ok": False,
+            "error": "Composer Copy did not replace image sentinel exactly once (types:public.png,public.tiff,public.file-url)",
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+        visual = dict(job, stage="prepare-attempted", text=""); visual.pop("action")
+        driver.private_create(ui / (tid + ".visual-state.json"), visual)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status") as status, \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("archive must not operate GUI")), \
+             mock.patch.object(driver, "_guard_helper", wraps=driver._guard_helper) as guard:
+            result = driver.image_rejection_preflight(request, config)
+            self.assertEqual(status.call_count, 2)
+            self.assertTrue(all(call.kwargs.get("clear") is False for call in guard.call_args_list))
+            return result
+
+    def test_separate_capability_and_failure_response(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--image-rejection-capabilities"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "protocol_version": 1, "image_rejection_protocol_version": 1,
+            "prepare_copy_rejection_only": True, "no_submit_evidence_required": True})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(b"{}"))), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--image-rejection-preflight"]), 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "protocol_version": 1, "image_rejection_protocol_version": 1, "prepare_rejection_proven": False})
+
+    def test_original_rejection_proof_is_read_only_and_old_abandon_still_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            before = {str(p): p.read_bytes() for p in Path(directory).rglob("*") if p.is_file()}
+            self.assertEqual(self.prove(request, config), {
+                "protocol_version": 1, "image_rejection_protocol_version": 1, "prepare_rejection_proven": True})
+            self.assertEqual(before, {str(p): p.read_bytes() for p in Path(directory).rglob("*") if p.is_file()})
+            old = {k:v for k,v in request.items() if k not in ("media", "image_rejection_protocol_version")}
+            old["abandon_protocol_version"] = 1
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.abandon_preflight(old, config)
+
+    def test_known_error_requires_exact_phrase_and_raster_type(self):
+        for error in ("Composer Copy did not replace image sentinel exactly once",
+                      "Composer Copy did not replace image sentinel exactly once (types:public.file-url)",
+                      "Composer Copy did not replace image sentinel exactly once (types:public.png) trailing",
+                      "Other error (types:public.png)", "Cannot snapshot a clipboard item"):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = config["ui_dir"] / (tid + ".prepare-visual.result.json")
+                driver.private_update(path, dict(driver.private_read(path), error=error))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_submit_later_observation_unknown_files_and_missing_proof_refuse(self):
+        for suffix in (".submit-visual.job.json", ".submit-visual.result.json", ".submit-attempted.json",
+                       "-a2.client-result.json", "-a3-inspect.result.json", ".late-observed.json", ".unexpected.json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(config["ui_dir"] / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        for suffix in (".prepare-visual.job.json", ".prepare-visual.result.json", ".visual-state.json",
+                       "-inspect.result.json", "-focus.result.json", "-focus.focus-evidence.json"):
+            with self.subTest(missing=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                (config["ui_dir"] / (tid + suffix)).unlink()
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_contradictory_identity_prepared_pixels_calibration_and_source_refuse(self):
+        mutations = (
+            (".client-result.json", {"stage": "submit_clicked"}),
+            (".client-result.json", {"status": "ui_observed"}),
+            (".client-result.json", {"media_prepared": {}}),
+            (".client-result.json", {"event_cursor": 14}),
+            (".client-result.json", {"request_id": "old-private-unknown"}),
+            (".prepare-visual.result.json", {"ok": True, "prepared": True}),
+            (".prepare-visual.result.json", {"permissions": {}}),
+            (".prepare-visual.job.json", {"media": {}}),
+            (".prepare-visual.job.json", {"expectedPID": 43}),
+            (".prepare-visual.job.json", {"composerRect": {}}),
+            (".visual-state.json", {"stage": "prepared"}),
+            (".visual-state.json", {"stage": "submitted-unverified"}),
+            (".visual-state.json", {"preparedPixelSHA256": None}),
+            (".visual-state.json", {"preparedCopyType": "public.png"}),
+            ("-inspect.result.json", {"weChatPID": 43}),
+            ("-focus.focus-evidence.json", {"targetKind": "private"}),
+            ("-focus.focus-evidence.json", {"expectedFrame": {}}),
+            ("-focus.result.json", {"category": "contacts"}),
+        )
+        for suffix, updates in mutations:
+            with self.subTest(suffix=suffix, updates=updates), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = config["ui_dir"] / (tid + suffix)
+                driver.private_update(path, dict(driver.private_read(path), **updates))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            Path(request["media"]["path"]).write_bytes(b"not original pixels")
+            with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_lock_live_helper_and_proof_time_change_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            with (config["ui_dir"] / "sender.lock").open() as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+            with mock.patch.object(driver, "_helper_is_live", return_value=True), mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.image_rejection_preflight(request, config)
+            original = driver._image_rejection_snapshot
+            calls = []
+            def changed(*args):
+                value = original(*args); calls.append(None)
+                if len(calls) == 1:
+                    path = config["ui_dir"] / (tid + ".prepare-visual.result.json")
+                    driver.private_update(path, driver.private_read(path))
+                return value
+            with mock.patch.object(driver, "_image_rejection_snapshot", side_effect=changed):
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
+class ImageSetupPreflightTests(unittest.TestCase):
+    def test_unavailable_image_credentials_refuse_before_any_helper_or_lock(self):
+        for reply in ({"credential_ready": False}, {"credential_ready": 1}, {}, [], None):
+            with self.subTest(reply=reply), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory).resolve(); state.chmod(0o700)
+                config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+                with mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": "image"}), \
+                     mock.patch.object(driver, "call", return_value=json.dumps(reply)) as query, \
+                     mock.patch.object(driver, "safe_config", side_effect=AssertionError("no helper bundle access")), \
+                     mock.patch.object(driver, "desktop_lock", side_effect=AssertionError("no desktop lock")), \
+                     mock.patch.object(driver, "_guard_helper", side_effect=AssertionError("no helper")), \
+                     mock.patch.object(driver, "bridge", side_effect=AssertionError("no GUI")):
+                    result = driver.dispatch_preflight(config, validate_config=True)
+                self.assertEqual(result, {"ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False})
+                self.assertEqual([str(p) for p in query.call_args.args[0]],
+                    [str(Path(sys.executable).resolve()), "outbox", "--state-dir", str(state), "image-verification-status"])
+
+    def test_dispatch_mode_returns_exact_setup_refusal_without_reading_stdin(self):
+        class NoStdin:
+            @property
+            def buffer(self):
+                raise AssertionError("dispatch preflight must not read stdin")
+            def read(self, *args):
+                raise AssertionError("dispatch preflight must not read stdin")
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve(); state.chmod(0o700)
+            config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": "image", "WX_SENDER_CONFIG": str(state / "config.json")}), \
+                 mock.patch.object(sys, "stdin", NoStdin()), \
+                 mock.patch.object(driver, "private_read", return_value=config), \
+                 mock.patch.object(driver, "call", return_value='{"credential_ready":false}'), \
+                 mock.patch.object(driver, "safe_config", side_effect=AssertionError("no helper bundle access")), \
+                 mock.patch.object(driver, "bridge", side_effect=AssertionError("no UI")), \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(driver.main(["--dispatch-preflight"]), 0)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False})
+
+    def test_image_readiness_errors_refuse_without_desktop_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve(); state.chmod(0o700)
+            config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+            for side_effect in (driver.Refused("verification unavailable"), OSError("missing"), ValueError("invalid")):
+                with self.subTest(error=type(side_effect).__name__), \
+                     mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": "image"}), \
+                     mock.patch.object(driver, "call", side_effect=side_effect), \
+                     mock.patch.object(driver, "bridge", side_effect=AssertionError("no UI")):
+                    self.assertEqual(driver.dispatch_preflight(config), {
+                        "ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False})
+
+    def test_ready_image_and_text_keep_normal_desktop_preflight(self):
+        for hint in ("image", "text", ""):
+            with self.subTest(hint=hint), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory).resolve(); state.chmod(0o700)
+                config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+                order = []
+                def query(*args, **kw):
+                    order.append("credentials"); return '{"credential_ready":true}'
+                with mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": hint}), \
+                     mock.patch.object(driver, "call", side_effect=query) as call, \
+                     mock.patch.object(driver, "safe_config", side_effect=lambda c: order.append("config") or c), \
+                     mock.patch.object(driver, "desktop_lock", return_value=contextlib.nullcontext()), \
+                     mock.patch.object(driver, "_guard_helper", side_effect=lambda *a, **kw: order.append("helper")), \
+                     mock.patch.object(driver, "status"), \
+                     mock.patch.object(driver, "bridge", return_value={}), \
+                     mock.patch.object(driver, "inspect_ok"):
+                    self.assertEqual(driver.dispatch_preflight(config, validate_config=True), {"ready": True})
+                self.assertEqual(call.call_count, 1 if hint == "image" else 0)
+                self.assertEqual(order, ["credentials", "config", "helper"] if hint == "image" else ["config", "helper"])
+
+
 if __name__ == "__main__":
     unittest.main()

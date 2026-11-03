@@ -1,4 +1,4 @@
-"""Install the Codex WeChat hook wrapper into one explicit project only."""
+"""Install the Codex WeChat wrapper with explicit project and hook-source scope."""
 
 import argparse
 import base64
@@ -104,9 +104,80 @@ def _json_bytes(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def _paths(project):
-    codex = _target(project, ".codex")
-    hooks = _target(project, ".codex", "hooks.json")
+def _git(project, *args):
+    # Do not let a caller's repository overrides redirect scope validation.
+    env = dict(os.environ)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    try:
+        return subprocess.run(("git", "-C", str(project), *args),
+                              capture_output=True, check=False, text=True, env=env)
+    except OSError as exc:
+        raise InstallError("git metadata is unavailable; cannot validate hook source scope") from exc
+
+
+def _git_metadata(project):
+    has_git_marker = any((parent / ".git").exists() for parent in (project, *project.parents))
+    try:
+        inside = _git(project, "rev-parse", "--is-inside-work-tree")
+    except InstallError:
+        if has_git_marker:
+            raise
+        return None  # Preserve non-Git installation when Git is not available.
+    if inside.returncode != 0:
+        if has_git_marker:
+            raise InstallError("cannot read project Git metadata")
+        return None
+    if inside.stdout.strip() != "true":
+        raise InstallError("installation project must not be a bare Git repository")
+    result = _git(project, "rev-parse", "--path-format=absolute", "--show-toplevel",
+                  "--git-common-dir", "--absolute-git-dir")
+    if result.returncode != 0 or len(result.stdout.splitlines()) != 3:
+        raise InstallError("cannot resolve project Git roots")
+    return tuple(Path(line).resolve() for line in result.stdout.splitlines())
+
+
+def _hooks_project(project, supplied):
+    metadata = _git_metadata(project)
+    expected_metadata = metadata
+    expected = project
+    if metadata is not None:
+        checkout, common, git_dir = metadata
+        if common != git_dir:
+            worktrees = _git(project, "worktree", "list", "--porcelain", "-z")
+            first = worktrees.stdout.split("\0", 1)[0]
+            if worktrees.returncode != 0 or not first.startswith("worktree "):
+                raise InstallError("cannot resolve the main Git checkout for shared hooks")
+            main = _canonical_project(first[len("worktree "):])
+            main_metadata = _git_metadata(main)
+            if main_metadata is None or main_metadata != (main, common, common):
+                raise InstallError("cannot verify the main checkout of the same Git common repository")
+            expected_metadata = main_metadata
+            expected = main / project.relative_to(checkout)
+            if supplied is None:
+                raise InstallError(
+                    "linked Git worktree uses a shared Hook source; no files written. "
+                    "Explicitly authorize --hooks-project " + shlex.quote(str(expected)) +
+                    " (affects associated worktrees); --project still owns the Skill and record")
+            expected = _canonical_project(expected)
+    if supplied is None:
+        return expected
+    supplied = _canonical_project(supplied)
+    if supplied != expected:
+        raise InstallError("--hooks-project must be the corresponding main-checkout project path "
+                           "in the same Git common repository")
+    if metadata is not None:
+        target_metadata = _git_metadata(supplied)
+        if target_metadata != expected_metadata:
+            raise InstallError("--hooks-project must belong to the corresponding checkout "
+                               "of the same Git common repository")
+    return supplied
+
+
+def _paths(project, hooks_project=None):
+    hooks_project = project if hooks_project is None else hooks_project
+    codex = _target(hooks_project, ".codex")
+    hooks = _target(hooks_project, ".codex", "hooks.json")
     agents = _target(project, ".agents")
     skills = _target(project, ".agents", "skills")
     skill_dir = _target(project, ".agents", "skills", SKILL_NAME)
@@ -120,23 +191,30 @@ def _paths(project):
     return codex, hooks, agents, skills, skill_dir, skill, local, record
 
 
-def _private_git_paths(project):
-    try:
-        inside = subprocess.run(("git", "-C", str(project), "rev-parse", "--is-inside-work-tree"),
-                                capture_output=True, check=False, text=True)
-    except OSError:
-        return
-    if inside.returncode != 0 or inside.stdout.strip() != "true":
-        return
-    for relative in (".codex/hooks.json", ".local/" + RECORD_NAME):
-        ignored = subprocess.run(("git", "-C", str(project), "check-ignore", "-q", "--", relative),
-                                 capture_output=True, check=False)
-        if ignored.returncode != 0:
-            raise InstallError(relative + " must be git-ignored before storing private paths")
+def _private_git_paths(project, hooks_project):
+    for root, relative in ((hooks_project, ".codex/hooks.json"),
+                           (project, ".local/" + RECORD_NAME)):
+        if _git_metadata(root) is not None:
+            ignored = _git(root, "check-ignore", "-q", "--", relative)
+            if ignored.returncode != 0:
+                raise InstallError(str(root / relative) +
+                                   " must be git-ignored before storing private paths")
 
 
-def install(project, config, executable, bundle=None):
+def _result(status, project, hooks_project):
+    result = {"status": status, "project": str(project), "hooks_project": str(hooks_project),
+              "skill_path": str(project / ".agents" / "skills" / SKILL_NAME / "SKILL.md"),
+              "record_path": str(project / ".local" / RECORD_NAME),
+              "hooks_path": str(hooks_project / ".codex" / "hooks.json"),
+              "shared_hook_source": hooks_project != project}
+    if status != "uninstalled":
+        result["hook_trust"] = "host_review_required"
+    return result
+
+
+def install(project, config, executable, bundle=None, hooks_project=None):
     project = _canonical_project(project)
+    hooks_project = _hooks_project(project, hooks_project)
     config, executable = Path(config), Path(executable)
     if not config.is_absolute() or not config.is_file():
         raise InstallError("private config must be an existing absolute file")
@@ -149,22 +227,23 @@ def install(project, config, executable, bundle=None):
     if not source.is_file() or source.is_symlink():
         raise InstallError("plugin skill bundle unavailable; installed wheels require --bundle")
     skill_bytes = source.read_bytes()
-    codex, hooks_path, agents, skills, skill_dir, skill_path, local, record = _paths(project)
-    _private_git_paths(project)
+    codex, hooks_path, agents, skills, skill_dir, skill_path, local, record = _paths(project, hooks_project)
+    _private_git_paths(project, hooks_project)
     command = shlex.join((str(executable), "--config", str(config), "hook"))
     groups = _hook_groups(command)
     if record.exists():
         saved = _json_file(record)
-        if (saved.get("project"), saved.get("config"), saved.get("executable"),
+        if (saved.get("project"), saved.get("hooks_project", saved.get("project")),
+                saved.get("config"), saved.get("executable"),
                 saved.get("skill_sha256"), saved.get("groups")) != (
-                str(project), str(config), str(executable), _digest(skill_bytes), groups):
+                str(project), str(hooks_project), str(config), str(executable), _digest(skill_bytes), groups):
             raise InstallError("existing installation has different parameters or skill")
         current = _json_file(hooks_path)
         current_hooks = _hooks(current)
         if (not skill_path.is_file() or _digest(skill_path.read_bytes()) != _digest(skill_bytes)
                 or any(current_hooks.get(event, []).count(group) != 1 for event, group in groups.items())):
             raise InstallError("installed hook or skill changed; inspect before reinstalling")
-        return {"status": "already_installed", "project": str(project), "hook_trust": "host_review_required"}
+        return _result("already_installed", project, hooks_project)
     if skill_path.exists() and skill_path.read_bytes() != skill_bytes:
         raise InstallError("project skill has different content")
     before = hooks_path.read_bytes() if hooks_path.exists() else None
@@ -177,7 +256,7 @@ def install(project, config, executable, bundle=None):
     after = _json_bytes(value)
     skill_created = not skill_path.exists()
     before_mode = stat.S_IMODE(hooks_path.stat().st_mode) if before is not None else None
-    saved = {"version": 1, "project": str(project), "config": str(config),
+    saved = {"version": 1, "project": str(project), "hooks_project": str(hooks_project), "config": str(config),
              "executable": str(executable), "groups": groups, "skill_sha256": _digest(skill_bytes),
              "skill_created": skill_created, "hooks_before": None if before is None else
              base64.b64encode(before).decode("ascii"), "hooks_before_mode": before_mode,
@@ -198,10 +277,10 @@ def install(project, config, executable, bundle=None):
             if skill_created:
                 skill_path.unlink(missing_ok=True)
         raise
-    return {"status": "installed", "project": str(project), "hook_trust": "host_review_required"}
+    return _result("installed", project, hooks_project)
 
 
-def uninstall(project):
+def uninstall(project, hooks_project=None):
     project = _canonical_project(project)
     _, hooks_path, _, _, _, skill_path, _, record = _paths(project)
     if not record.is_file():
@@ -209,6 +288,15 @@ def uninstall(project):
     saved = _json_file(record)
     if saved.get("version") != 1 or saved.get("project") != str(project):
         raise InstallError("installation record belongs to another project")
+    # Legacy v1 records predate worktree hook-source routing. Remove their
+    # original local installation without redirecting to the main checkout.
+    if "hooks_project" in saved:
+        recorded = _hooks_project(project, saved["hooks_project"])
+    else:
+        recorded = project
+    if hooks_project is not None and _canonical_project(hooks_project) != recorded:
+        raise InstallError("--hooks-project does not match the installation record")
+    _, hooks_path, _, _, _, skill_path, _, record = _paths(project, recorded)
     if not skill_path.is_file() or _digest(skill_path.read_bytes()) != saved.get("skill_sha256"):
         raise InstallError("installed skill changed; preserve user edits")
     value = _json_file(hooks_path)
@@ -234,12 +322,14 @@ def uninstall(project):
     if saved.get("skill_created"):
         skill_path.unlink()
     record.unlink()
-    return {"status": "uninstalled", "project": str(project)}
+    return _result("uninstalled", project, recorded)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
+    parser.add_argument("--hooks-project", help="explicit canonical Hook source project; linked "
+                        "worktrees require the corresponding main-checkout directory")
     parser.add_argument("--config")
     parser.add_argument("--executable")
     parser.add_argument("--bundle")
@@ -249,9 +339,9 @@ def main(argv=None):
         if args.action == "install":
             if not args.config or not args.executable:
                 parser.error("install requires --config and --executable")
-            result = install(args.project, args.config, args.executable, args.bundle)
+            result = install(args.project, args.config, args.executable, args.bundle, args.hooks_project)
         else:
-            result = uninstall(args.project)
+            result = uninstall(args.project, args.hooks_project)
     except InstallError as exc:
         parser.exit(1, str(exc) + "\n")
     print(json.dumps(result))

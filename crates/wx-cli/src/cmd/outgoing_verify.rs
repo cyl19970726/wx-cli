@@ -83,8 +83,12 @@ pub(super) fn verify(
         return Err(invalid("event has no exact full image asset").into());
     }
     let source = decode_image(&frozen_bytes)?;
-    let options = decrypt_options(binding, &attach_root)?;
     let dat = copy_encrypted_dat(state_dir, &attach_root, &selected)?;
+    let options = decrypt_options(
+        binding,
+        &attach_root,
+        wx_media::detect_dat_format(&dat) == Some(wx_media::DatFormat::V2),
+    )?;
     let decoded = wx_media::decrypt_dat(&dat, &options)
         .map_err(|_| invalid("event image could not be decrypted"))?;
     let image_data = if decoded.ext == "wxgf" {
@@ -133,24 +137,70 @@ fn event_md5<'a>(event: &'a Value, binding: &BindingView) -> Result<&'a str, Box
 fn decrypt_options(
     binding: &BindingView,
     attach_root: &Path,
+    requires_v2: bool,
 ) -> Result<wx_media::DatDecryptOptions, Box<dyn Error>> {
-    let store = wx_keychain::KeyStore::load_default()?;
-    let key = store
-        .get(&binding.account)
-        .and_then(|entry| entry.image_aes_key.as_deref())
-        .and_then(|hex_key| hex::decode(hex_key).ok())
-        .filter(|raw| raw.len() == 16);
-    let v2_aes_key = key.map(|raw| {
-        let mut fixed = [0_u8; 16];
-        fixed.copy_from_slice(&raw);
-        fixed
-    });
+    let v2_aes_key = if requires_v2 {
+        Some(image_verification_key(binding)?)
+    } else {
+        None
+    };
     let username_hash = format!("{:x}", wx_media::md5_hash(binding.talker.as_bytes()));
     let xor_key = wx_media::detect_xor_key(&attach_root.join(username_hash));
     Ok(wx_media::DatDecryptOptions {
         v2_aes_key,
         xor_key,
     })
+}
+
+fn select_image_key(
+    stored: Option<&str>,
+    derive: impl FnOnce() -> Result<[u8; 16], Box<dyn Error>>,
+) -> Result<[u8; 16], Box<dyn Error>> {
+    let Some(stored) = stored else {
+        return derive();
+    };
+    let bytes = hex::decode(stored)
+        .map_err(|_| invalid("configured V2 image key has invalid hex format"))?;
+    let key: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| invalid("configured V2 image key must decode to 16 bytes"))?;
+    Ok(key)
+}
+
+pub(super) fn image_verification_key(binding: &BindingView) -> Result<[u8; 16], Box<dyn Error>> {
+    // Read the selected account only. Verification must not migrate a key store,
+    // persist a derived key, or try another account's configuration.
+    let path = wx_keychain::KeyStore::default_path()
+        .map_err(|_| invalid("image verification credential store unavailable"))?;
+    let store = wx_keychain::KeyStore::load(&path)
+        .map_err(|_| invalid("image verification credential store unavailable"))?;
+    let stored = store
+        .get(&binding.account)
+        .and_then(|entry| entry.image_aes_key.as_deref());
+    select_image_key(stored, || {
+        let self_wxid = binding
+            .self_wxid
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("bound local identity is required for image verification"))?;
+        wx_media::key::derive_v2_key_for_account(
+            Path::new(&binding.source), &binding.account, self_wxid,
+        ).map_err(|_| invalid("V2 image key unavailable for the bound account; configure key set-image or repair its own account config").into())
+    })
+}
+
+pub(super) fn readiness(binding: &BindingView) -> Value {
+    if !binding.encrypted_snapshot || binding.self_wxid.as_deref().is_none_or(str::is_empty) {
+        return json!({"credential_ready":false,"reason":"encrypted account binding and local identity required","content_verification_complete":false});
+    }
+    match image_verification_key(binding) {
+        Ok(_) => {
+            json!({"credential_ready":true,"scope":"bound_account","content_verification_complete":false})
+        }
+        Err(error) => {
+            json!({"credential_ready":false,"reason":error.to_string(),"content_verification_complete":false})
+        }
+    }
 }
 
 fn copy_encrypted_dat(
@@ -245,6 +295,35 @@ fn compare_images(left: &DynamicImage, right: &DynamicImage) -> Option<(&'static
 mod tests {
     use super::*;
     use image::{GenericImageView, ImageFormat, Rgb, RgbImage};
+
+    #[test]
+    fn configured_image_key_is_exact_and_does_not_use_derivation() {
+        let selected = select_image_key(Some("6162636465666768696a6b6c6d6e6f70"), || {
+            panic!("configured key must not consult account config")
+        })
+        .unwrap();
+        assert_eq!(&selected, b"abcdefghijklmnop");
+        let key = select_image_key(None, || Ok(*b"bound-accountkey")).unwrap();
+        assert_eq!(&key, b"bound-accountkey");
+    }
+
+    #[test]
+    fn invalid_stored_key_refuses_without_echoing_or_falling_back() {
+        for input in ["not-a-valid-private-key", "aa", "", "aa00aa00aa00aa00"] {
+            let error = select_image_key(Some(input), || {
+                panic!("invalid configured key must not silently fall back")
+            })
+            .unwrap_err();
+            assert!(error.to_string().starts_with("configured V2 image key"));
+            if !input.is_empty() {
+                assert!(!error.to_string().contains(input));
+            }
+        }
+        assert!(select_image_key(None, || Err(
+            invalid("own account config unavailable").into()
+        ))
+        .is_err());
+    }
 
     fn sample() -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_fn(128, 96, |x, y| {

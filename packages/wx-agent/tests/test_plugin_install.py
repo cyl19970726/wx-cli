@@ -191,6 +191,212 @@ class PluginInstallTests(unittest.TestCase):
         self.assertEqual(self.hooks.read_bytes(), before)
         self.assertTrue(self.record.exists())
 
+    def git(self, root, *args):
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              text=True, check=True).stdout
+
+    def worktree(self):
+        main = self.root / "main checkout"
+        main.mkdir()
+        self.git(main, "init", "-q")
+        (main / ".gitignore").write_text("/.codex/hooks.json\n/.local/\n")
+        self.git(main, "add", ".gitignore")
+        self.git(main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+        self.project.rmdir()
+        self.git(main, "worktree", "add", "-q", "-b", "fixture-worktree", str(self.project))
+        return main
+
+    def tree_bytes(self, root):
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+    def test_linked_worktree_default_refuses_before_any_writes(self):
+        main = self.worktree()
+        before = self.tree_bytes(self.root)
+        with self.assertRaisesRegex(installer.InstallError, "shared Hook source.*no files written") as error:
+            self.install()
+        self.assertIn("--hooks-project", str(error.exception))
+        self.assertIn(str(main), str(error.exception))
+        self.assertEqual(self.tree_bytes(self.root), before)
+        self.assertFalse(self.hooks.parent.exists())
+        self.assertFalse(self.skill.parent.exists())
+        self.assertFalse(self.record.parent.exists())
+
+    def test_explicit_shared_hooks_merge_idempotence_and_uninstall_preserve_user_content(self):
+        main = self.worktree()
+        shared = main / ".codex" / "hooks.json"
+        shared.parent.mkdir()
+        existing = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "user-start"}]}]}}
+        shared.write_text(json.dumps(existing))
+        main_skill = main / ".agents" / "skills" / "wechat-inbox" / "SKILL.md"
+        main_skill.parent.mkdir(parents=True)
+        main_skill.write_text("main user skill")
+        result = self.install(hooks_project=main)
+        self.assertEqual(result["hooks_project"], str(main))
+        self.assertEqual(result["project"], str(self.project))
+        self.assertEqual(result["hooks_path"], str(shared))
+        self.assertEqual(result["skill_path"], str(self.skill))
+        self.assertEqual(result["record_path"], str(self.record))
+        self.assertTrue(result["shared_hook_source"])
+        self.assertFalse(self.hooks.exists())
+        self.assertFalse((main / ".local").exists())
+        self.assertEqual(json.loads(self.record.read_text())["hooks_project"], str(main))
+        before = self.tree_bytes(self.root)
+        self.assertEqual(self.install(hooks_project=main)["status"], "already_installed")
+        self.assertEqual(self.tree_bytes(self.root), before)
+        value = json.loads(shared.read_text())
+        self.assertEqual(len(value["hooks"]["SessionStart"]), 2)
+        value["description"] = "user added metadata"
+        value["hooks"]["SessionStart"].append({"hooks": [{"type": "command", "command": "later-start"}]})
+        value["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command": "later-stop"}]}]
+        shared.write_text(json.dumps(value))
+        saved = json.loads(self.record.read_text())
+        for event, group in saved["groups"].items():
+            value["hooks"][event].remove(group)
+            if not value["hooks"][event]:
+                del value["hooks"][event]
+        self.assertEqual(installer.uninstall(self.project)["hooks_project"], str(main))
+        self.assertEqual(json.loads(shared.read_text()), value)
+        self.assertEqual(main_skill.read_text(), "main user skill")
+        self.assertFalse(self.skill.exists())
+        self.assertFalse(self.record.exists())
+
+    def test_shared_hooks_restore_exact_original_bytes_and_keep_preexisting_skill(self):
+        main = self.worktree()
+        shared = main / ".codex" / "hooks.json"
+        shared.parent.mkdir()
+        original = b'{ "hooks": {}, "keep": true }\n'
+        shared.write_bytes(original)
+        shared.chmod(0o640)
+        source = self.bundle / ".agents" / "skills" / "wechat-inbox" / "SKILL.md"
+        self.skill.parent.mkdir(parents=True)
+        self.skill.write_bytes(source.read_bytes())
+        self.install(hooks_project=main)
+        installer.uninstall(self.project)
+        self.assertEqual(shared.read_bytes(), original)
+        self.assertEqual(shared.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.skill.read_bytes(), source.read_bytes())
+
+    def test_wrong_hook_roots_refuse_before_writes(self):
+        main = self.worktree()
+        other = self.root / "other repo"
+        other.mkdir()
+        self.git(other, "init", "-q")
+        sibling = self.root / "sibling worktree"
+        self.git(main, "worktree", "add", "-q", "-b", "sibling", str(sibling))
+        outside = self.root / "outside"
+        outside.mkdir()
+        alias = self.root / "main alias"
+        alias.symlink_to(main, target_is_directory=True)
+        for target in (other, sibling, outside, self.project, Path.home(), alias):
+            with self.subTest(target=target):
+                before = self.tree_bytes(main), self.tree_bytes(self.project), self.tree_bytes(other)
+                with self.assertRaises(installer.InstallError):
+                    self.install(hooks_project=target)
+                self.assertEqual((self.tree_bytes(main), self.tree_bytes(self.project),
+                                  self.tree_bytes(other)), before)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_shared_hook_symlink_refused_before_skill_or_record_writes(self):
+        main = self.worktree()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (main / ".codex").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(installer.InstallError, "symbolic link"):
+            self.install(hooks_project=main)
+        self.assertFalse(self.skill.parent.exists())
+        self.assertFalse(self.record.parent.exists())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_nested_worktree_requires_corresponding_main_project_directory(self):
+        main = self.worktree()
+        for root in (main, self.project):
+            (root / "module").mkdir()
+        nested = self.project / "module"
+        with self.assertRaisesRegex(installer.InstallError, "shared Hook source"):
+            installer.install(nested, self.config, self.executable, bundle=self.bundle)
+        with self.assertRaisesRegex(installer.InstallError, "corresponding"):
+            installer.install(nested, self.config, self.executable, bundle=self.bundle, hooks_project=main)
+        # Ignore rules apply to each installation path, including nested projects.
+        common = Path(self.git(main, "rev-parse", "--absolute-git-dir").strip())
+        (common / "info" / "exclude").write_text("**/.codex/hooks.json\n**/.local/\n")
+        result = installer.install(nested, self.config, self.executable, bundle=self.bundle,
+                                   hooks_project=main / "module")
+        self.assertEqual(result["hooks_project"], str(main / "module"))
+        installer.uninstall(nested)
+
+    def test_old_v1_record_without_hooks_project_uninstalls_in_linked_worktree(self):
+        main = self.worktree()
+        # Reconstruct the legacy local layout; the old installer had no source-root field.
+        command = shlex.join((str(self.executable), "--config", str(self.config), "hook"))
+        groups = installer._hook_groups(command)
+        after = installer._json_bytes({"hooks": {event: [group] for event, group in groups.items()}})
+        source = self.bundle / ".agents" / "skills" / "wechat-inbox" / "SKILL.md"
+        self.hooks.parent.mkdir()
+        self.hooks.write_bytes(after)
+        self.skill.parent.mkdir(parents=True)
+        self.skill.write_bytes(source.read_bytes())
+        self.record.parent.mkdir()
+        self.record.write_text(json.dumps({"version": 1, "project": str(self.project),
+            "groups": groups, "skill_sha256": installer._digest(source.read_bytes()),
+            "skill_created": True, "hooks_before": None, "hooks_before_mode": None,
+            "hooks_after_sha256": installer._digest(after)}))
+        shared = main / ".codex" / "hooks.json"
+        shared.parent.mkdir()
+        shared.write_text('{"hooks": {}, "keep": "main checkout"}\n')
+        before = self.tree_bytes(main)
+        local = json.loads(self.hooks.read_text())
+        user_group = {"hooks": [{"type": "command", "command": "user-added-start"}]}
+        local["hooks"]["SessionStart"].append(user_group)
+        local["description"] = "user-added metadata"
+        self.hooks.write_text(json.dumps(local))
+        result = installer.uninstall(self.project)
+        self.assertEqual(result["hooks_project"], str(self.project))
+        self.assertEqual(json.loads(self.hooks.read_text()), {
+            "hooks": {"SessionStart": [user_group]}, "description": "user-added metadata"})
+        self.assertFalse(self.skill.exists())
+        self.assertFalse(self.record.exists())
+        self.assertEqual(self.tree_bytes(main), before)
+
+    def test_record_cannot_redirect_uninstall_to_an_unrelated_project(self):
+        main = self.worktree()
+        self.install(hooks_project=main)
+        saved = json.loads(self.record.read_text())
+        saved["hooks_project"] = str(self.root)
+        self.record.write_text(json.dumps(saved))
+        before = self.tree_bytes(self.root)
+        with self.assertRaisesRegex(installer.InstallError, "corresponding"):
+            installer.uninstall(self.project)
+        self.assertEqual(self.tree_bytes(self.root), before)
+
+    def test_corresponding_path_cannot_be_a_different_nested_worktree(self):
+        main = self.worktree()
+        nested = self.project / "module"
+        nested.mkdir()
+        target = main / "module"
+        self.git(main, "worktree", "add", "-q", "-b", "nested-worktree", str(target))
+        before = self.tree_bytes(self.root)
+        with self.assertRaisesRegex(installer.InstallError, "corresponding checkout"):
+            installer.install(nested, self.config, self.executable, bundle=self.bundle,
+                              hooks_project=target)
+        self.assertEqual(self.tree_bytes(self.root), before)
+
+    def test_main_accepts_explicit_shared_hook_source(self):
+        main = self.worktree()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            installer.main(["--project", str(self.project), "--hooks-project", str(main),
+                            "--config", str(self.config), "--executable", str(self.executable),
+                            "--bundle", str(self.bundle)])
+        self.assertEqual(json.loads(output.getvalue())["hooks_project"], str(main))
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.main(["--project", str(self.project), "--action", "uninstall"])
+
+    def test_non_git_project_still_installs_without_git_available(self):
+        with mock.patch.object(subprocess, "run", side_effect=FileNotFoundError):
+            self.assertEqual(self.install()["status"], "installed")
+        installer.uninstall(self.project)
+
     def test_bundle_hooks_have_only_supported_events_and_local_bootstrap(self):
         package = self.bundle
         manifest = json.loads((package / ".codex-plugin" / "plugin.json").read_text())
