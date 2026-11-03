@@ -59,7 +59,7 @@ Rust 保存权威消息和业务状态。插件只保存连接、宿主路由及
 
 微信宿主运行采集和桌面执行器；Session 插件运行在有权接触原 Session 的宿主中。同机时可直接调用 CLI，异机时使用已认证连接。两者分别启动、停止、升级：通道安装不启动模型，插件安装不启用回复；Python 或插件升级不重建已授权的原生助手。
 
-候选已将提供商编排移入 `integrations/codex.py`，`inbox.py` 只在明确选择旧受管适配时惰性加载它，旧 Python 和 CLI 入口继续兼容。项目级 Hook 插件通过原生回调取得实际 Session/turn，`notify` 仅用宿主队列递送元数据，回合终结只读核对历史。拆分的源码与安装包检查覆盖禁用 Codex 导入的采集运行；原生宿主投递、原 Session 处理和断线恢复仍要以各自现场证据验收。
+候选已将提供商编排移入 `integrations/codex.py`，`inbox.py` 只在明确选择旧受管适配时惰性加载它，旧 Python 和 CLI 入口继续兼容。项目级 Hook 插件通过原生回调取得实际 Session/turn，`notify` 仅用宿主队列递送元数据，回合终结只读核对历史。拆分的源码与安装包检查覆盖禁用 Codex 导入的采集运行；原专用 native TUI Session 的入站处理已有有界实机闭环，其他宿主场景分别验收。
 
 ## 现有订阅入口可以独立使用
 
@@ -104,7 +104,7 @@ wx-agent inbox --config /ABS/private/conversations.json events \
 
 插件安装不默认开启回复或后台模型。Session 使用者可以主动查消息，也可以显式启用其插件监听。插件停止或 Session 离线时，通道仍能采集；一个 Session 不可用不应阻塞另一会话。
 
-跨宿主接入沿用相同通道合同。候选通过已认证 SSH 调用有应用凭据与会话范围的 RPC；Session 插件可选择相同 gateway 后端，微信数据库和 GUI 仍留在微信宿主。代码支持不等于跨宿主实测已通过，实际状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+跨宿主接入沿用相同通道合同。候选通过已认证 SSH 调用有应用凭据与会话范围的 RPC；Session 插件可选择相同 gateway 后端，微信数据库和 GUI 仍留在微信宿主。两个应用的异机发送及不同物理宿主的限定只读 inbox API 已分别实测；这还不是异机 Session 插件投递。证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
 
 ## 当前做到哪里，怎样验收
 
@@ -114,9 +114,11 @@ wx-agent inbox --config /ABS/private/conversations.json events \
 | 多会话 inbox 与处理决定 | 已实现；已有受管测试 Session 的真实入站决定 | 原 delivery、owner/epoch、来源和明确决定可核对 |
 | 共享文字发送及切会话 | 已有实机和用户独立收件确认 | 多会话并发入队、一次 attempt、正确目标、串行桌面 |
 | 现有 Codex 受管适配器 | 可选实验接入，支持自行持有的原 thread | 不等同于任意桌面 Session 的插件接入 |
-| 项目级原 Session 插件 | 候选已有原生 Hook、通知/回执分离及项目安装器，现场待验 | 需原 Session 收到通知、读取原批次并提交决定，忙/断线/重启不重复 |
-| 鉴权跨宿主接入 | 候选已有分应用 RPC、SSH 客户端和插件 gateway 后端，现场待验 | 需认证边界、断线积压与原 Session 重连实测 |
+| 项目级原 Session 插件 | 原专用 native TUI Session 路径有一次全新入站单回合实机闭环 | 精确 Hook、冻结事件读取、明确决定、原生与 Rust transport 均完成；桌面 App 持有的 Session 未验 |
+| 应用异机发送 | 两个应用各一次经受限鉴权 SSH 发送，用户独立确认 | 正确目标、内容及换行；越权、无 shell/PTY 探针通过 |
+| 异机只读 inbox API | 不同物理宿主的限定范围读取实测通过 | 正确入站可读、跨会话读取及发送均拒绝；未运行异机 Session 插件 |
+| 异机 Session 插件 | gateway 后端已有，现场闭环未验 | 仍需异机原 Session 收到通知、处理决定与断线恢复证据 |
 
-当前 CLI 的 `codex queue` 可以作为 Codex 插件宿主接口的候选，但它的退出成功可能只表示排队；`--resume` 失败也可能只给警告。已核对[官方命令文档](https://learn.chatgpt.com/docs/developer-commands)和安装版本的 help，尚无本项目原 Session 插件的完整投递、处理回执证据。不能用命令存在或返回成功标记此项通过。
+`codex queue` 退出成功仍只表示排队；插件以原生精确回调和同一 delivery 的业务决定核对实际处理。原专用 native TUI Session 已取得该闭环；不能仅凭 queue 返回值推广到桌面 App 持有的 Session 或异机 Session 插件。[官方命令文档](https://learn.chatgpt.com/docs/developer-commands)与安装版本 help 只说明命令接口。
 
-验收继续使用两套独立证据：通道订阅可以在完全没有模型连接时工作；插件先用合成通道验证忙闲、重复通知与断线，再在两个授权微信目标内核对端到端处理。项目安装与正常 Hook 信任流程、配置及命令见[Session 插件指南](SESSION_PLUGIN.md)。图片发送仍按本轮决定后置。
+验收继续区分底层订阅、鉴权 API、原 Session 处理和桌面发送；已通过的专用 TUI 路径不覆盖其他宿主或长期故障场景。项目安装与正常 Hook 信任流程、配置及命令见[Session 插件指南](SESSION_PLUGIN.md)。真实图片队列在聚焦阶段停止，原不明意图保留，尚无图片准备或提交证据。

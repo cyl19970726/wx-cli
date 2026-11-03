@@ -41,11 +41,13 @@ wx-agent-plugin-install \
 }
 ```
 
-必填字段为 `version`、`conversation_config`、`wx_agent`、`codex`、`bindings`，每个 binding 必须含示例中的六个字段。可选 `remote`、`remote_auth_token_env`、`resume_queued` 用于原生 `codex queue` 连接；`resume_queued` 默认 `false`，它是 queue 参数，不是插件直接调用 `thread/resume`。跨宿主 inbox 连接可选 `gateway_config` 与 `gateway_client`，**必须成对提供**；远端 gateway 的实机接入仍待验证。配置及凭据留在私有位置，不放入项目 Skill 或公开示例。
+必填字段为 `version`、`conversation_config`、`wx_agent`、`codex`、`bindings`，每个 binding 必须含示例中的六个字段。可选 `remote`、`remote_auth_token_env`、`resume_queued` 用于原生 `codex queue` 连接；`resume_queued` 默认 `false`，它是 queue 参数，不是插件直接调用 `thread/resume`。跨宿主 inbox 连接可选 `gateway_config` 与 `gateway_client`，**必须成对提供**。受限 SSH 网关的异机真实入站读取及范围拒绝已实测；由另一宿主的原 Session 完成插件处理仍需单独验收。配置及凭据留在私有位置，不放入项目 Skill 或公开示例。
 
 ## 运行与处理边界
 
 入口是 `wx-agent-plugin --config /ABS/private/plugin.json hook|notify|status`。项目 hook 把原生 JSON 从 stdin 交给 `hook`，并把原生 JSON 响应送回宿主。注册的事件是 `SessionStart`、`UserPromptSubmit`、`PostToolUse`，hook 超时 60 秒，附加上下文上限 1200。`SessionStart` 仅提示待办，不领取；`UserPromptSubmit` / `PostToolUse` 在实际回合中提供受限读取提示。插件不采用 `PreModelRequest` 注入正文、凭据或 lease token。
+
+原 Session 的工具权限须允许调用配置中的通道或受限网关。已有 Session 可能保留先前的权限范围；服务器启动选项不一定覆盖它。应通过宿主正常的会话权限设置核对实际访问，再启用通知。
 
 需要主动检查时，可运行：
 
@@ -66,4 +68,6 @@ wx-agent-plugin-runner --config /ABS/private/plugin.json --seconds 3600 --interv
 
 只有原 Session 的真实 `UserPromptSubmit` 回调携带完全匹配的 `WXCLI_DELIVERY_V1` 通知时，插件才把原生 turn 记录到 Rust。宿主回合终结和业务决定分别保存：Session 必须读取冻结的 delivery/events，并用原 lease 显式记录 `skip`、`defer`、`draft` 或 `reply`；最终模型文字不会自动发微信。owner、epoch 或原 Session 不符时停止处理，保留原记录。处理命令见[托管会话指南](MANAGED_CONVERSATIONS.md)。
 
-本轮单元与合成测试验证了包装、hook、通知状态机及 runner 的锁、停止和健康记录。当前授权项目的三个 hook 已经走完宿主正常原生信任流程；这不证明原桌面 Session 收到通知或处理入站。两个普通应用经受限 SSH 的单次发送回执已分别由用户确认，属于应用发件证据，不是插件投递证据。原 Session 入站处理与跨宿主插件投递仍待主 agent 实机验收。图片发送后置；状态与证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+独立 `thread/read` 可能把宿主仍在运行的回合投影为 `interrupted`。插件只接受精确原 thread/turn、终态状态及有效 `completedAt` 同时存在的完成证据；缺少完成时间时保留原 transport，不提前结案或排入另一个处理回合。
+
+当前实机验收覆盖专用原生 TUI 宿主持有的原 Session：新入站在同一自动回合内完成精确通知回调、冻结事件读取、一次 `skip` 决定及原生/Rust 双方终结，微信发送保持暂停。普通应用的受限 SSH 发件及独立收件、异机 inbox 读取均有各自证据。桌面 App 持有的原 Session、实际异机 Session 插件处理和图片队列仍分别保留未通过状态。详见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。

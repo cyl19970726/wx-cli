@@ -1182,6 +1182,45 @@ fn no_submit_artifacts(root: &Path, tid: &str, later_tid: &str) -> Result<(), Bo
     Ok(())
 }
 
+fn no_image_prepare_artifacts(
+    root: &Path,
+    tid: &str,
+    later_tid: &str,
+) -> Result<(), Box<dyn Error>> {
+    let permitted = [
+        format!("{tid}.client-result.json"),
+        format!("{tid}-inspect.inspect.job.json"),
+        format!("{tid}-inspect.result.json"),
+        format!("{tid}-focus.focus-group.job.json"),
+        format!("{tid}-focus.focus-private.job.json"),
+        format!("{tid}-focus.result.json"),
+        format!("{tid}-focus.focus-attempted.json"),
+        format!("{tid}-focus.before-search-click.png"),
+        format!("{tid}-focus.before-search-select.png"),
+        format!("{tid}-focus.before-search-paste.png"),
+        format!("{tid}-focus.before-search-copy.png"),
+        format!("{tid}-focus.search-copy-ready.png"),
+        format!("{tid}-focus.focus-initial.png"),
+        format!("{tid}-focus.focus-search-result-main.png"),
+        format!("{tid}-focus.focus-search-result-confirm.png"),
+        format!("{tid}-focus.focus-polls.json"),
+    ];
+    for entry in fs::read_dir(root)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!("{later_tid}."))
+            || name.starts_with(&format!("{later_tid}-"))
+            || ((name.starts_with(&format!("{tid}.")) || name.starts_with(&format!("{tid}-")))
+                && !permitted.iter().any(|allowed| name == allowed.as_str()))
+        {
+            return Err(invalid(
+                "image prepare, submit or later attempt artifact exists",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn abandon_unsent(
     root: &Path,
     id: i64,
@@ -1257,7 +1296,8 @@ fn abandon_unsent(
     if intent_status != "indeterminate"
         || intent_attempt != expected_attempt
         || intent_evidence.as_deref() != Some(evidence.as_str())
-        || kind != "text"
+        || !matches!(kind.as_str(), "text" | "image")
+        || kind == "image" && expected_attempt != 1
     {
         return Err(invalid(
             "outbox current attempt or content does not match review",
@@ -1293,25 +1333,55 @@ fn abandon_unsent(
         || report["channel_id"] != b.channel_id
         || report["session_id"] != b.session_id
         || report["status"] != "indeterminate"
-        || !stages.contains(&report["stage"].as_str().unwrap_or(""))
+        || (kind == "text" && !stages.contains(&report["stage"].as_str().unwrap_or("")))
+        || (kind == "image" && report["stage"] != "inspected")
+        || (kind == "image"
+            && [
+                "media_prepared",
+                "media_submitted",
+                "event_cursor",
+                "focus_evidence_id",
+                "focus_category",
+                "recovery_from_attempt",
+            ]
+            .iter()
+            .any(|key| report.get(key).is_some()))
     {
         return Err(invalid("attempt evidence does not prove a pre-submit stop"));
     }
     let base_tid = tid.split("-a").next().unwrap_or(&tid);
     let later_tid = format!("{base_tid}-a{}", expected_attempt + 1);
-    no_submit_artifacts(root, &tid, &later_tid)?;
+    if kind == "image" {
+        no_image_prepare_artifacts(root, &tid, &later_tid)?;
+    } else {
+        no_submit_artifacts(root, &tid, &later_tid)?;
+    }
     let channel = load_binding(&b.state)?;
-    let payload = serde_json::to_vec(&json!({
-        "protocol_version":1,
-        "request_id":request,
-        "attempt_number":expected_attempt+1,
-        "recovery_from_attempt":expected_attempt,
-        "channel_id":b.channel_id,
-        "session_id":b.session_id,
-        "account":channel.account,
-        "talker":channel.talker,
-        "text":text,
-    }))?;
+    let payload = if kind == "image" {
+        serde_json::to_vec(&json!({
+            "protocol_version":1,
+            "abandon_protocol_version":1,
+            "content_kind":"image",
+            "request_id":request,
+            "attempt_number":expected_attempt,
+            "channel_id":b.channel_id,
+            "session_id":b.session_id,
+            "account":channel.account,
+            "talker":channel.talker,
+        }))?
+    } else {
+        serde_json::to_vec(&json!({
+            "protocol_version":1,
+            "request_id":request,
+            "attempt_number":expected_attempt+1,
+            "recovery_from_attempt":expected_attempt,
+            "channel_id":b.channel_id,
+            "session_id":b.session_id,
+            "account":channel.account,
+            "talker":channel.talker,
+            "text":text,
+        }))?
+    };
     let driver = b.state.join("conversation-sender");
     let meta = fs::symlink_metadata(&driver)?;
     if !meta.is_file()
@@ -1323,29 +1393,65 @@ fn abandon_unsent(
             "registered sender driver is not private and executable",
         ));
     }
-    super::outgoing::check_recovery_capabilities(&driver, Duration::from_secs(20))?;
-    super::outgoing::check_recovery_preflight(
-        &driver,
-        &payload,
-        Duration::from_secs(25),
-        Some(lock.as_raw_fd()),
-    )?;
-    no_submit_artifacts(root, &tid, &later_tid)?;
+    if kind == "image" {
+        super::outgoing::check_image_abandon_capabilities(&driver, Duration::from_secs(20))?;
+        super::outgoing::check_image_abandon_preflight(
+            &driver,
+            &payload,
+            Duration::from_secs(25),
+            lock.as_raw_fd(),
+        )?;
+        no_image_prepare_artifacts(root, &tid, &later_tid)?;
+    } else {
+        super::outgoing::check_recovery_capabilities(&driver, Duration::from_secs(20))?;
+        super::outgoing::check_recovery_preflight(
+            &driver,
+            &payload,
+            Duration::from_secs(25),
+            Some(lock.as_raw_fd()),
+        )?;
+        no_submit_artifacts(root, &tid, &later_tid)?;
+    }
     if fs::read(&evidence_path)? != report_bytes {
         return Err(invalid("attempt report changed during driver proof"));
     }
-    let current: (String, i64, Option<String>) = outbox.query_row(
-        "SELECT status,attempt_number,result_evidence FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+    let current: (String, i64, Option<String>, String) = outbox.query_row(
+        "SELECT status,attempt_number,result_evidence,content_kind FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
         params![request,b.channel_id,b.session_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     )?;
     if current.0 != "indeterminate"
         || current.1 != expected_attempt
         || current.2.as_deref() != Some(evidence.as_str())
+        || current.3 != kind
     {
         return Err(invalid("outbox attempt changed during driver proof"));
     }
+    if kind == "image" {
+        let attempt_evidence: String = outbox.query_row(
+            "SELECT result_evidence FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=?2 AND status='indeterminate'",
+            params![request, expected_attempt],
+            |r| r.get(0),
+        )?;
+        if attempt_evidence != evidence {
+            return Err(invalid(
+                "image attempt evidence changed during driver proof",
+            ));
+        }
+    }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if kind == "image" {
+        let latest_identity: (String, String) = tx.query_row(
+            "SELECT conversation_id,request_id FROM dispatch WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if latest_identity != (conversation.clone(), request.clone()) {
+            return Err(invalid(
+                "image scheduler identity changed during driver proof",
+            ));
+        }
+    }
     let latest: (String, Option<String>) = tx.query_row(
         "SELECT status,result FROM dispatch WHERE id=?1",
         [id],

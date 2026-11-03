@@ -86,6 +86,50 @@ if sys.argv[1:] == ['--recovery-capabilities']:
         print(json.dumps({'protocol_version':1,'recovery_protocol_version':1,
                           'pre_submit_proof_required':True}))
     sys.exit(0)
+if sys.argv[1:] == ['--abandon-capabilities']:
+    capability={'protocol_version':1,'abandon_protocol_version':1,
+                'image_before_prepare_only':True,'pre_submit_proof_required':True}
+    if (root/'deny-abandon-capability').exists():
+        capability['image_before_prepare_only']=False
+    if (root/'malformed-abandon-capability').exists():
+        capability['unexpected']=True
+    if (root/'missing-abandon-capability').exists():
+        capability={'unsupported':True}
+    print(json.dumps(capability))
+    sys.exit(0)
+if sys.argv[1:] == ['--abandon-preflight']:
+    (root/'abandon-payload-received').write_text('yes')
+    candidate=json.load(sys.stdin)
+    if (root/'missing-abandon-proof').exists():
+        sys.exit(0)
+    if (root/'deny-abandon-proof').exists():
+        print(json.dumps({'protocol_version':1,'abandon_protocol_version':1,
+                          'unsent_proven':False,'before_prepare':True}))
+        sys.exit(0)
+    if (root/'malformed-abandon-proof').exists():
+        print(json.dumps({'protocol_version':1,'abandon_protocol_version':1,
+                          'unsent_proven':True,'before_prepare':True,'extra':True}))
+        sys.exit(0)
+    identity=candidate['channel_id']+'\\0'+candidate['request_id']
+    import hashlib
+    tid='send-'+hashlib.sha256(identity.encode()).hexdigest()[:48]
+    ui=root/'ui'
+    report=json.loads((ui/(tid+'.client-result.json')).read_text())
+    exact=set(candidate)=={'protocol_version','abandon_protocol_version','content_kind',
+                           'request_id','attempt_number','channel_id','session_id','account','talker'}
+    valid=(exact and candidate['protocol_version']==1 and candidate['abandon_protocol_version']==1
+           and candidate['content_kind']=='image' and candidate['attempt_number']==1
+           and report['id']==tid and report['request_id']==candidate['request_id']
+           and report['stage']=='inspected' and report['status']=='indeterminate'
+           and report['error']=='Search popup not enumerated by ScreenCaptureKit within six seconds'
+           and (ui/(tid+'-inspect.result.json')).is_file()
+           and (ui/(tid+'-focus.result.json')).is_file()
+           and (ui/(tid+'-focus.focus-attempted.json')).stat().st_size==0)
+    if not valid:
+        sys.exit(3)
+    print(json.dumps({'protocol_version':1,'abandon_protocol_version':1,
+                      'unsent_proven':True,'before_prepare':True}))
+    sys.exit(0)
 if sys.argv[1:] == ['--dispatch-preflight']:
     os.fstat(int(os.environ['WX_DESKTOP_LOCK_FD']))
     print(json.dumps({'ready':not (root/'deny-preflight').exists()}))
@@ -477,6 +521,105 @@ print(json.dumps({'status':status,'evidence':'synthetic local observation'}))
                          okay=False)
         self.assertEqual(self.outbox("private", "show", "--request-id", "unknown-image-abandon")
                          ["status"], "indeterminate")
+
+    def test_image_abandon_requires_first_attempt_complete_pre_prepare_proof(self):
+        from wx_agent import dispatch
+        channel = self.channels["group"]
+        request = "unknown-image-inspected"
+        queued = self.queue("group", request, image=True)
+        dispatch.drain(BINARY, self.ui)
+        identity = hashlib.sha256((channel["binding"]["channel_id"] + "\0" + request).encode()).hexdigest()[:48]
+        tid = "send-" + identity
+        evidence = self.ui / (tid + ".client-result.json")
+        report = {"id": tid, "request_id": request, "attempt_number": 1,
+                  "channel_id": channel["binding"]["channel_id"],
+                  "session_id": channel["binding"]["session_id"],
+                  "status": "indeterminate", "stage": "inspected",
+                  "error": "Search popup not enumerated by ScreenCaptureKit within six seconds"}
+        evidence.write_text(json.dumps(report)); evidence.chmod(0o600)
+        artifacts = {
+            tid + "-inspect.inspect.job.json": {"id": tid + "-inspect", "action": "inspect"},
+            tid + "-inspect.result.json": {"id": tid + "-inspect", "ok": True, "action": "inspect"},
+            tid + "-focus.focus-group.job.json": {"id": tid + "-focus", "action": "focus-group"},
+            tid + "-focus.result.json": {"id": tid + "-focus", "ok": False,
+                                          "error": report["error"]},
+        }
+        for name, value in artifacts.items():
+            path = self.ui / name
+            path.write_text(json.dumps(value)); path.chmod(0o600)
+        marker = self.ui / (tid + "-focus.focus-attempted.json")
+        marker.touch(mode=0o600)
+        for suffix in (
+            "focus-initial.png", "before-search-click.png", "before-search-select.png",
+            "before-search-paste.png", "before-search-copy.png", "search-copy-ready.png",
+            "focus-search-result-main.png",
+        ):
+            path = self.ui / (tid + "-focus." + suffix)
+            path.write_bytes(PNG); path.chmod(0o600)
+        polls = self.ui / (tid + "-focus.focus-polls.json")
+        polls.write_text(json.dumps([{"windowCount": 1, "popupPresent": False,
+                                      "popupSelected": False}])); polls.chmod(0o600)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_attempt SET result_evidence=? WHERE request_id=? AND attempt_number=1",
+                       (str(evidence), request))
+            db.execute("UPDATE outgoing_intent SET result_evidence=? WHERE request_id=?",
+                       (str(evidence), request))
+        command = ("dispatch", "abandon-unsent", "--dispatch-id", queued["dispatch_id"],
+                   "--expected-attempt", 1, "--reason", "reviewed image before prepare only")
+        def refused_with_file(name, content="flag"):
+            path = self.root / name
+            path.write_text(content)
+            try:
+                self.coordinator(*command, okay=False)
+            finally:
+                path.unlink()
+        for name in ("missing-abandon-capability", "deny-abandon-capability",
+                     "malformed-abandon-capability"):
+            refused_with_file(name)
+            self.assertFalse((self.root / "abandon-payload-received").exists())
+        for name in ("missing-abandon-proof", "deny-abandon-proof", "malformed-abandon-proof"):
+            refused_with_file(name)
+        self.coordinator("dispatch", "abandon-unsent", "--dispatch-id", queued["dispatch_id"],
+                         "--expected-attempt", 2, "--reason", "wrong image attempt", okay=False)
+        for change in ({"stage": "prepared"}, {"media_prepared": {"spoof": True}},
+                       {"media_submitted": {"spoof": True}}):
+            altered = dict(report, **change)
+            evidence.write_text(json.dumps(altered))
+            self.coordinator(*command, okay=False)
+        evidence.write_text(json.dumps(report))
+        for name in (tid + ".prepare-visual.job.json", tid + ".visual-state.json",
+                     tid + ".submit-visual.result.json", tid + "-a2.client-result.json"):
+            path = self.ui / name
+            path.write_text("{}"); path.chmod(0o600)
+            try:
+                self.coordinator(*command, okay=False)
+            finally:
+                path.unlink()
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_intent SET content_kind='text' WHERE request_id=?", (request,))
+        self.coordinator(*command, okay=False)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            db.execute("UPDATE outgoing_intent SET content_kind='image' WHERE request_id=?", (request,))
+        before = self.outbox("group", "show", "--request-id", request)
+        self.assertEqual((before["status"], before["attempt_number"]), ("indeterminate", 1))
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            attempts_before = db.execute("SELECT status,result_evidence FROM outgoing_attempt WHERE request_id=?",
+                                         (request,)).fetchall()
+        result = self.coordinator(*command)
+        self.assertEqual((result["status"], result["outbox_status"], result["attempt_number"]),
+                         ("done", "indeterminate", 1))
+        self.assertEqual(self.outbox("group", "show", "--request-id", request), before)
+        with sqlite3.connect(channel["state"] / "outgoing.sqlite3") as db:
+            self.assertEqual(db.execute("SELECT status,result_evidence FROM outgoing_attempt WHERE request_id=?",
+                                        (request,)).fetchall(), attempts_before)
+        self.assertEqual(self.coordinator("dispatch", "status")["dispatches"][0]["result"],
+                         "abandoned_pre_submit")
+        self.coordinator("dispatch", "review", "--reason", "synthetic image proof reviewed")
+        focus = self.coordinator("enqueue-focus", "--conversation-id", channel["id"],
+                                 "--operation-id", "new-distinct-focus", "--expected-epoch", channel["epoch"])
+        claimed = self.coordinator("dispatch", "claim", "--worker", "synthetic-focus-worker")
+        self.assertEqual((claimed["dispatch_id"], claimed["operation"]),
+                         (focus["dispatch_id"], "focus"))
 
     def test_reviewed_old_focus_does_not_block_new_send(self):
         from wx_agent import dispatch

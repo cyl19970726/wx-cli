@@ -4,7 +4,7 @@
 
 2026-11-03 边界澄清：wx-cli 提供通道订阅、持久消息/待办与发送能力；Session 通过独立插件消费这些能力，由插件使用 Agent 宿主接口通知原 Session。本文的 SessionAdapter 属于接入侧，不能成为微信订阅的必需依赖。当前实现、后续拆分及独立验收见[订阅与 Session 插件合同](CHANNEL_SUBSCRIPTIONS.md)。
 
-同日补充：普通业务应用也是通道调用方，可以独立提交群通知，复用 outbox 和共享发送队列，不需要 Session 或订阅。应用发送身份与收件业务 owner 应分开表达；当前可信同机 CLI 可复用已有授权，独立远程应用的鉴权发送 API 尚未实现。
+同日补充：普通业务应用也是通道调用方，可以独立提交群通知，复用 outbox 和共享发送队列，不需要 Session 或订阅。应用发送身份与收件业务 owner 应分开表达；独立应用的鉴权发送入口见[应用接入指南](APPLICATION_CLIENT.md)，各宿主的实际结果见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)，不从本方案基线推断验收状态。
 
 ## 2026-11-03 后续执行顺序
 

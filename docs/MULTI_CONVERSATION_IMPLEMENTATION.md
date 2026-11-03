@@ -1,22 +1,22 @@
 # 多会话实施与验收记录（更新至 2026-11-03）
 
-实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前运行候选为 `c61ab03`；文字队列与独立收件在 `c8f0f0c` 取得，后续候选未重复发送。Candidate 3 固定二进制 SHA-256 仍为 `5e2e47ef08789e2eb91dc9388ea11f8e294325127955d877f00a550807946787`。本页区分代码、离线检查、真实读取、受管 Session、GUI 和独立收件证据；旧失败作为历史保留。当前两个授权目标均为 `push/observe`，桌面发送暂停，无运行中的 worker。原文字的历史验收不自动覆盖新增队列；不合并、不发布、不向非测试业务群发送。
+实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前已启用 `d2a0dae` 的完成时间防护，包含此前核心 `36ec086` 与前台 runner `09ea8be`；原生助手未重建。Candidate 3 固定二进制 SHA-256 仍为 `5e2e47ef08789e2eb91dc9388ea11f8e294325127955d877f00a550807946787`。本页区分代码、离线检查、真实读取、Session、GUI 和独立收件证据；旧失败作为历史保留。新版已有原专用 native TUI Session 的全新入站单回合处理及正确传输终态证据；它不覆盖桌面 App 持有的 Session 或实际异机插件。图片聚焦失败的限定归档仅有未提交、未部署的代码候选，原不明 attempt 保留。两个授权目标已恢复 `push/observe`，全局桌面发送暂停；不合并、不发布、不向非测试业务群发送。
 
-最新架构决策：wx-cli 独立提供群订阅和消息投递能力，普通应用可发布通知，Session 经 plugin 消费订阅。当前源码候选已分离旧 Codex 适配、增加应用 `publisher_id`、项目级原生 Hook 插件和鉴权 RPC/SSH 客户端。通道与宿主仍分别验收：下述已安装 `c61ab03` 的历史实机记录不代表新插件或跨宿主接入已通过，后续现场证据单列。
+最新架构决策：wx-cli 独立提供群订阅和消息投递能力，普通应用可发布通知，Session 经 plugin 消费订阅。当前源码已分离旧 Codex 适配、增加应用 `publisher_id`、项目级原生 Hook 插件、鉴权 RPC/SSH 客户端及有界前台通知 runner。通道与宿主分别验收：原专用 native TUI Session 路径已有新版全新入站闭环；不同物理宿主的只读 inbox API 已通过限定范围的实机检查；桌面 App 持有的原 Session 和实际异机 Session 插件投递仍未通过。
 
 ## 分批状态
 
 | 批次 | 已有证据 | 未关闭的验收 |
 | --- | --- | --- |
-| P0 图片/文字基线 | 复用图片、生命周期和恢复修复。私聊与测试群文字、测试群四色合成图片曾获独立收件确认；图片源事件 cursor 49。Candidate 3 当前固定安装版本见上方摘要。 | 旧私聊图片尝试仍保留不明状态；真实图片队列尚无成功像素回读及自动完成证据，图片验收后置。 |
+| P0 图片/文字基线 | 复用图片、生命周期和恢复修复。私聊与测试群文字、测试群四色合成图片曾获独立收件确认；图片源事件 cursor 49。Candidate 3 当前固定安装版本见上方摘要。 | 旧私聊图片尝试仍保留不明状态；新的真实图片队列尝试在原生聚焦阶段停止、未准备媒体或提交。限定归档候选尚未部署，也不提供图片恢复或重试。 |
 | P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现；两个授权 channel 并发增量读取成功。最新跨会话入队时，私聊读取与群发送并行。有界接管隔离检查 `complete=true`：同目标双并发 takeover 只有一个 CAS 成功，另一会话读取成功且绑定未变；旧/接管中/迟到发送均被代际拒绝，未产生意图、attempt 或桌面效果；正确 handback 恢复原 owner、`push/observe`、Session 引用和处理水位。 | 人工出站检测的现场复验及更广故障场景仍未闭合；单次有界接管检查不等于长期并发验收。 |
-| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch，含来源代际、batch 顺序、优先级、到期及未知结果保护。最新同群 Q2/Q3 各一次 attempt、`ui_observed`，源 cursor 51/52，第二执行器返回 busy；跨会话队列按 dispatch 22 私聊、23 群串行完成，各一次 attempt，源 cursor 12/54。用户独立确认两组文字的目标、顺序、内容、换行和 emoji 正确；重复 ID 未增加 attempt。 | 图片队列尚未成功；这些有界场景不替代更广故障注入或长期运行验收。 |
-| P3 inbox/Session | Rust 已有持久批次、处理租约及显式决定；旧受管实验取得私聊 delivery 1 skip、2 defer、群 delivery 4 skip 且 transport turn completed。底层订阅已实测重读且不自动确认。当前源码候选已增加项目原生 Hook、通知/回合/业务结果分离及 scoped gateway 后端的离线检查。 | 原 Session 的真实 Hook 投递及跨宿主现场闭环仍待核验；私聊 delivery 3 保留。底层历史重读和离线检查不冒称新插件实机通过。 |
-| P4 运行验收 | `c61ab03` 四项 CI、本地全套 Rust、Python 检查及 Mac mini Python 3.9 安装包检查通过；短时双目标采集、监听竞争与停止健康实测通过。文字队列、独立收件及接管隔离保留各自版本证据。 | 更广现场故障注入仍未闭合；完整 24 小时观察已取消，不作为本轮等待条件，也不宣称通过。 |
+| P2 共享发送 | 文字/图片/focus 共用 Rust dispatch，含来源代际、batch 顺序、优先级、到期及未知结果保护。最新同群 Q2/Q3 各一次 attempt、`ui_observed`，源 cursor 51/52，第二执行器返回 busy；跨会话队列按 dispatch 22 私聊、23 群串行完成，各一次 attempt，源 cursor 12/54。用户独立确认两组文字的目标、顺序、内容、换行和 emoji 正确；重复 ID 未增加 attempt。 | 图片队列尚未成功；当前图片不明调度挡住新 focus 领取，新 focus 虽已排队却未执行。这些有界场景不替代更广故障注入或长期运行验收。 |
+| P3 inbox/Session | Rust 持久批次、处理租约和明确决定已有；底层订阅可重读。`d2a0dae` 的三个项目 Hook 已通过正常原生信任。全新入站在**原专用 native TUI Session** 一个自动回合完成精确回调、冻结 `show/events` 读取和 `skip`；Rust transport 与带完成时间的原生 turn 均为 `completed`，无需操作员恢复，正式私有验收报告 12 项均通过。另一个物理宿主凭限定只读凭据通过真实 SSH 读取该入站，越界读取与发送被拒绝。 | 旧 delivery 的 Rust `interrupted` 历史异常保持原样；只读异机 inbox API 不等于异机 Session 插件投递。桌面 App 持有的业务 Session、实际异机插件路径未通过，私聊旧 pending 保留。 |
+| P4 运行验收 | `36ec086`、`09ea8be`、`d2a0dae` 均四项 CI 通过；前者 Rust 861 passed/11 ignored、脚本 130 passed、最终安装包 184 passed；后两阶段本地及 Mini Python 3.9 安装包分别 193/195 passed、脚本各 130 passed。`d2a0dae` 已启用且未重建原生助手。两普通应用受限 SSH 发送及独立收件确认有实机证据；中性采集与新 runner 的 300 秒有界运行均正常退出码 0，所属子进程已退出。 | 实际异机插件投递、桌面 App 持有的 Session、真实图片队列及更广现场故障场景未闭合。完整 24 小时观察已取消，不宣称通过。 |
 
 ## 工程验证
 
-文字验收候选 `c8f0f0c` 的 [CI 41482737801](https://github.com/cyl19970726/wx-cli/actions/runs/41482737801) 四项成功。当前代码 `c61ab03` 的 [CI 41572232120](https://github.com/cyl19970726/wx-cli/actions/runs/41572232120) 四项也成功：Rust、Python 3.9、Python 3.12、Swift。本轮本地及 Mac mini 结果如下。本地 Python 3.9 的早期 `ensurepip` SIGABRT 不计作产品测试；本轮已在 Mac mini 的 Python 3.9.6 运行当前源码和安装包检查。
+文字验收候选 `c8f0f0c` 的 [CI 41482737801](https://github.com/cyl19970726/wx-cli/actions/runs/41482737801) 四项成功。`c61ab03` 的 [CI 41572232120](https://github.com/cyl19970726/wx-cli/actions/runs/41572232120)、`36ec086` 的 [CI 41583448361](https://github.com/cyl19970726/wx-cli/actions/runs/41583448361)、`09ea8be` 的 [CI 41588767586](https://github.com/cyl19970726/wx-cli/actions/runs/41588767586) 和 `d2a0dae` 的 [CI 41590868934](https://github.com/cyl19970726/wx-cli/actions/runs/41590868934) 均四项成功。下表是 `c61ab03` 历史检查；新版本的精确计数见后面的 2026-11-03 更新。本地 Python 3.9 早期 `ensurepip` SIGABRT 不计作产品测试。
 
 | 检查 | 实际结果 |
 | --- | --- |
@@ -133,6 +133,34 @@ GUI 验收期间的源码核查发现：`--no-wait` 在冻结新 outbox 意图�
 
 Mac mini 独立构建安装 `c61ab03` 后，两个授权目标的全部绑定、consumer、outbox/attempt、delivery、dispatch 和 surface 行保持一致，原生助手未重建或替换。随后进行约 5 秒的 collector-only 实测：不传 Session 配置、不启动模型、不发送；两个目标采集无错误。第二监听器被拒绝且未覆盖原实例健康。主进程正常退出码 0，最终 `run_state=stopped`，collector/executor 均不存活、executor 退出码 0；原 delivery/turn、attempt、intent 和 consumer 保留，发送暂停保持。此结果覆盖生命周期，不是新入站业务处理或持续运行成绩。
 
+## 2026-11-03 应用发件、原 Session 恢复与 runner 分阶段检查
+
+`36ec086` 的 [CI 41583448361](https://github.com/cyl19970726/wx-cli/actions/runs/41583448361) 四项成功；Rust 完整测试 **861 passed、11 原有 ignored**，仓库脚本 **130 passed**，最终安装 wheel **184 passed**。`09ea8be` 增加前台通知 runner，已提交推送；本地安装包 **193 passed**、脚本 **130 passed**，Mini Python 3.9 安装包 **193 passed**、脚本 **130 passed**，未重建原生助手；[CI 41588767586](https://github.com/cyl19970726/wx-cli/actions/runs/41588767586) 四项成功。
+
+两个普通应用分别通过强制命令、限定范围且已鉴权的 SSH 通道提交文字。各自只有一次出站 attempt，结果为 `ui_observed`；用户逐项独立确认目标、内容及换行正确且各收到一次。鉴权拒绝、跨范围拒绝、读取拒绝、无 shell 与无 PTY 探针通过。这是**应用发件及安全边界**的有界实机证据，不代表 Session 插件跨宿主投递通过。三个项目 Hook 均已通过宿主正常原生信任流程，不代表 Hook 回调必然完成业务决定。
+
+原测试群的专用 native TUI Session 已收到一条新入站对应的通知，并在原生回合中成功读取该 delivery 冻结的 `show/events` 范围。首次 `complete` 因该旧 Session 持久化的工作区写入范围为空、网络权限关闭而返回 `result_unknown`。对**当前测试 Session**正常调整权限后，操作员沿原 Session、原 delivery ID 与 lease 续接，明确提交 `skip`；Rust 保留最初原生 turn，传输状态最终 `completed`，后续恢复回合亦有终结证据。此项标为**原 Session 恢复成功**，不能写成无人工介入的单回合自动处理成功；未知结果没有通过替换 ID、租约或 Session 清除。私聊旧 pending 仍保留。
+
+其后的全新测试入站由中性采集与新 runner 捕获，在原群专用 native TUI Session 的**同一个实际原生回合**收到精确回调，自动读取冻结的 `show/events` 并成功提交 `skip`；没有操作员续接这次业务决定。独立终态读取随后证实该原生 turn 为 `completed`、宿主仍存活，但 Rust transport 曾把它记为 `interrupted`。**保留原 delivery 的错误传输状态，不直接改数据库，也不据此宣称 P3 完整通过。**图片预检为 ready，但本阶段没有新的图片发送尝试；桌面 App 持有的原业务 Session、实际异机插件投递及真实图片队列仍未通过。完整 24 小时观察已取消，不作为等待条件或验收成绩。
+
+### 原生终态读取修复与独立回归（2026-11-03）
+
+独立诊断在**同一个原 Session** 执行有界的本地等待回合，不读取 inbox，也不操作微信：宿主回合仍活跃时，独立 `thread/read` 返回 `interrupted` 且 `completedAt` 为空，`d2a0dae` 读者保守返回 `unknown`；实际原生回合完成并出现完成时间后，同一读者返回 `completed`。该源码修复已提交推送，本地与 Mini 的仓库脚本各 **130 passed**、已安装 wheel 各 **195 passed**。[CI 41590868934](https://github.com/cyl19970726/wx-cli/actions/runs/41590868934) 四项成功。
+
+Mini 已启用完整 `d2a0dae` 运行时；两个授权目标的全部账本经升级前后逻辑及字节核对保持不变，固定原生助手、应用 gateway 策略和凭据未变。项目 Hook 可执行文件按本安装器范围正常卸载并重装到新版，三个 Hook 已通过宿主正常原生信任审查。旧入站的业务 `skip` 与原生完成证据保留，Rust 历史 `interrupted` 未被手工修正。
+
+在新版运行时上，另一个全新入站经原专用 native TUI Session 自动处理：原生 Hook 精确关联同一回合，模型只读冻结的 `show/events`，各项读取及 `complete` 均成功返回并保存 `skipped`；原 lease 已释放，Rust transport 与原生 turn 最终均为 `completed`，后者有完成时间，全程无操作员恢复。正式私有报告的 **12 项检查均通过**，因此**受管原专用 native TUI Session 路径**取得一次完整实机闭环；此前的恢复案例和误记案例仍各自保留，不以新成功覆盖历史。中性采集与新 runner 的 300 秒有界运行均正常结束、退出码 0，所属子进程已退出；原宿主在完成后按正常流程停止。桌面 App 持有的原业务 Session 与实际不同宿主的 Session 插件投递仍未验收。
+
+不同物理宿主的本地控制端使用仅有 `session_accept` 范围的凭据，经真实受限 SSH 访问 Mini 的 inbox API：可读取上述全新入站的冻结事件；错误私聊会话范围的读取被拒，`send_text` 被 `permission_denied` 拒绝，主机名核对证明确为不同机器。私有实机报告的检查均为 true。这证明**异机只读 inbox API 与范围隔离**，没有在控制端运行 Session 插件、领取或完成该 delivery，不能宣称跨宿主 Session 投递通过。
+
+真实图片队列随后用合成多色 PNG 和配文开始有界尝试。图片 attempt 1 在**原生聚焦、图片准备之前**变为 `indeterminate`，原生静态错误为 `Search popup not enumerated by ScreenCaptureKit within six seconds`；助手三项权限均为 true。聚焦阶段的 23 次检测没有枚举到弹层，失败后只读 inspect 却发现额外的搜索弹层。没有 `mediaPrepared` 或 submit 证据，配文仍为零 attempt 队列项，原意图和元数据保留。GUI 工具点击返回 SCStream 错误，远程 System Events 按键也被拒；这两种工具的失败不等于候选助手的权限失败。仅请求用户按 Esc 关闭已知搜索弹层，GUI 恢复仍在进行。**不能据此判定图片协议失败或图片已发出。**授权群已恢复 `push/observe`，另一授权目标保持原模式，全局桌面发送暂停。
+
+### 图片聚焦失败的限定归档候选（2026-11-03）
+
+用户按 Esc 后已核对只剩一个微信主窗口；随后新 focus 虽排队，领取仍为空，因为原图片 attempt 1 的不明调度继续阻塞。**新 focus 没有执行**，这不是新的桌面聚焦通过或图片复制问题。Rust 与 Python 新增的未部署候选仅允许对该类首次图片 attempt 作原生只读证明：报告必须停在 `inspected`，完整 inspect/focus/polls 必须匹配已知六秒搜索弹层未枚举错误，且无图片准备、状态、提交、后续 attempt 或活跃 helper 证据；Rust 在共享锁下通过独立 `--abandon-capabilities` / `--abandon-preflight` 合同核查。文字原路径不变；任意图片错误、`group_focused` 或已准备图片均不适用。详细命令和边界见[托管会话指南](MANAGED_CONVERSATIONS.md)。
+
+安装候选且原证据核验通过后，操作员命令只会把原调度记为 `done/abandoned_pre_submit`，保留 outbox 的 `indeterminate`、原 intent 和 attempt；它**不恢复或重试图片**，也不自动执行后续队列。本地候选的完整 Rust 测试 **861 passed、11 原有 ignored**，严格 all-target Clippy 和 fmt 已通过；Python 仓库脚本 **136 passed**（其中 sender 55 项，包含 5 项新增图片证明回归；编译 coordinator 集成 20 项），仓库外已安装 wheel **195 passed**，Swift 参数与命名剪贴板检查通过，公开源码检查通过（扫描 326 个索引文件），diff 检查干净。这是源码候选工程证据，原生助手无需重建；**候选尚未部署，真实图片请求尚未归档**，新 focus 未执行，也没有图片成功证据。Mini 分阶段安装后的现场结果另行记录。
+
 ## 私有证据索引
 
 - E01：本地忽略目录中的工程矩阵、完整 CI 日志及公开材料核验。
@@ -144,5 +172,9 @@ Mac mini 独立构建安装 `c61ab03` 后，两个授权目标的全部绑定、
 - E07：当前候选文字队列顺序、双会话串行发送、独立收件及接管隔离的脱敏汇总；原始接管核验留在私有验收目录。
 - E08：两个授权 channel 的独立观察者并行订阅、退出重启重读及原 consumer 不变的脱敏汇总；原始报告留在私有验收目录。
 - E09：当前候选独立构建/安装、原生助手与全账本不变核对、双目标短时采集、竞争监听拒绝和最终停止健康；原始材料留在私有验收目录。
+- E10：两普通应用的受限 SSH 独立收件与拒绝探针、三个项目 Hook 信任状态、原专用 Session 的同一租约恢复决定，以及全新入站单回合业务完成与 transport 终态不一致；原生回合、权限和终态诊断原始记录留在私有验收目录。
+- E11：同一原 Session 的活跃/完成两阶段只读终态回归，以及 `d2a0dae` 升级前后双目标账本、助手和 gateway 策略对照；原始回合与配置证据留在私有验收目录。
+- E12：新版原专用 native TUI Session 全新入站单回合闭环的正式私有验收报告（12 项通过）、三个 Hook 原生信任状态，以及图片队列聚焦停止的脱敏汇总；公共记录不含原始回合、身份或截图。
+- E13：不同物理宿主的限定只读凭据经真实受限 SSH 读取 inbox、跨会话读取拒绝及发送拒绝；原始报告留在私有验收目录，不代表异机 Session 插件验收。
 
 真实身份、Session/turn 引用、token、配置、截图与数据库保留在各自宿主的忽略/私有验收目录；公共仓库仅记录上述汇总。

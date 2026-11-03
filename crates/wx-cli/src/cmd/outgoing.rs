@@ -467,6 +467,50 @@ pub(super) fn check_recovery_preflight(
     Ok(())
 }
 
+pub(super) fn check_image_abandon_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(driver, "--abandon-capabilities", None, timeout, None)?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("abandon_protocol_version") == Some(&json!(1))
+            && object.get("image_before_prepare_only") == Some(&json!(true))
+            && object.get("pre_submit_proof_required") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver lacks image pre-prepare abandonment capability").into());
+    }
+    Ok(())
+}
+
+pub(super) fn check_image_abandon_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--abandon-preflight",
+        Some(payload),
+        timeout,
+        Some(lock_fd),
+    )?;
+    let valid = value.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("protocol_version") == Some(&json!(1))
+            && object.get("abandon_protocol_version") == Some(&json!(1))
+            && object.get("unsent_proven") == Some(&json!(true))
+            && object.get("before_prepare") == Some(&json!(true))
+    });
+    if !valid {
+        return Err(invalid("driver did not prove image stopped before prepare").into());
+    }
+    Ok(())
+}
+
 fn invoke_recovery_probe(
     driver: &Path,
     flag: &str,

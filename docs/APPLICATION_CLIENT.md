@@ -45,4 +45,4 @@ wx-agent-gateway-client --config /ABS/private/app-client.json result --params-st
 
 发送参数只含 `conversation_id`、原本地 `request_id` 和 `text`；查询去掉 `text`。接口不接受临时 owner、执行路径或任意命令。跨群、错误凭据及无权限方法在处理前拒绝。冻结事件按 delivery 范围分页，终结旧 Session 的 transport 与重新授权新的业务处理分别核验。源码/合成检查和真实 SSH/微信收件分别记入[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)，不能互相代替。
 
-本轮已有本地单元与合成集成检查；具体测试证据及实机边界以[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)为准。普通应用的新端到端发送不因这些检查自动视为通过。
+当前实机证据包括两个应用各经受限鉴权 SSH 发出一次文字，均为一次 attempt、`ui_observed`，用户分别确认目标、内容、换行及各收到一次；鉴权、跨范围、无 shell/PTY 探针通过。另一物理宿主使用仅限 inbox 的凭据读取指定入站成功，跨会话读取与发送被拒绝。这些结果证明所测的应用发送和**异机只读 inbox API**，不证明异机 Session 插件已运行或完成业务决定。真实图片队列、桌面 App 持有的 Session 和更广故障场景仍待验收；精确证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。

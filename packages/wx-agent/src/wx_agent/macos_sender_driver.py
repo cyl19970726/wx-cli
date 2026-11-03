@@ -402,6 +402,11 @@ def request_ok(request, config, attempt_number=None):
         if request.get("media") is not None:
             raise Refused("text protocol cannot carry media")
         validate_text(request.get("text"))
+    return _transaction_id(request, config, attempt_number)
+
+
+def _transaction_id(request, config, attempt_number):
+    rid = request["request_id"]
     identity = (request["channel_id"] + "\0" + rid) if "target_name" in config else rid
     tid = "send-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:48]
     return tid if attempt_number == 1 else tid + "-a" + str(attempt_number)
@@ -906,6 +911,98 @@ def recovery_preflight(request, config):
     return {"protocol_version": 1, "recovery_protocol_version": 1, "unsent_proven": True}
 
 
+def abandon_preflight(request, config):
+    """Prove a first image stopped before preparation; never authorize a send."""
+    fields = {"protocol_version", "abandon_protocol_version", "content_kind", "request_id",
+              "attempt_number", "channel_id", "session_id", "account", "talker"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request["protocol_version"]) is not int or request["protocol_version"] != 1
+            or type(request["abandon_protocol_version"]) is not int or request["abandon_protocol_version"] != 1
+            or request["content_kind"] != "image"
+            or type(request["attempt_number"]) is not int or request["attempt_number"] != 1
+            or not isinstance(request["request_id"], str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", request["request_id"]) is None
+            or any(request[key] != config["binding"][key]
+                   for key in ("channel_id", "session_id", "account", "talker"))):
+        raise Refused("image abandonment identity differs")
+    tid = _transaction_id(request, config, 1)
+    ui = config["ui_dir"]
+    with recovery_sender_lock(ui / "sender.lock"):
+        deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        for path in ui.iterdir():
+            name = path.name
+            if not (name.startswith(tid + ".") or name.startswith(tid + "-")):
+                continue
+            if (any(part in name for part in (".prepare-", ".visual-state", "submit"))
+                    or re.match(re.escape(tid) + r"-a[0-9]+(?:[.-]|$)", name)):
+                raise Refused("image preparation, submit or later attempt evidence exists")
+        report = _read_artifact(ui / (tid + ".client-result.json"))
+        if (report.get("id") != tid or report.get("request_id") != request["request_id"]
+                or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
+                or report.get("channel_id") != request["channel_id"]
+                or report.get("session_id") != request["session_id"]
+                or report.get("stage") != "inspected" or report.get("status") != "indeterminate"
+                or any(key in report for key in ("media_prepared", "media_submitted", "event_cursor",
+                           "focus_evidence_id", "focus_category", "recovery_from_attempt"))):
+            raise Refused("image report does not prove a stop before preparation")
+        inspect_id, focus_id = tid + "-inspect", tid + "-focus"
+        inspect_job = _read_artifact(ui / (inspect_id + ".inspect.job.json"))
+        inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+        if (inspect_job != {"id": inspect_id, "action": "inspect"}
+                or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+                or inspected.get("ok") is not True):
+            raise Refused("image inspect proof differs")
+        window_id, frame = inspect_ok(inspected, config)
+        if any(not math.isfinite(frame[key]) for key in ("x", "y", "width", "height")):
+            raise Refused("image inspect geometry is invalid")
+        expected_focus = {"id": focus_id, "action": "focus-group",
+                          "targetGroup": config["target_group"],
+                          "targetKind": config.get("conversation_kind", "group"),
+                          "expectedPID": config["expected_pid"], "expectedWindowID": window_id,
+                          "expectedFrame": frame,
+                          "conversationListRect": config["conversation_list_rect"],
+                          "searchPoint": config["search_point"]}
+        focus_job = _read_artifact(ui / (focus_id + ".focus-group.job.json"))
+        if json.dumps(focus_job, sort_keys=True) != json.dumps(expected_focus, sort_keys=True):
+            raise Refused("image focus request differs from inspected target")
+        focused = _read_artifact(ui / (focus_id + ".result.json"))
+        if (set(focused) != {"id", "ok", "error", "permissions"}
+                or focused.get("id") != focus_id or focused.get("ok") is not False
+                or focused.get("error") != "Search popup not enumerated by ScreenCaptureKit within six seconds"
+                or not _permissions_ok(focused.get("permissions"))
+                or report.get("error") != "focus failed before message preparation: " + helper_reason(focused)):
+            raise Refused("image focus failure is not the proven before-prepare case")
+        marker = ui / (focus_id + ".focus-attempted.json")
+        private(marker)
+        if marker.stat().st_size != 0:
+            raise Refused("image focus marker differs")
+        polls = private_read(ui / (focus_id + ".focus-polls.json"))
+        if not isinstance(polls, list) or not 1 <= len(polls) <= 128:
+            raise Refused("image focus polls are missing")
+        previous_elapsed = -1
+        for poll in polls:
+            if (not isinstance(poll, dict) or type(poll.get("elapsedMs")) is not int
+                    or poll["elapsedMs"] < 0 or poll["elapsedMs"] < previous_elapsed
+                    or type(poll.get("windowCount")) is not int
+                    or poll["windowCount"] != 1 or poll.get("popupPresent") is not False
+                    or poll.get("popupSelected") is not False
+                    or not isinstance(poll.get("windows"), list) or len(poll["windows"]) != 1):
+                raise Refused("image focus poll differs")
+            previous_elapsed = poll["elapsedMs"]
+            window = poll["windows"][0]
+            if (not isinstance(window, dict) or type(window.get("id")) is not int
+                    or window["id"] != window_id
+                    or any(type(window.get(k)) not in (int, float) or not math.isfinite(window[k])
+                           or abs(window[k] - frame[k]) > 3 for k in ("x", "y", "width", "height"))):
+                raise Refused("image focus window changed")
+        if polls[-1]["elapsedMs"] < 5000 or _helper_is_live(tid, deadline):
+            raise Refused("image focus timeout or helper exit is unresolved")
+    return {"protocol_version": 1, "abandon_protocol_version": 1,
+            "unsent_proven": True, "before_prepare": True}
+
+
 @contextmanager
 def recovery_sender_lock(lock_path):
     """Accept the coordinator's held lock, or acquire it for standalone recovery."""
@@ -1310,16 +1407,37 @@ def run(request, config):
 def main(argv=None):
     os.umask(0o077)
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--abandon-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "abandon_protocol_version": 1,
+                          "image_before_prepare_only": True, "pre_submit_proof_required": True},
+                         separators=(",", ":")))
+        return 0
     if argv == ["--recovery-capabilities"]:
         print(json.dumps({"protocol_version": 1, "recovery_protocol_version": 1,
                           "pre_submit_proof_required": True}, separators=(",", ":")))
         return 0
     recovery_preflight_mode = argv == ["--recovery-preflight"]
+    abandon_preflight_mode = argv == ["--abandon-preflight"]
     focus_mode = argv == ["--focus-only"]
     dispatch_mode = argv == ["--dispatch-preflight"]
-    if argv and not (focus_mode or recovery_preflight_mode or dispatch_mode):
+    if argv and not (focus_mode or recovery_preflight_mode or abandon_preflight_mode or dispatch_mode):
         print(json.dumps({"focused": False, "reason": "unsupported command"}))
         return 2
+    if abandon_preflight_mode:
+        result = {"protocol_version": 1, "abandon_protocol_version": 1,
+                  "unsent_proven": False, "before_prepare": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = abandon_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["unsent_proven"] else 1
     if dispatch_mode:
         try:
             cfg = os.environ.get("WX_SENDER_CONFIG")
