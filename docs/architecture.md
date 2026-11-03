@@ -1,6 +1,10 @@
-# 每个会话独立状态，共用受控发送入口
+# 微信通道独立，Session 通过插件接入
 
-本分支的托管扩展使用 `coordinator.rs` 管理 owner/control epoch、通知水位、处理决定/待办、turn reservation 与发送引用；`dispatch.py`、`inbox.py` 编排，`session_adapter.py` 只持有明确受管的长期 Codex 连接。新增运行方法与故障语义见[托管指南](MANAGED_CONVERSATIONS.md)，实际验收见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。以下历史单群/未托管描述继续适用于尚未迁移的会话；不表示旧 runner 可操作托管状态。
+wx-cli / 通道服务负责授权微信会话的采集、订阅、持久 inbox 与共享发送队列；Session 插件负责消费订阅、通知原 Agent Session，并把明确处理决定或发送意图交回通道。微信通道不负责创建、恢复或持有模型 Session。这是 2026-11-03 用户澄清后的架构边界，合同与现有入口见[订阅与 Session 插件](CHANNEL_SUBSCRIPTIONS.md)。
+
+现有 `channel subscribe` 能独立输出事件，`coordinator inbox` 能保存待办和处理决定；Codex app-server 编排是当前 Python 包中的可选适配实验，尚未完成插件拆分、任意桌面 Session 或跨宿主接入。下面的代码结构和历史机制说明仍是实际实现，不把目标边界写成已完成迁移。
+
+本分支的托管扩展使用 `coordinator.rs` 管理 owner/control epoch、通知水位、处理决定/待办、transport reservation 与发送引用；`dispatch.py`、`inbox.py` 编排，`session_adapter.py` 只持有明确受管的长期 Codex 连接。通道的 owner 是业务处理身份，不是 Codex thread ID。新增运行方法与故障语义见[托管指南](MANAGED_CONVERSATIONS.md)，实际验收见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。以下历史单群/未托管描述继续适用于尚未迁移的会话；不表示旧 runner 可操作托管状态。
 
 本项目把微信作为 Agent 的一个渠道：从本机加密数据库副本获取结构化消息，以持久事件游标订阅；Agent 生成回复后，经一次性发件箱与 macOS 桌面发送。读取正文不依赖截图 OCR。视觉识别主要用于核验目标窗口、群标题、输入框和发送按钮。
 
