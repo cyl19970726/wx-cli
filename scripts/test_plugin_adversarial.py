@@ -11,6 +11,11 @@ from scripts import test_plugin_integration as plugin_fixture
 
 
 class PluginAdversarialTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not plugin_fixture.BINARY.is_file():
+            raise unittest.SkipTest("compiled wx-cli required; exercised by the Rust CI job")
+
     def setUp(self):
         fixture = plugin_fixture.NativePluginIntegrationTests("test_original_native_callback_business_decision_and_terminal_receipt_are_separate")
         fixture.setUp()
