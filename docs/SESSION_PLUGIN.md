@@ -4,7 +4,7 @@ wx-cli 独立保存微信事件、订阅进度、持久 inbox、处理决定和�
 
 ## 安装到一个项目
 
-需要两件交付物：已安装的 `wx-agent` wheel 提供 `wx-agent-plugin` 和 `wx-agent-plugin-install`；[插件 bundle](../plugins/codex-wechat/.codex-plugin/plugin.json)提供项目 Skill 的唯一文本来源及标准插件包装。脱离源码检出的 wheel 安装时，须单独提供 bundle 的规范绝对路径；wheel 本身不包含该 Skill 副本。
+需要两件交付物：已安装的 `wx-agent` wheel 提供 `wx-agent-plugin`、`wx-agent-plugin-runner` 和 `wx-agent-plugin-install`；[插件 bundle](../plugins/codex-wechat/.codex-plugin/plugin.json)提供项目 Skill 的唯一文本来源及标准插件包装。脱离源码检出的 wheel 安装时，须单独提供 bundle 的规范绝对路径；wheel 本身不包含该 Skill 副本。
 
 先在仓库外创建私有 `plugin.json`，填入下方配置中的真实授权值，并限制文件访问。项目目录、可执行文件、bundle 都用存在的规范绝对路径。安装示例：
 
@@ -54,8 +54,16 @@ wx-agent-plugin --config /ABS/private/plugin.json status
 wx-agent-plugin --config /ABS/private/plugin.json notify
 ```
 
+要在原 Session 宿主上持续检查待办，可以前台进程启动有界通知循环：
+
+```sh
+wx-agent-plugin-runner --config /ABS/private/plugin.json --seconds 3600 --interval 2
+```
+
+`--seconds` 是整数，范围为 1–86400，默认 3600；`--interval` 至少为 1 秒，默认 2 秒。runner 使用由私有配置路径确定的私有运行目录，持有独占锁并记录不含消息正文、token 或 Session ID 的 `health.json`；同一配置的第二个 runner 会拒绝启动，也不会改写当前运行者的健康记录。`SIGINT` / `SIGTERM` 请求它在当前有界 API 周期结束后停止，写入停止状态并释放锁；它不关闭 Codex 宿主。runner 周期性调用同一插件的 `notify`，不自行确认通知、完成业务决定或发送微信消息。
+
 `notify` 先向 Rust inbox 领取并 reserve 原 delivery，再使用宿主原生 `codex queue --thread ... --message ...` 排队。通知只包含 conversation ID、delivery ID 和单向散列的 `notification_ref`；散列用于关联通知，不暴露 lease token。queue 返回成功只表示排队，不是原 Session 已收到或完成处理。未知结果保留原 reservation，不另开回合、不换 ID 重试。
 
 只有原 Session 的真实 `UserPromptSubmit` 回调携带完全匹配的 `WXCLI_DELIVERY_V1` 通知时，插件才把原生 turn 记录到 Rust。宿主回合终结和业务决定分别保存：Session 必须读取冻结的 delivery/events，并用原 lease 显式记录 `skip`、`defer`、`draft` 或 `reply`；最终模型文字不会自动发微信。owner、epoch 或原 Session 不符时停止处理，保留原记录。处理命令见[托管会话指南](MANAGED_CONVERSATIONS.md)。
 
-本轮单元与合成测试验证了包装、hook 与通知状态机；原桌面 Session 收到通知、跨宿主投递及真实入站处理仍待主 agent 实机验收。图片发送后置；已有文字发送实机证据不等于插件投递验收。状态与证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+本轮单元与合成测试验证了包装、hook、通知状态机及 runner 的锁、停止和健康记录。当前授权项目的三个 hook 已经走完宿主正常原生信任流程；这不证明原桌面 Session 收到通知或处理入站。两个普通应用经受限 SSH 的单次发送回执已分别由用户确认，属于应用发件证据，不是插件投递证据。原 Session 入站处理与跨宿主插件投递仍待主 agent 实机验收。图片发送后置；状态与证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
