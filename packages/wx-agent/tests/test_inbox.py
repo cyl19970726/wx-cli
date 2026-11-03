@@ -6,13 +6,103 @@ import os
 from contextlib import ExitStack, nullcontext
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
+import sys
 
 from wx_agent import inbox
 from wx_agent import conversations
 from wx_agent import session_adapter
+
+
+class CoreBoundaryTests(unittest.TestCase):
+    def test_legacy_exports_are_the_optional_implementations(self):
+        from wx_agent.integrations import codex
+        from wx_agent import errors
+        self.assertIs(inbox.PushLoop, codex.PushLoop)
+        self.assertIs(inbox.provision, codex.provision)
+        self.assertIs(session_adapter.SessionError, errors.SessionError)
+
+    def test_legacy_provision_cli_routes_to_optional_integration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            sessions = root / "sessions.json"
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(conversations, "config", return_value={"wx_cli": "/bin/false"}))
+                stack.enter_context(mock.patch.object(inbox.dispatch, "root_from_settings", return_value=root))
+                provision = stack.enter_context(mock.patch.object(inbox, "provision", return_value={"provisioned": True}))
+                result = inbox.main(["--config", str(root / "config.json"), "provision",
+                                     "--session-config", str(sessions), "--owner", "owner1",
+                                     "--cwd", str(root), "--codex", "synthetic-codex"])
+            self.assertEqual(result, 0)
+            provision.assert_called_once_with(sessions, "owner1", root, "synthetic-codex", [])
+
+    def test_claim_cli_fences_optional_epoch_without_changing_legacy_call(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary).resolve()
+            stack.enter_context(mock.patch.object(conversations, "config", return_value={"wx_cli": "/bin/false"}))
+            stack.enter_context(mock.patch.object(inbox.dispatch, "root_from_settings", return_value=root))
+            call = stack.enter_context(mock.patch.object(inbox.dispatch, "call", return_value={"status": "pending"}))
+            base = ["--config", str(root / "config.json"), "claim", "--id", "group1", "--owner", "owner1"]
+            self.assertEqual(inbox.main(base + ["--expected-epoch", "1"]), 0)
+            self.assertEqual(call.call_args.args[2:],
+                             ("inbox", "claim", "--conversation-id", "group1", "--owner", "owner1",
+                              "--expected-epoch", "1"))
+            self.assertEqual(inbox.main(base), 0)
+            self.assertEqual(call.call_args.args[2:],
+                             ("inbox", "claim", "--conversation-id", "group1", "--owner", "owner1"))
+
+    def test_fresh_collector_process_never_imports_provider_or_starts_codex(self):
+        script = textwrap.dedent('''
+            import importlib.abc, json, sys, tempfile
+            from contextlib import ExitStack
+            from pathlib import Path
+            from unittest import mock
+
+            blocked = {'wx_agent.session_adapter', 'wx_agent.integrations.codex',
+                       'wx_agent.codex_reply_agent'}
+            class DenyProvider(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname in blocked:
+                        raise AssertionError('provider imported: ' + fullname)
+            sys.meta_path.insert(0, DenyProvider())
+
+            from wx_agent import inbox, conversations
+            assert not blocked.intersection(sys.modules)
+
+            class Executor:
+                exitcode = None
+                def poll(self): return self.exitcode
+                def terminate(self): pass
+                def wait(self, timeout):
+                    self.exitcode = 0
+                    return 0
+            def start(argv, **kwargs):
+                assert argv[2:4] == ['wx_agent.cli', 'dispatch'], argv
+                return Executor()
+
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                config = root / 'config.json'
+                with ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(conversations, 'config', return_value={'wx_cli': '/bin/false'}))
+                    stack.enter_context(mock.patch.object(inbox.dispatch, 'root_from_settings', return_value=root))
+                    stack.enter_context(mock.patch.object(inbox.dispatch, 'call', return_value={'paused_reason': 'test', 'dispatches': []}))
+                    stack.enter_context(mock.patch.object(inbox, 'collect', return_value=[]))
+                    stack.enter_context(mock.patch.object(inbox.subprocess, 'Popen', side_effect=start))
+                    assert inbox.main(['--config', str(config), 'status', '--id', 'synthetic']) == 0
+                    assert inbox.main(['--config', str(config), 'run', '--once', '--seconds', '5']) == 0
+                health = json.loads((root / 'inbox-health.json').read_text())
+                assert health['run_state'] == 'stopped'
+                assert health['collector_alive'] is False
+                assert health['executor_alive'] is False
+                assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
+        ''')
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                                timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class FakeServer:
@@ -80,7 +170,7 @@ class PushLoopTests(unittest.TestCase):
         if args == ("status",):
             return {"conversations": ["conversation1"]}
         if args[:2] == ("status", "--conversation-id"):
-            return {"owner": "owner1", "input": "push", "control": "active"}
+            return {"owner": "owner1", "input": "push", "control": "active", "epoch": 1}
         if args[:2] == ("inbox", "status"):
             return {"deliveries": self.previous}
         if args[:2] == ("inbox", "show"):
@@ -89,6 +179,7 @@ class PushLoopTests(unittest.TestCase):
         if args[:2] == ("inbox", "finish-turn"):
             return {"delivery_id": 42, "turn_state": "completed"}
         if args[:2] == ("inbox", "claim"):
+            self.assertEqual(args[args.index("--expected-epoch") + 1], 1)
             self.claims += 1
             return {"status": "claimed", "delivery_id": 42,
                     "token": "synthetic-token", "epoch": 1,

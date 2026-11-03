@@ -2,7 +2,7 @@
 
 实施候选已交付为 [草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前运行候选为 `c61ab03`；文字队列与独立收件在 `c8f0f0c` 取得，后续候选未重复发送。Candidate 3 固定二进制 SHA-256 仍为 `5e2e47ef08789e2eb91dc9388ea11f8e294325127955d877f00a550807946787`。本页区分代码、离线检查、真实读取、受管 Session、GUI 和独立收件证据；旧失败作为历史保留。当前两个授权目标均为 `push/observe`，桌面发送暂停，无运行中的 worker。原文字的历史验收不自动覆盖新增队列；不合并、不发布、不向非测试业务群发送。
 
-最新架构决策：wx-cli 独立提供群订阅和消息投递能力，Session 经 plugin 订阅并取得消息；通道与 Session 是两个独立边界。现有 managed app-server 仅为可选适配实验，不是 wx-cli 核心能力或必需运行路径。订阅/投递与 plugin 接入合同由主 agent 另行完善；本页的受管实验和实机记录不代表该架构接入已完成，plugin 尚未实现。
+最新架构决策：wx-cli 独立提供群订阅和消息投递能力，普通应用可发布通知，Session 经 plugin 消费订阅。当前源码候选已分离旧 Codex 适配、增加应用 `publisher_id`、项目级原生 Hook 插件和鉴权 RPC/SSH 客户端。通道与宿主仍分别验收：下述已安装 `c61ab03` 的历史实机记录不代表新插件或跨宿主接入已通过，后续现场证据单列。
 
 ## 分批状态
 
@@ -11,7 +11,7 @@
 | P0 图片/文字基线 | 复用图片、生命周期和恢复修复。私聊与测试群文字、测试群四色合成图片曾获独立收件确认；图片源事件 cursor 49。Candidate 3 当前固定安装版本见上方摘要。 | 旧私聊图片尝试仍保留不明状态；真实图片队列尚无成功像素回读及自动完成证据，图片验收后置。 |
 | P1 会话隔离 | 逐会话锁、显式 ID、目标 controller 协调和 owner/epoch 已实现；两个授权 channel 并发增量读取成功。最新跨会话入队时，私聊读取与群发送并行。有界接管隔离检查 `complete=true`：同目标双并发 takeover 只有一个 CAS 成功，另一会话读取成功且绑定未变；旧/接管中/迟到发送均被代际拒绝，未产生意图、attempt 或桌面效果；正确 handback 恢复原 owner、`push/observe`、Session 引用和处理水位。 | 人工出站检测的现场复验及更广故障场景仍未闭合；单次有界接管检查不等于长期并发验收。 |
 | P2 共享发送 | 文字/图片/focus 共用 Rust dispatch，含来源代际、batch 顺序、优先级、到期及未知结果保护。最新同群 Q2/Q3 各一次 attempt、`ui_observed`，源 cursor 51/52，第二执行器返回 busy；跨会话队列按 dispatch 22 私聊、23 群串行完成，各一次 attempt，源 cursor 12/54。用户独立确认两组文字的目标、顺序、内容、换行和 emoji 正确；重复 ID 未增加 attempt。 | 图片队列尚未成功；这些有界场景不替代更广故障注入或长期运行验收。 |
-| P3 inbox/Session | Rust 已有持久批次、处理租约及显式决定；可选 managed app-server 实验取得私聊 delivery 1 skip、2 defer、群 delivery 4 skip 且 transport turn completed，私聊 delivery 3 仍 pending。底层 `channel subscribe --consumer … --once` 已在两个授权通道并行实测：私聊 12/12、群 54/54 条历史事件，身份和递增 cursor 符合绑定；未 ack 的事件在退出重启后完整重读，原 consumer 行不变。 | 该检查无模型调用、ack 或发送，也没有新入站；它不证明新消息处理、wx-cli 到 Session 的投递或 plugin 接入。plugin、桌面 App 持有业务 thread 推送及跨宿主推送尚未实现。 |
+| P3 inbox/Session | Rust 已有持久批次、处理租约及显式决定；旧受管实验取得私聊 delivery 1 skip、2 defer、群 delivery 4 skip 且 transport turn completed。底层订阅已实测重读且不自动确认。当前源码候选已增加项目原生 Hook、通知/回合/业务结果分离及 scoped gateway 后端的离线检查。 | 原 Session 的真实 Hook 投递及跨宿主现场闭环仍待核验；私聊 delivery 3 保留。底层历史重读和离线检查不冒称新插件实机通过。 |
 | P4 运行验收 | `c61ab03` 四项 CI、本地全套 Rust、Python 检查及 Mac mini Python 3.9 安装包检查通过；短时双目标采集、监听竞争与停止健康实测通过。文字队列、独立收件及接管隔离保留各自版本证据。 | 更广现场故障注入仍未闭合；完整 24 小时观察已取消，不作为本轮等待条件，也不宣称通过。 |
 
 ## 工程验证

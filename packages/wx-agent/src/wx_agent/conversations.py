@@ -531,9 +531,12 @@ def coordinated(settings, target_entry):
 
 
 def send_intent(settings, entry, request_id, text, snapshot=None, media=None,
-                owner=None, expected_epoch=None, scheduling=None, wait=True):
+                owner=None, expected_epoch=None, scheduling=None, wait=True, publisher=None):
     require(isinstance(request_id, str) and bool(REQUEST_ID.fullmatch(request_id)),
             "request_id", "invalid request ID")
+    require(publisher is None or (isinstance(publisher, str) and
+            bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,39}", publisher))),
+            "publisher", "invalid application publisher")
     if media is None:
         sender.validate_text(text)
     if snapshot is not None:
@@ -557,11 +560,14 @@ def send_intent(settings, entry, request_id, text, snapshot=None, media=None,
         require(not schedule_args or managed, "not_managed", "batch/priority/expiry require a managed conversation")
         one_json(settings, "outbox", state, *queue_args, "--request-id", request_id,
                  "--channel-id", entry["channel_id"], "--session-id", entry["session_id"],
+                 *(("--publisher", publisher) if publisher is not None else ()),
                  *fence_args, *schedule_args,
                  data=None if media else text)
     item = one_json(settings, "outbox", state, "show", "--request-id", request_id)
     require(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
     _same_intent(item, text, media)
+    require(item.get("publisher_id") == publisher, "publisher_conflict",
+            "request originated from another application publisher")
     if managed:
         require(item.get("managed_owner") == owner and item.get("managed_epoch") == expected_epoch,
                 "owner_epoch_drift", "outbox intent originated under another owner epoch")
@@ -616,13 +622,13 @@ def _same_intent(item, text, media):
                 "image_conflict", "existing request has different image content")
 
 
-def send_image(settings, request_id, image, id=None, owner=None, expected_epoch=None, scheduling=None, wait=True):
+def send_image(settings, request_id, image, id=None, owner=None, expected_epoch=None, scheduling=None, wait=True, publisher=None):
     media = sender.image_descriptor(image)
     return send(settings, request_id, None, id, media=media,
-                owner=owner, expected_epoch=expected_epoch, scheduling=scheduling, wait=wait)
+                owner=owner, expected_epoch=expected_epoch, scheduling=scheduling, wait=wait, publisher=publisher)
 
 
-def send(settings, request_id, text, id=None, media=None, owner=None, expected_epoch=None, scheduling=None, wait=True):
+def send(settings, request_id, text, id=None, media=None, owner=None, expected_epoch=None, scheduling=None, wait=True, publisher=None):
     if media is None:
         sender.validate_text(text)
     with selected_channel(settings, id) as (snapshot, entry):
@@ -635,7 +641,8 @@ def send(settings, request_id, text, id=None, media=None, owner=None, expected_e
                 _, state, _ = interactive._runner_state(value, status_value["binding"])
                 require(state.get("pending") is None, "runner_pending", "controller has a pending reply")
             return send_intent(settings, entry, request_id, text, snapshot, media,
-                               owner=owner, expected_epoch=expected_epoch, scheduling=scheduling, wait=wait)
+                               owner=owner, expected_epoch=expected_epoch, scheduling=scheduling, wait=wait,
+                               publisher=publisher)
 
 
 def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None):
@@ -819,6 +826,7 @@ def main(argv=None):
         commands.choices[name].add_argument("--owner")
         commands.choices[name].add_argument("--expected-epoch", type=int)
     for name in ("send", "send-image"):
+        commands.choices[name].add_argument("--publisher")
         commands.choices[name].add_argument("--no-wait", action="store_true")
         commands.choices[name].add_argument("--batch-id")
         commands.choices[name].add_argument("--part-index", type=int)
@@ -854,12 +862,14 @@ def main(argv=None):
         elif args.command == "send-image":
             result = send_image(settings, args.request_id, args.image, args.id,
                                 owner=args.owner, expected_epoch=args.expected_epoch, wait=not args.no_wait,
+                                publisher=args.publisher,
                                 scheduling={key: getattr(args, key) for key in ("batch_id", "part_index", "priority", "expires_at") if getattr(args,key) is not None})
         elif args.command == "send":
             raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
             require(len(raw) <= runner.MAX_REPLY, "text", "message text too large")
             result = send(settings, args.request_id, raw.decode("utf-8"), args.id,
                           owner=args.owner, expected_epoch=args.expected_epoch, wait=not args.no_wait,
+                          publisher=args.publisher,
                           scheduling={key: getattr(args,key) for key in ("batch_id", "part_index", "priority", "expires_at") if getattr(args,key) is not None})
         elif args.command == "reply":
             raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)

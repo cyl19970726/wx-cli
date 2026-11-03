@@ -29,10 +29,13 @@ jobs:
       - run: cargo build --locked
       - name: Synthetic channel CLI integration
         run: python scripts/test_local_channel.py --binary target/debug/wx-cli
-      - name: Synthetic multi-conversation coordinator integration
+      - name: Synthetic coordinator, application, gateway and plugin integration
         env:
           PYTHONPATH: packages/wx-agent/src
-        run: python -m unittest scripts.test_multi_conversation
+        run: >-
+          python -m unittest scripts.test_multi_conversation
+          scripts.test_application_integration scripts.test_gateway_integration
+          scripts.test_plugin_integration scripts.test_plugin_adversarial
       - name: Sender contract against compiled CLI events
         env:
           PYTHONPATH: packages/wx-agent/src

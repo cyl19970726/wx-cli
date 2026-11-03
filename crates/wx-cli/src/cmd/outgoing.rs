@@ -27,6 +27,8 @@ const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(clap::Args, Debug)]
 pub struct QueueOrigin {
     #[arg(long)]
+    publisher: Option<String>,
+    #[arg(long)]
     owner: Option<String>,
     #[arg(long)]
     expected_epoch: Option<i64>,
@@ -43,6 +45,15 @@ pub struct QueueOrigin {
 impl QueueOrigin {
     fn validate(&self, state: &Path) -> Result<(), Box<dyn Error>> {
         validate_queue_owner(state, self.owner.as_deref(), self.expected_epoch)?;
+        if let Some(publisher) = &self.publisher {
+            let mut bytes = publisher.bytes();
+            if publisher.len() > 40
+                || !bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Err(invalid("publisher must be a bounded application ID").into());
+            }
+        }
         if let Some(batch) = &self.batch_id {
             check_request_id(batch)?;
         }
@@ -183,7 +194,13 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             io::stdin()
                 .take((MAX_TEXT_BYTES + 1) as u64)
                 .read_to_string(&mut text)?;
-            let status = queue_intent(&mut conn, &binding, &request_id, &text)?;
+            let status = queue_intent_published(
+                &mut conn,
+                &binding,
+                &request_id,
+                &text,
+                origin.publisher.as_deref(),
+            )?;
             stamp_queue_owner(&mut conn, state_dir, &request_id, &origin)?;
             println!("{}", json!({"request_id": request_id, "status": status}));
         }
@@ -198,13 +215,14 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             check_binding(&binding, &channel_id, &session_id)?;
             check_request_id(&request_id)?;
             origin.validate(state_dir)?;
-            let status = queue_image_checked(
+            let status = queue_image_checked_published(
                 &mut conn,
                 state_dir,
                 &binding,
                 &request_id,
                 &image,
                 expected_sha256.as_deref(),
+                origin.publisher.as_deref(),
             )?;
             stamp_queue_owner(&mut conn, state_dir, &request_id, &origin)?;
             println!("{}", json!({"request_id": request_id, "status": status}));
@@ -982,6 +1000,15 @@ fn open_journal(state_dir: &Path) -> Result<Connection, Box<dyn Error>> {
           ALTER TABLE outgoing_intent ADD COLUMN expires_at INTEGER;
           CREATE UNIQUE INDEX IF NOT EXISTS outgoing_batch_parts ON outgoing_intent(batch_id,part_index) WHERE batch_id IS NOT NULL;")?;
     }
+    if !columns.iter().any(|c| c == "publisher_id") {
+        conn.execute_batch("ALTER TABLE outgoing_intent ADD COLUMN publisher_id TEXT;")?;
+    }
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS outgoing_publisher_immutable
+        BEFORE UPDATE OF publisher_id ON outgoing_intent
+        WHEN OLD.publisher_id IS NOT NEW.publisher_id
+        BEGIN SELECT RAISE(ABORT, 'publisher_id is immutable'); END;",
+    )?;
     Ok(conn)
 }
 
@@ -1040,27 +1067,39 @@ fn stamp_queue_owner(
     Ok(())
 }
 
+#[cfg(test)]
 fn queue_intent(
     conn: &mut Connection,
     binding: &BindingView,
     request_id: &str,
     text: &str,
 ) -> Result<String, Box<dyn Error>> {
+    queue_intent_published(conn, binding, request_id, text, None)
+}
+
+fn queue_intent_published(
+    conn: &mut Connection,
+    binding: &BindingView,
+    request_id: &str,
+    text: &str,
+    publisher: Option<&str>,
+) -> Result<String, Box<dyn Error>> {
     check_request_id(request_id)?;
     check_text(text)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing: Option<(String, String, String, String, String)> = tx
+    let existing: Option<(String, String, String, String, String, Option<String>)> = tx
         .query_row(
-            "SELECT channel_id, session_id, text, status, content_kind FROM outgoing_intent WHERE request_id=?1",
+            "SELECT channel_id, session_id, text, status, content_kind, publisher_id FROM outgoing_intent WHERE request_id=?1",
             [request_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()?;
-    let status = if let Some((channel, session, old_text, status, kind)) = existing {
+    let status = if let Some((channel, session, old_text, status, kind, old_publisher)) = existing {
         if channel != binding.channel_id
             || session != binding.session_id
             || old_text != text
             || kind != "text"
+            || old_publisher.as_deref() != publisher
         {
             return Err(
                 invalid("request ID already exists with different content or binding").into(),
@@ -1070,8 +1109,8 @@ fn queue_intent(
     } else {
         let timestamp = now()?;
         tx.execute(
-            "INSERT INTO outgoing_intent (request_id,channel_id,session_id,text,status,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?5)",
-            params![request_id, binding.channel_id, binding.session_id, text, timestamp],
+            "INSERT INTO outgoing_intent (request_id,channel_id,session_id,text,status,created_at,updated_at,publisher_id) VALUES (?1,?2,?3,?4,'queued',?5,?5,?6)",
+            params![request_id, binding.channel_id, binding.session_id, text, timestamp, publisher],
         )?;
         "queued".to_owned()
     };
@@ -1100,6 +1139,7 @@ fn queue_image(
     queue_image_checked(conn, state_dir, binding, request_id, image, None)
 }
 
+#[cfg(test)]
 fn queue_image_checked(
     conn: &mut Connection,
     state_dir: &Path,
@@ -1108,6 +1148,26 @@ fn queue_image_checked(
     image: &Path,
     expected_sha256: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
+    queue_image_checked_published(
+        conn,
+        state_dir,
+        binding,
+        request_id,
+        image,
+        expected_sha256,
+        None,
+    )
+}
+
+fn queue_image_checked_published(
+    conn: &mut Connection,
+    state_dir: &Path,
+    binding: &BindingView,
+    request_id: &str,
+    image: &Path,
+    expected_sha256: Option<&str>,
+    publisher: Option<&str>,
+) -> Result<String, Box<dyn Error>> {
     let (bytes, mut media) = outgoing_media::inspect(image)?;
     if let Some(expected) = expected_sha256 {
         if expected != media.sha256 {
@@ -1115,18 +1175,29 @@ fn queue_image_checked(
         }
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing: Option<(String, String, String, String, String, i64, String)> = tx.query_row(
-        "SELECT channel_id,session_id,content_kind,COALESCE(media_sha256,''),COALESCE(media_mime_type,''),COALESCE(media_size_bytes,0),status FROM outgoing_intent WHERE request_id=?1",
+    type ExistingImageIntent = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        Option<String>,
+    );
+    let existing: Option<ExistingImageIntent> = tx.query_row(
+        "SELECT channel_id,session_id,content_kind,COALESCE(media_sha256,''),COALESCE(media_mime_type,''),COALESCE(media_size_bytes,0),status,publisher_id FROM outgoing_intent WHERE request_id=?1",
         [request_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
     ).optional()?;
-    if let Some((channel, session, kind, sha, mime, size, status)) = existing {
+    if let Some((channel, session, kind, sha, mime, size, status, old_publisher)) = existing {
         if channel != binding.channel_id
             || session != binding.session_id
             || kind != "image"
             || sha != media.sha256
             || mime != media.mime_type
             || size != media.size_bytes as i64
+            || old_publisher.as_deref() != publisher
         {
             return Err(
                 invalid("request ID already exists with different content or binding").into(),
@@ -1140,8 +1211,8 @@ fn queue_image_checked(
     outgoing_media::freeze(state_dir, request_id, &bytes, &mut media)?;
     let timestamp = now()?;
     tx.execute(
-        "INSERT INTO outgoing_intent (request_id,channel_id,session_id,text,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes,status,created_at,updated_at) VALUES (?1,?2,?3,'','image',?4,?5,?6,?7,'media_queued',?8,?8)",
-        params![request_id,binding.channel_id,binding.session_id,media.path.to_string_lossy(),media.sha256,media.mime_type,media.size_bytes as i64,timestamp],
+        "INSERT INTO outgoing_intent (request_id,channel_id,session_id,text,content_kind,media_path,media_sha256,media_mime_type,media_size_bytes,status,created_at,updated_at,publisher_id) VALUES (?1,?2,?3,'','image',?4,?5,?6,?7,'media_queued',?8,?8,?9)",
+        params![request_id,binding.channel_id,binding.session_id,media.path.to_string_lossy(),media.sha256,media.mime_type,media.size_bytes as i64,timestamp,publisher],
     )?;
     tx.commit()?;
     Ok(tx_status(conn, request_id)?.unwrap_or_else(|| "media_queued".to_owned()))
@@ -1216,6 +1287,12 @@ fn show_intent(
     )?;
     item["managed_owner"] = json!(owner);
     item["managed_epoch"] = json!(epoch);
+    let publisher: Option<String> = conn.query_row(
+        "SELECT publisher_id FROM outgoing_intent WHERE request_id=?1",
+        [request_id],
+        |r| r.get(0),
+    )?;
+    item["publisher_id"] = json!(publisher);
     let scheduling: (Option<String>, Option<i64>, i64, Option<i64>) = conn.query_row(
         "SELECT batch_id,part_index,priority,expires_at FROM outgoing_intent WHERE request_id=?1",
         [request_id],
@@ -1798,6 +1875,8 @@ mod tests {
                 captured.display()
             ),
         );
+        // This verifies recovery identity/history, not subprocess startup time.
+        let fixture_probe_timeout = Duration::from_secs(10);
         assert_eq!(
             recover_unsent_with_timeout(
                 &state,
@@ -1805,7 +1884,7 @@ mod tests {
                 "recover_1",
                 1,
                 &driver,
-                Duration::from_secs(2)
+                fixture_probe_timeout
             )
             .unwrap(),
             AttemptResult::UiObserved
@@ -1955,13 +2034,16 @@ mod tests {
                 captured.display()
             ),
         );
+        // Let the handshake finish under parallel test load before checking
+        // that the legacy driver received no original message bytes.
+        let fixture_probe_timeout = Duration::from_secs(10);
         assert!(recover_unsent_with_timeout(
             &state,
             &binding,
             "legacy_driver",
             1,
             &driver,
-            Duration::from_secs(2)
+            fixture_probe_timeout
         )
         .is_err());
         assert_eq!(fs::read(&captured).unwrap(), b"");
@@ -2379,5 +2461,92 @@ mod tests {
             .unwrap();
         assert_eq!(old_binary_claimable, 0);
         assert_eq!(claim_attempt(&state, "old").unwrap().text, "legacy text");
+    }
+
+    #[test]
+    fn publisher_stays_frozen_across_restart_and_rejects_reuse_by_other_origin() {
+        let (temp, state, binding) = setup();
+        let image = temp.path().join("published.png");
+        fs::write(&image, sample_image(image::ImageFormat::Png)).unwrap();
+        let mut db = open_journal(&state).unwrap();
+        queue_intent_published(&mut db, &binding, "app_a.notice", "body", Some("app_a")).unwrap();
+        queue_image_checked_published(
+            &mut db,
+            &state,
+            &binding,
+            "app_a.image",
+            &image,
+            None,
+            Some("app_a"),
+        )
+        .unwrap();
+        drop(db);
+        let mut db = open_journal(&state).unwrap();
+        for (id, kind) in [("app_a.notice", "text"), ("app_a.image", "image")] {
+            let shown = show_intent(&db, &binding, id).unwrap();
+            assert_eq!(shown["publisher_id"], "app_a");
+            assert_eq!(shown["attempt_number"], 0);
+            if kind == "text" {
+                assert!(
+                    queue_intent_published(&mut db, &binding, id, "body", Some("app_b")).is_err()
+                );
+                assert!(queue_intent_published(&mut db, &binding, id, "body", None).is_err());
+            } else {
+                assert!(queue_image_checked_published(
+                    &mut db,
+                    &state,
+                    &binding,
+                    id,
+                    &image,
+                    None,
+                    Some("app_b")
+                )
+                .is_err());
+            }
+            assert_eq!(show_intent(&db, &binding, id).unwrap(), shown);
+        }
+        queue_intent(&mut db, &binding, "legacy", "body").unwrap();
+        assert!(show_intent(&db, &binding, "legacy").unwrap()["publisher_id"].is_null());
+        assert!(
+            queue_intent_published(&mut db, &binding, "legacy", "body", Some("app_a")).is_err()
+        );
+        assert!(db
+            .execute(
+                "UPDATE outgoing_intent SET publisher_id='app_a' WHERE request_id='legacy'",
+                []
+            )
+            .is_err());
+        assert_eq!(
+            queue_intent(&mut db, &binding, "legacy", "body").unwrap(),
+            "queued"
+        );
+    }
+
+    #[test]
+    fn publisher_migration_keeps_legacy_attempt_and_null_origin() {
+        let (_temp, state, binding) = setup();
+        let db_path = state.join(DB_NAME);
+        let old = Connection::open(&db_path).unwrap();
+        old.execute_batch("CREATE TABLE outgoing_intent (
+            request_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','attempt_recorded','ui_observed','failed','indeterminate','recipient_confirmed')),
+            attempt_number INTEGER NOT NULL DEFAULT 0, result_evidence TEXT, receipt_evidence TEXT,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);").unwrap();
+        old.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,status,attempt_number,result_evidence,created_at,updated_at)
+            VALUES('historical',?1,?2,'old body','failed',1,'old evidence',11,12)",
+            params![binding.channel_id,binding.session_id]).unwrap();
+        drop(old);
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let db = open_journal(&state).unwrap();
+        let shown = show_intent(&db, &binding, "historical").unwrap();
+        assert_eq!(shown["publisher_id"], serde_json::Value::Null);
+        assert_eq!(shown["status"], "failed");
+        assert_eq!(shown["result_evidence"], "old evidence");
+        assert_eq!(shown["attempt_number"], 1);
+        assert_eq!(shown["attempts"][0]["result_evidence"], "old evidence");
+        assert_eq!(
+            show_intent(&open_journal(&state).unwrap(), &binding, "historical").unwrap(),
+            shown
+        );
     }
 }

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "applications": {
+    "synthetic_app": {
+      "token_sha256": "7a95c9c8a8e02de2be326374a6facc3f254e46df3c1a1d913431776968bdb2c5",
+      "client_config": "/synthetic/private/application.json",
+      "permissions": ["send", "result", "inbox"],
+      "session_bindings": {
+        "00000000000000000000000000000000": {
+          "session_ref": "codex:synthetic-host:synthetic-thread",
+          "thread_id": "synthetic-thread"
+        }
+      }
+    }
+  }
+}

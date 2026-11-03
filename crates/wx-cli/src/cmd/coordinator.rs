@@ -263,6 +263,9 @@ pub enum InboxAction {
         owner: String,
         #[arg(long, default_value_t = 300)]
         lease_seconds: i64,
+        /// Fence a subscriber's original generation before taking its lease.
+        #[arg(long)]
+        expected_epoch: Option<i64>,
     },
     Complete {
         #[arg(long)]
@@ -1660,7 +1663,13 @@ fn attachment_refs(db: &Connection, id: i64) -> Result<Value, Box<dyn Error>> {
     Ok(serde_json::from_str(&raw)?)
 }
 
-fn inbox_claim(root: &Path, id: &str, owner: &str, lease: i64) -> Result<Value, Box<dyn Error>> {
+fn inbox_claim(
+    root: &Path,
+    id: &str,
+    owner: &str,
+    lease: i64,
+    expected_epoch: Option<i64>,
+) -> Result<Value, Box<dyn Error>> {
     check_id(owner)?;
     if !(30..=3600).contains(&lease) {
         return Err(invalid("inbox lease must be 30..3600 seconds"));
@@ -1669,7 +1678,10 @@ fn inbox_claim(root: &Path, id: &str, owner: &str, lease: i64) -> Result<Value, 
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = binding(&tx, id)?;
     verify_binding(&b)?;
-    if b.owner != owner || b.control != "active" {
+    if b.owner != owner
+        || b.control != "active"
+        || expected_epoch.is_some_and(|expected| expected != b.epoch)
+    {
         return Err(invalid("owner or control state changed"));
     }
     let row:Option<(i64,i64,i64,String,Option<i64>)>=tx.query_row("SELECT d.id,d.cursor_start,d.cursor_end,d.status,d.lease_until FROM delivery d WHERE d.conversation_id=?1 AND d.owner=?2 AND d.epoch=?3 AND d.turn_state IS NULL AND (d.status='pending' OR (d.status='claimed' AND d.lease_until<=?4)) AND NOT EXISTS (SELECT 1 FROM delivery earlier WHERE earlier.conversation_id=d.conversation_id AND earlier.id<d.id AND earlier.status IN ('pending','claimed')) ORDER BY d.id LIMIT 1",params![id,owner,b.epoch,now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
@@ -2119,7 +2131,14 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 conversation_id,
                 owner,
                 lease_seconds,
-            } => inbox_claim(root, &conversation_id, &owner, lease_seconds)?,
+                expected_epoch,
+            } => inbox_claim(
+                root,
+                &conversation_id,
+                &owner,
+                lease_seconds,
+                expected_epoch,
+            )?,
             InboxAction::Complete {
                 delivery_id,
                 token,
@@ -2252,9 +2271,9 @@ mod tests {
             inbox_status(&root, "conversation1").unwrap()["watermark"],
             cursor
         );
-        assert!(inbox_claim(&root, "conversation1", "owner1", 300).is_err());
+        assert!(inbox_claim(&root, "conversation1", "owner1", 300, None).is_err());
         control(&root, "conversation1", 2, false).unwrap();
-        let claim = inbox_claim(&root, "conversation1", "owner1", 300).unwrap();
+        let claim = inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap();
         let id = claim["delivery_id"].as_i64().unwrap();
         let token = claim["token"].as_str().unwrap();
         inbox_complete(
@@ -2281,7 +2300,7 @@ mod tests {
             cursor
         );
         assert_eq!(
-            inbox_claim(&root, "conversation1", "owner1", 300).unwrap()["delivery_id"],
+            inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap()["delivery_id"],
             id
         );
     }
@@ -2352,12 +2371,12 @@ mod tests {
         inbox_reconcile(&root, "conversation1").unwrap();
         observed(&state, "synthetic_other");
         inbox_reconcile(&root, "conversation1").unwrap();
-        let first = inbox_claim(&root, "conversation1", "owner1", 300).unwrap();
+        let first = inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap();
         let id = first["delivery_id"].as_i64().unwrap();
         let token = first["token"].as_str().unwrap();
         turn_reserve(&root, id, token, "session1").unwrap();
         assert_eq!(
-            inbox_claim(&root, "conversation1", "owner1", 300).unwrap()["status"],
+            inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap()["status"],
             "empty"
         );
         turn_record(&root, id, token, "thread1", "turn1").unwrap();
@@ -2375,7 +2394,7 @@ mod tests {
             },
         )
         .unwrap();
-        let second = inbox_claim(&root, "conversation1", "owner1", 300).unwrap();
+        let second = inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap();
         let id2 = second["delivery_id"].as_i64().unwrap();
         let token2 = second["token"].as_str().unwrap();
         assert!(turn_reserve(&root, id2, token2, "session1").is_err());
@@ -2437,7 +2456,7 @@ mod tests {
         .unwrap();
         observed(&state, "synthetic_other");
         inbox_reconcile(&root, "conversation1").unwrap();
-        let claim = inbox_claim(&root, "conversation1", "owner1", 300).unwrap();
+        let claim = inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap();
         let id = claim["delivery_id"].as_i64().unwrap();
         let token = claim["token"].as_str().unwrap();
         turn_reserve(&root, id, token, "session1").unwrap();
@@ -2454,10 +2473,12 @@ mod tests {
             inbox_show(&root, id, "owner2").unwrap()["transport_token"],
             token
         );
-        assert!(inbox_claim(&root, "conversation1", "owner2", 300).unwrap()["status"] == "empty");
+        assert!(
+            inbox_claim(&root, "conversation1", "owner2", 300, None).unwrap()["status"] == "empty"
+        );
         turn_record(&root, id, token, "thread1", "turn1").unwrap();
         turn_finish(&root, id, token, TurnEnd::Completed).unwrap();
-        let resumed = inbox_claim(&root, "conversation1", "owner2", 300).unwrap();
+        let resumed = inbox_claim(&root, "conversation1", "owner2", 300, None).unwrap();
         assert_eq!(resumed["delivery_id"], id);
         let db = open(&root, false).unwrap();
         let count:i64=db.query_row("SELECT COUNT(*) FROM delivery_turn_history WHERE delivery_id=?1 AND turn_state='completed' AND owner='owner1' AND epoch=1",[id],|r|r.get(0)).unwrap();

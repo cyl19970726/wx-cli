@@ -92,6 +92,7 @@ class FakeCLI:
             if media["sha256"] != argv[argv.index("--expected-sha256") + 1]:
                 raise conv.runner.RunnerError("source changed before queue")
             box.setdefault(rid, {"request_id": rid, "text": "", "media": media,
+                                 "publisher_id": argv[argv.index("--publisher") + 1] if "--publisher" in argv else None,
                                  "status": "managed_media_queued" if state in self.managed_states else "media_queued",
                                  **({key: int(argv[argv.index(flag) + 1]) if key in ("part_index", "priority") else
                                      argv[argv.index(flag) + 1] for key, flag in
@@ -105,6 +106,7 @@ class FakeCLI:
             return json.dumps(box[rid])
         if action == "queue":
             box.setdefault(rid, {"request_id": rid, "text": data,
+                                 "publisher_id": argv[argv.index("--publisher") + 1] if "--publisher" in argv else None,
                                  "status": "managed_queued" if state in self.managed_states else "queued",
                                  **({key: int(argv[argv.index(flag) + 1]) if key in ("part_index", "priority") else
                                      argv[argv.index(flag) + 1] for key, flag in
@@ -625,6 +627,33 @@ class ConversationTests(unittest.TestCase):
                 conv.send(self.settings, "same", "original", **kwargs)
             queued.assert_not_called()
 
+    def test_publisher_is_frozen_for_text_and_image_and_legacy_null_is_not_adopted(self):
+        self.choose(2)
+        entry = conv.selected(self.settings)[1]
+        state = entry["state_dir"]
+        self.fake.managed_states.add(state)
+        image = self.make_image()
+        root = self.registry / "ui"
+        kwargs = dict(id=entry["conversation_id"], owner="session-a", expected_epoch=4, wait=False)
+        with mock.patch.object(conv.dispatch, "managed_root", return_value=root), \
+             mock.patch.object(conv.dispatch, "root_from_settings", return_value=root), \
+             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
+             mock.patch.object(conv.dispatch, "enqueue_existing", return_value=({}, {"dispatch_id": 7})) as queued:
+            conv.send(self.settings, "app_a.text", "body", publisher="app_a", **kwargs)
+            conv.send_image(self.settings, "app_a.image", image, publisher="app_a", **kwargs)
+            for rid in ("app_a.text", "app_a.image"):
+                self.assertEqual(self.fake.outboxes[state][rid]["publisher_id"], "app_a")
+            self.assertEqual(queued.call_count, 2)
+            with self.assertRaisesRegex(conv.ConversationError, "another application"):
+                conv.send(self.settings, "app_a.text", "body", publisher="app_b", **kwargs)
+            with self.assertRaisesRegex(conv.ConversationError, "another application"):
+                conv.send_image(self.settings, "app_a.image", image, **kwargs)
+            self.fake.outboxes[state]["legacy"] = {"request_id": "legacy", "text": "body",
+                "publisher_id": None, "status": "managed_queued", "managed_owner": "session-a", "managed_epoch": 4}
+            with self.assertRaisesRegex(conv.ConversationError, "another application"):
+                conv.send(self.settings, "legacy", "body", publisher="app_a", **kwargs)
+            self.assertEqual(queued.call_count, 2)
+
     def test_managed_send_refuses_missing_or_stale_owner_before_freeze(self):
         self.choose(2)
         entry = conv.selected(self.settings)[1]
@@ -677,9 +706,9 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(conv.main(["--config", "/synthetic/config.json", "reply", *common,
                                         "--cursor", "3", "--text-stdin"]), 0)
         sending.assert_called_once_with(self.settings, "rid", "hello", target,
-                                        owner="session-a", expected_epoch=4, wait=True, scheduling={})
+                                        owner="session-a", expected_epoch=4, wait=True, publisher=None, scheduling={})
         image_sending.assert_called_once_with(self.settings, "image-rid", Path("/synthetic/image.png"), target,
-                                              owner="session-a", expected_epoch=4, wait=True, scheduling={})
+                                              owner="session-a", expected_epoch=4, wait=True, publisher=None, scheduling={})
         replying.assert_called_once_with(self.settings, 3, "", target,
                                          owner="session-a", expected_epoch=4)
 

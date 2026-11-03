@@ -1,0 +1,61 @@
+# Codex Session 插件接入
+
+wx-cli 独立保存微信事件、订阅进度、持久 inbox、处理决定和发送队列。Codex 插件只把已有 delivery 接到**原 Session**，使用宿主原生 hook 核对实际回合。插件不拥有第二份业务账本，也不调用 `thread/start` 或 `thread/resume`；终结状态只通过只读 `thread/read` 核对。总体边界见[通道订阅合同](CHANNEL_SUBSCRIPTIONS.md)。
+
+## 安装到一个项目
+
+需要两件交付物：已安装的 `wx-agent` wheel 提供 `wx-agent-plugin` 和 `wx-agent-plugin-install`；[插件 bundle](../plugins/codex-wechat/.codex-plugin/plugin.json)提供项目 Skill 的唯一文本来源及标准插件包装。脱离源码检出的 wheel 安装时，须单独提供 bundle 的规范绝对路径；wheel 本身不包含该 Skill 副本。
+
+先在仓库外创建私有 `plugin.json`，填入下方配置中的真实授权值，并限制文件访问。项目目录、可执行文件、bundle 都用存在的规范绝对路径。安装示例：
+
+```sh
+wx-agent-plugin-install \
+  --project /ABS/projects/synthetic-project \
+  --config /ABS/private/plugin.json \
+  --executable /ABS/venv/bin/wx-agent-plugin \
+  --bundle /ABS/distribution/plugins/codex-wechat
+```
+
+安装器仅合并该项目的 `.codex/hooks.json`，并安装该项目的 `.agents/skills/wechat-inbox/SKILL.md`；安装记录放项目 `.local/`。已有其他 hooks 保留；同参重装幂等，异义内容或用户改动不会被覆盖。承载私有路径的 hooks 和安装记录须由项目忽略规则排除版本管理。安装不会写 `~/.codex`、`~/.agents`、`~/.claude` 或全局插件缓存，也不会自动信任 hook；Codex 宿主仍须按正常流程审查和启用项目 hook。卸载使用同一入口的 `--action uninstall --project /ABS/projects/synthetic-project`，只移除安装记录识别的内容。
+
+## 私有配置
+
+下面的路径、ID、主机名和 owner 全是合成占位值。`project` 必须是实际承载原 Session 的项目目录，`agent_host` 必须匹配运行插件的主机名；`session_id` 是 Codex Session ID，`conversation_id` 是微信通道 ID，两者不可互换。
+
+```json
+{
+  "version": 1,
+  "conversation_config": "/ABS/private/conversations.json",
+  "wx_agent": "/ABS/venv/bin/wx-agent",
+  "codex": "/ABS/bin/codex",
+  "bindings": [
+    {
+      "session_id": "synthetic-session",
+      "conversation_id": "0123456789abcdef0123456789abcdef",
+      "owner": "synthetic_owner",
+      "expected_epoch": 1,
+      "project": "/ABS/projects/synthetic-project",
+      "agent_host": "synthetic-host"
+    }
+  ]
+}
+```
+
+必填字段为 `version`、`conversation_config`、`wx_agent`、`codex`、`bindings`，每个 binding 必须含示例中的六个字段。可选 `remote`、`remote_auth_token_env`、`resume_queued` 用于原生 `codex queue` 连接；`resume_queued` 默认 `false`，它是 queue 参数，不是插件直接调用 `thread/resume`。跨宿主 inbox 连接可选 `gateway_config` 与 `gateway_client`，**必须成对提供**；远端 gateway 的实机接入仍待验证。配置及凭据留在私有位置，不放入项目 Skill 或公开示例。
+
+## 运行与处理边界
+
+入口是 `wx-agent-plugin --config /ABS/private/plugin.json hook|notify|status`。项目 hook 把原生 JSON 从 stdin 交给 `hook`，并把原生 JSON 响应送回宿主。注册的事件是 `SessionStart`、`UserPromptSubmit`、`PostToolUse`，hook 超时 60 秒，附加上下文上限 1200。`SessionStart` 仅提示待办，不领取；`UserPromptSubmit` / `PostToolUse` 在实际回合中提供受限读取提示。插件不采用 `PreModelRequest` 注入正文、凭据或 lease token。
+
+需要主动检查时，可运行：
+
+```sh
+wx-agent-plugin --config /ABS/private/plugin.json status
+wx-agent-plugin --config /ABS/private/plugin.json notify
+```
+
+`notify` 先向 Rust inbox 领取并 reserve 原 delivery，再使用宿主原生 `codex queue --thread ... --message ...` 排队。通知只包含 conversation ID、delivery ID 和单向散列的 `notification_ref`；散列用于关联通知，不暴露 lease token。queue 返回成功只表示排队，不是原 Session 已收到或完成处理。未知结果保留原 reservation，不另开回合、不换 ID 重试。
+
+只有原 Session 的真实 `UserPromptSubmit` 回调携带完全匹配的 `WXCLI_DELIVERY_V1` 通知时，插件才把原生 turn 记录到 Rust。宿主回合终结和业务决定分别保存：Session 必须读取冻结的 delivery/events，并用原 lease 显式记录 `skip`、`defer`、`draft` 或 `reply`；最终模型文字不会自动发微信。owner、epoch 或原 Session 不符时停止处理，保留原记录。处理命令见[托管会话指南](MANAGED_CONVERSATIONS.md)。
+
+本轮单元与合成测试验证了包装、hook 与通知状态机；原桌面 Session 收到通知、跨宿主投递及真实入站处理仍待主 agent 实机验收。图片发送后置；已有文字发送实机证据不等于插件投递验收。状态与证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。

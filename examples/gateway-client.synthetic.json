@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "application_id": "synthetic_app",
+  "token": "synthetic-gateway-token-not-for-production",
+  "command": [
+    "/synthetic/bin/wx-agent-gateway",
+    "--config",
+    "/synthetic/private/gateway-policy.json",
+    "request"
+  ]
+}

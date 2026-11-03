@@ -18,10 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Union
 
-
-class SessionError(RuntimeError):
-    pass
-
+from .errors import SessionError
 
 class SessionBusy(SessionError):
     pass
