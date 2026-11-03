@@ -145,14 +145,27 @@ class GatewayInbox:
 
 
 def read_terminal_turn(codex, route, turn_id):
-    # Stored metadata can be read without loading a thread or taking its writer.
-    # Never add thread/resume here: that belongs to the original host.
+    # A separate stdio server may project an unloaded, still-running host turn
+    # as interrupted. Only a stamped terminal record proves completion here.
+    # Never add thread/resume: the original host owns the writer.
     from .session_adapter import AppServer
     with AppServer(str(codex), timeout=10) as server:
         thread = server.request("thread/read", {"threadId": route.session_id, "includeTurns": True})["thread"]
     if thread.get("id") != route.session_id:
         raise PluginError("host_thread_mismatch")
-    return next((item.get("status") for item in thread.get("turns", []) if item.get("id") == turn_id), "unknown")
+    # The empty ID is an exact-thread preflight before a new inbox claim.
+    if not turn_id:
+        return "unknown"
+    for item in thread.get("turns", []):
+        if item.get("id") != turn_id:
+            continue
+        status, completed = item.get("status"), item.get("completedAt")
+        started = item.get("startedAt")
+        if (status in TERMINAL and type(completed) is int and completed > 0
+                and (started is None or (type(started) is int and 0 < started <= completed))):
+            return status
+        return "unknown"
+    return "unknown"
 
 
 class CodexPlugin:

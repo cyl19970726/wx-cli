@@ -7,8 +7,9 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from wx_agent.codex_plugin import CodexPlugin, GatewayInbox, PluginError
+from wx_agent.codex_plugin import CodexPlugin, GatewayInbox, PluginError, read_terminal_turn
 
 
 class Inbox:
@@ -149,6 +150,57 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.inbox.delivery["status"], "claimed")
         self.assertIn("delivery-id 1", json.dumps(response))
         self.assertEqual(sum(row[:2] == ("inbox", "claim") for row in self.inbox.calls), 1)
+
+    def test_unloaded_terminal_projection_never_finishes_recorded_transport(self):
+        plugin = self.plugin(); plugin.hook(self.event())
+        route = plugin.routes[0]
+        projection = {"id": "native-turn", "status": "interrupted",
+                      "startedAt": 1793680000, "completedAt": None, "durationMs": None,
+                      "items": []}
+        class Server:
+            def __init__(self, *_args, **_kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def request(self, method, params):
+                self_test.assertEqual((method, params),
+                    ("thread/read", {"threadId": route.session_id, "includeTurns": True}))
+                return {"thread": {"id": route.session_id, "turns": [projection]}}
+        self_test = self
+        plugin.turn_reader = lambda selected, turn: read_terminal_turn("/bin/echo", selected, turn)
+        with patch("wx_agent.session_adapter.AppServer", Server):
+            self.assertEqual(plugin.reconcile(route), [self.inbox.delivery])
+            self.assertEqual(self.inbox.delivery["turn_state"], "recorded")
+            self.assertFalse(any(row[:2] == ("inbox", "finish-turn") for row in self.inbox.calls))
+            projection.update(status="completed", completedAt=1793680002, durationMs=2000)
+            self.assertEqual(plugin.reconcile(route), [])
+        self.assertEqual(self.inbox.delivery["turn_state"], "completed")
+        self.assertEqual(self.inbox.delivery["status"], "claimed")
+
+    def test_terminal_reader_requires_exact_identity_and_completion_time(self):
+        route = self.plugin().routes[0]
+        thread = {"id": route.session_id, "turns": [{"id": "native-turn", "status": "interrupted",
+                  "startedAt": 100, "completedAt": None, "durationMs": None, "items": []}]}
+        class Server:
+            def __init__(self, *_args, **_kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def request(self, *_args): return {"thread": thread}
+        with patch("wx_agent.session_adapter.AppServer", Server):
+            self.assertEqual(read_terminal_turn("/bin/echo", route, ""), "unknown")
+            self.assertEqual(read_terminal_turn("/bin/echo", route, "native-turn"), "unknown")
+            thread["turns"][0]["status"] = "cancelled"
+            self.assertEqual(read_terminal_turn("/bin/echo", route, "native-turn"), "unknown")
+            thread["turns"][0]["status"] = "interrupted"
+            thread["turns"][0]["completedAt"] = 102
+            self.assertEqual(read_terminal_turn("/bin/echo", route, "native-turn"), "interrupted")
+            thread["turns"][0]["completedAt"] = None
+            thread["turns"][0]["status"] = "completed"
+            self.assertEqual(read_terminal_turn("/bin/echo", route, "native-turn"), "unknown")
+            thread["turns"][0]["completedAt"] = 102
+            self.assertEqual(read_terminal_turn("/bin/echo", route, "other-turn"), "unknown")
+            thread["id"] = "other-thread"
+            with self.assertRaisesRegex(PluginError, "host_thread_mismatch"):
+                read_terminal_turn("/bin/echo", route, "")
 
     def test_generation_drift_refuses_before_claim(self):
         self.inbox.epoch = 2
