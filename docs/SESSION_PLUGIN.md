@@ -78,6 +78,8 @@ wx-agent-plugin-runner --config /ABS/private/plugin.json --seconds 3600 --interv
 
 有的桌面宿主能向原聊天排队，却不执行项目 Hook；其原 Session 也可能只有本地只读权限。此时由已授权的外层插件通过受限网关读取冻结 delivery，将完整事件分页保存为项目内的私有快照，再通过原生 `thread/queue/add` 通知同一个 Session。通知只有本地读取命令、引用和摘要；没有正文、lease 或凭据。Session 只读快照，并返回 `skip`、`defer` 或 `draft` 的严格 JSON 提案。该模式不支持 `reply`。
 
+启动 App 模式前，须让原聊天在其桌面宿主中正常加载。向未加载宿主排队只表示通知已持久化；本轮实测直到应用加载原聊天后才收到通知。插件不自行创建或独立 resume 该聊天；队列及 Rust reservation 保留，宿主恢复后核对原通知。
+
 这是显式选择的适配模式。不要同时给同一个 binding 启动两种通知进程；既有 reservation 会阻止另一种模式接管。原 Session 的权限保持不变，外层只执行其已有网关权限允许的操作。
 
 私有配置使用独立文件：

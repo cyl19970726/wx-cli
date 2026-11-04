@@ -1,10 +1,10 @@
 # 多会话实施与验收记录（更新至 2026-11-04）
 
-实施候选见[草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 当前 CLI、发送驱动与活跃网关入口已受控更新为 `75f6e16`，Candidate 4 保持 `41789f7` 构建，权限恢复后的真实群图片 N7 后配文各一次发送、顺序及独立收件通过。原私聊 N5 图片在同一原 intent 完成精确像素延迟对账；原 N4、N5 配文及 N6 准备前失败只做限定归档，不记为成功或授权重试。全部旧记录保留；曾用于替换核验的旧 N5 配文测试草稿已在首轮压力测试第一项中按精确 guard 替换，不再假定它仍位于输入框。
+实施候选见[草稿 PR #6](https://github.com/cyl19970726/wx-cli/pull/6)。Mac mini 的 CLI、发送驱动、活跃网关已启用 `f0dee3e`，原生 Candidate 4 固定在 `75f6e16`，三项实际权限为 true。本轮独立新语料已连续完成私聊、群聊各 15 条，源事件与单次提交均核验，用户独立确认各 15 条、顺序内容正常。原 N5 图片和 N7 群图后配文已有各自像素与独立收件证据；旧失败、旧意图与未尝试批次保留。
 
-新 queue snapshot 模式已通过一次真实跨物理宿主验收：桌面 App 持有的**原 Session** 在原有只读、无网络权限下完整读取授权测试群的一条旧待办，返回严格 `defer` 提案；外层通过限定网关记录决定，Rust 与带时间的原生回合均为 `completed`，随后交还原 owner。原待办保留为 `deferred`，不是业务结案或全新入站的自动链路通过。旧 Hook 模式在这个桌面宿主仍无实际回调，不因新模式成功追认通过。
+原专属私聊 managed Session 已在单回合读取四条真实入站并记录 skip；另一个物理宿主的原 App-held Session 已读取群内四条积压及三条新 FRESH 入站，分别记录 skip，原生带时间终态与 Rust transport 一致。新批次在通知进程重启前后沿用同一个 reservation 引用、只有一个原生通知，用户确认微信界面也有三条。App 聊天需由其宿主正常加载：未加载时只持久排队，本轮通过应用入口加载同一原聊天后才续接，未独立 resume 或换 Session。旧 deferred 事项仍保留，旧 App Hook 回调路径不追认为通过。
 
-30 条交替压力批次尚未通过：私聊与群各成功 5 条，用户独立确认；第 11 项在标题 focus 检查、准备前停止，另 19 项未尝试。离线原始像素和 Vision 边界已证实是约 `0.0000002` 像素的浮点边界接触造成两个标题候选，时序等待假设已放弃。源码回归仅忽略 `0.0001` 像素以下的接触，真实重叠、重复标题和错目标仍拒绝；参数、构建及原画面离线核对通过，尚未更新现场 helper 或开始新的 30 条回归。电脑工具因控制端人工输入锁定要求手动解锁，已停止 UI，不替换仍可用的授权助手。两目标保持 `push/observe`、桌面发送暂停；24 小时观察已取消，不合并或发布。
+人工接管也已实测：机器人账号在 Mac mini 测试群手动发言后，仅该群进入 taken_over，私聊不受影响；正常 handback 恢复模式。最终两目标 push/observe、control active，桌面暂停，所属采集、通知和模型测试进程均已退出，临时 Root grant 移除。原首轮仍记 10 成功、1 原失败、19 未尝试；新 30 条通过不覆盖旧记录。24 小时任务保持取消，本分支未合并、未发布或打 tag。
 
 ## 此前分批状态（历史截止 2026-11-03，后续变化见上方及末尾更新）
 
@@ -302,3 +302,16 @@ Candidate 4 的必要按钮修复单独构建、签名并在原路径更新，�
 用户从个人账号向两目标各发出的 4 条均被正确采为 incoming，并分别进入持久 inbox，未错误触发人工接管。随后用户从 Mac mini 的机器人账号在测试群手动发送一条新的 M2：收集器识别出一个未关联 outbox 的 self outgoing，测试群进入 taken_over 且 epoch 增加 1；测试私聊的 owner、epoch、control 和模式不变。通过正常 handback 恢复测试群，旧 outbox 与原 Session 引用不变，桌面继续暂停。
 
 对延期生命周期的补测还重现了 queue snapshot 仅按 delivery ID 保存 note 导致合法第二轮处理卡住的问题。源码改为按当前 transport 的 HMAC 引用定位 note，保留旧 note/快照/提交标记和原回合历史；兼容旧在途路径时必须匹配当前引用。真实编译 Rust 与 Gateway 的 defer/draft→resume 同 delivery、新 lease/原 Session 回归，以及新一轮未知结果不重发的回归通过；该处属于 Session 接入层更新，当前已授权的原生助手保持固定。
+
+
+## 2026-11-04：原会话实测与最终软件同步
+
+`f0dee3e` 的 [CI 41771605700](https://github.com/cyl19970726/wx-cli/actions/runs/41771605700) 四项全部成功；本地 Rust 876 passed / 11 既有 ignored，脚本 193 passed、安装包 234 passed。Mac mini 同版本隔离候选的 Python 3.9 脚本 193 项、安装包 234 项通过，未重建原生助手；CLI/driver/gateway 已激活 f0，前后所有逻辑账本、owner/epoch、暂停状态与已授权 helper 相同。Native 固定在 75，权限不因 Python 更新重新申请。
+
+个人账号发来的测试私聊四条由生产 private-only `PushLoop` 接到原保存的 managed Session，在单个回合执行 show/events/complete（3 个工具退出码均 0），记录 skip，原生带时间终态与 Rust transport 均 completed。原 saved Session 引用不变，owned transport 已退出。首次后检查用带空格的命令片段做断言，未适配原生命令编码而留下 false 报告；后续只读核对字边界动作及原终态，没有再领取、再开回合或再提交决定。
+
+App 模式第一次有界监听时，原聊天宿主尚未加载。Rust 的 delivery 9 reservation 与一条 native queue 通知都保留，但没有原生收件；400 秒后只停止所属 collector/notifier，未重发通知。通过应用自身入口打开同一已授权原聊天后，它接收原通知、读取原群四条并记录 skip。接着续接原 reservation，处理监听启动后捕获的 FRESH 批次：3 条独立源消息在一个原生回合完整读取并 skip，原生与 Rust 都 completed、该批 native notice 只有一个。通知进程在 claimed/reserved 阶段停止并重启，transport 引用不变，没有额外通知；消息未发往微信。当前只证明宿主加载后的续接和处理，不宣称未加载 App 聊天能自动唤醒。
+
+用户口述发了两条 FRESH，实际冻结范围有 3 条 message_observed、3 个不同源消息 ID；模型读取全部 3 条。后续用户在微信界面独立确认也有 3 条，源记录与界面数量一致；不把真实的第 3 条改写成 2，也没有重复投递该批原生通知。第一次恢复脚本硬断言 2 而失败，原报告保留。恢复脚本另把 policy_before 保存为共享字典引用，加入本次 grant 后污染了基准，官方 owner 已交还后其权限对照断言失败；独立核对识别当前 owner 已恢复，未再次 configure，验证原生/Rust HMAC 与终态后只移除本 case grant 并续期三个原活动配置。两份失败与独立对账均保留；全部旧 outbox 与 Session 引用不变。
+
+最终 f0 运行核对：群和私聊均 push/observe、control active，epoch 为 78/23；桌面暂停，无 active dispatch、reserved/recorded transport 或所属测试进程，本次 Root 凭据已从活动策略移除。旧 deferred delivery 保留为业务待办，不取消或伪装结案。原 App Hook 回调路径仍未单独证明；本次可用的 App 接入路径为 queue snapshot，旧 managed/native TUI 路径及新增原私聊路径各自保留实证。
