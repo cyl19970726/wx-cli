@@ -108,9 +108,10 @@ class SnapshotGatewayIntegrationTests(unittest.TestCase):
         return state
 
     def execute_reader_turn(self, note, decision="skip"):
-        self.assertEqual(len(self.native.queue_calls), 1)
+        turn_number = len(self.native.thread["turns"])
+        self.assertEqual(len(self.native.queue_calls), turn_number + 1)
         items = [{"type": "userMessage", "clientId": note["client_id"],
-                  "content": self.native.queue_calls[0]["input"]}]
+                  "content": self.native.queue_calls[turn_number]["input"]}]
         offset = 0
         chunks = []
         while True:
@@ -130,13 +131,107 @@ class SnapshotGatewayIntegrationTests(unittest.TestCase):
         answer = {"protocol_version": 1, "ref": note["ref"],
                   "snapshot_sha256": note["snapshot_sha256"], "decision": decision,
                   "reason": "synthetic reviewed frozen input"}
+        if decision == "draft":
+            answer["draft"] = "synthetic draft only"
+        if decision == "defer":
+            answer.update(condition="manual review", due_at=1)
         items.append({"type": "agentMessage", "phase": "final_answer",
                       "text": json.dumps(answer)})
         stamp = int(time.time())
-        self.native.thread["turns"] = [{"id": "synthetic-native-turn", "status": "completed",
-                                        "startedAt": stamp, "completedAt": stamp,
-                                        "items": items}]
+        self.native.thread["turns"].append({"id": "synthetic-native-turn" + ("-resumed" if turn_number else ""),
+                                            "status": "completed", "startedAt": stamp,
+                                            "completedAt": stamp, "items": items})
         return chunks
+
+    def exercise_resumed_same_delivery(self, decision, second_mode=None):
+        self.seed_frozen_delivery()
+        first = self.plugin.notify_once()
+        self.assertEqual(first["notifications"][0]["status"], "queued_for_host", first)
+        old_path = next(self.runtime.glob("*.transport.json"))
+        old_note = read_private(old_path)
+        first_transport = self.gateway.clients[self.app].request("inbox_show", {
+            "conversation_id": self.cid, "delivery_id": old_note["delivery_id"]})["transport_token"]
+        old_snapshot = Path(old_note["snapshot_file"]).read_bytes()
+        self.execute_reader_turn(old_note, decision)
+        finished = self.plugin.reconcile()
+        self.assertEqual(finished["notifications"][0]["reconciliations"][0]["status"], "completed", finished)
+        old_files = {path: path.read_bytes() for path in self.runtime.iterdir()}
+        self.assertEqual(len(old_files), 3)
+        self.assertEqual(old_files[Path(old_note["snapshot_file"])], old_snapshot)
+        resumed = self.gateway.fixture.cli("coordinator", self.gateway.fixture.ui, "inbox", "resume",
+                                           "--delivery-id", str(old_note["delivery_id"]),
+                                           "--owner", "synthetic_app_a_owner", "--expected-epoch", "1")
+        shown = self.gateway.clients[self.app].request("inbox_show", {
+            "conversation_id": self.cid, "delivery_id": old_note["delivery_id"]})
+        self.assertEqual(shown["delivery_id"], old_note["delivery_id"], resumed)
+        self.assertIsNone(shown["transport_token"])
+        if second_mode == "unknown_queue":
+            self.native.unknown_receipt = True
+        second = self.new_plugin().notify_once()
+        if second_mode == "unknown_queue":
+            self.assertEqual(second["notifications"][0]["status"], "requires_inspection", second)
+            self.native.unknown_receipt = False
+            again = self.new_plugin().notify_once()
+            self.assertEqual(again["notifications"][0]["status"], "requires_inspection", again)
+            self.assertEqual(len(self.native.queue_calls), 2)
+            for path, content in old_files.items():
+                self.assertEqual(path.read_bytes(), content)
+            return
+        self.assertEqual(second["notifications"][0]["status"], "queued_for_host", second)
+        new_transport = self.gateway.clients[self.app].request("inbox_show", {
+            "conversation_id": self.cid, "delivery_id": old_note["delivery_id"]})["transport_token"]
+        self.assertNotEqual(new_transport, first_transport)
+        notes = [read_private(path) for path in self.runtime.glob("*.transport.json")]
+        self.assertEqual(len(notes), 2)
+        new_note = next(note for note in notes if note["ref"] != old_note["ref"])
+        self.assertEqual(new_note["delivery_id"], old_note["delivery_id"])
+        self.assertEqual(new_note["thread_id"], old_note["thread_id"])
+        self.assertEqual(self.native.thread["turns"][0]["id"], "synthetic-native-turn")
+        for path, content in old_files.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.execute_reader_turn(new_note)
+        if second_mode == "unknown_complete":
+            plugin = self.new_plugin()
+            original_request = plugin.client.request
+            def lose_complete(method, params):
+                if method == "complete":
+                    raise RuntimeError("synthetic lost complete receipt")
+                return original_request(method, params)
+            plugin.client.request = lose_complete
+            unknown = plugin.reconcile()
+            self.assertEqual(unknown["notifications"][0]["status"], "requires_inspection", unknown)
+            marker = self.plugin._note_path(new_note["ref"]).with_suffix(".complete-attempt.json")
+            self.assertTrue(marker.exists())
+            again = self.new_plugin().notify_once()
+            self.assertEqual(again["notifications"][0]["status"], "requires_inspection", again)
+            self.assertEqual(len(self.native.queue_calls), 2)
+            shown = self.gateway.clients[self.app].request("inbox_show", {
+                "conversation_id": self.cid, "delivery_id": old_note["delivery_id"]})
+            self.assertEqual((shown["status"], shown["turn_state"]), ("claimed", "recorded"))
+            for path, content in old_files.items():
+                self.assertEqual(path.read_bytes(), content)
+            return
+        final = self.new_plugin().reconcile()
+        self.assertEqual(final["notifications"][0]["reconciliations"][0]["status"], "completed", final)
+        self.assertEqual(len(self.native.thread["turns"]), 2)
+        with sqlite3.connect(self.gateway.fixture.ui / "coordinator.sqlite3") as db:
+            turns = db.execute("SELECT turn_id, turn_state FROM delivery_turn_history WHERE delivery_id=? ORDER BY id",
+                               (old_note["delivery_id"],)).fetchall()
+        self.assertEqual(turns, [("synthetic-native-turn", "completed")])
+        for path, content in old_files.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_defer_resume_same_delivery(self):
+        self.exercise_resumed_same_delivery("defer")
+
+    def test_draft_resume_same_delivery(self):
+        self.exercise_resumed_same_delivery("draft")
+
+    def test_resumed_unknown_queue_does_not_queue_again(self):
+        self.exercise_resumed_same_delivery("defer", "unknown_queue")
+
+    def test_resumed_unknown_complete_does_not_submit_again(self):
+        self.exercise_resumed_same_delivery("defer", "unknown_complete")
 
     def test_actual_gateway_rust_paginated_snapshot_skip_and_finish(self):
         self.seed_frozen_delivery()

@@ -263,9 +263,20 @@ class QueuedSnapshotPlugin:
             raise PluginError("native_thread_changed")
         return thread
 
-    def _note_path(self, route, delivery_id):
+    def _legacy_note_path(self, route, delivery_id):
         key = hashlib.sha256((route.session_ref + "\0" + str(delivery_id)).encode()).hexdigest()
         return self.runtime_dir / (key + ".transport.json")
+
+    def _note_path(self, ref):
+        if not isinstance(ref, str) or not HEX.fullmatch(ref):
+            raise PluginError("invalid_transport_ref")
+        return self.runtime_dir / (ref + ".transport.json")
+
+    def _transport_ref(self, route, delivery_id, token):
+        if not isinstance(token, str) or not token:
+            raise PluginError("transport_identity_missing")
+        original = self.base.notification(route, delivery_id, token)
+        return hmac.new(token.encode(), ("queue-snapshot-v1\0" + original).encode(), hashlib.sha256).hexdigest()
 
     def _show(self, route, delivery_id):
         self.base.binding(route)
@@ -346,11 +357,7 @@ class QueuedSnapshotPlugin:
             return {"conversation_id": route.conversation_id, "status": "original_transport_pending"}
         shown = self._show(route, claimed["delivery_id"])
         payload = self._frozen(route, shown)
-        token = shown.get("transport_token")
-        if not isinstance(token, str) or not token:
-            raise PluginError("transport_identity_missing")
-        original = self.base.notification(route, shown["delivery_id"], token)
-        ref = hmac.new(token.encode(), ("queue-snapshot-v1\0" + original).encode(), hashlib.sha256).hexdigest()
+        ref = self._transport_ref(route, shown["delivery_id"], shown.get("transport_token"))
         note = {"protocol_version": 1, "delivery_id": shown["delivery_id"], "conversation_id": route.conversation_id,
                 "session_ref": route.session_ref, "thread_id": route.session_id, "cwd": str(route.project),
                 "owner": route.owner, "epoch": route.expected_epoch, "ref": ref,
@@ -359,7 +366,7 @@ class QueuedSnapshotPlugin:
         note["notification"] = self._notification(note)
         publish(Path(note["snapshot_file"]), {"protocol_version": 1, "ref": ref, "payload": payload})
         # This durable intent precedes queue/add. Any unknown outcome is inspect-only.
-        publish(self._note_path(route, shown["delivery_id"]), note)
+        publish(self._note_path(ref), note)
         result = native.request("thread/queue/add", {"threadId": route.session_id,
                  "clientUserMessageId": note["client_id"],
                  "input": [{"type": "text", "text": note["notification"], "text_elements": []}]})
@@ -369,8 +376,7 @@ class QueuedSnapshotPlugin:
                 "status": "queued_for_host", "session_receipt": False, "business_completed": False}
 
     def _verify_frozen(self, route, delivery_id, note, shown):
-        original = self.base.notification(route, delivery_id, shown["transport_token"])
-        expected_ref = hmac.new(shown["transport_token"].encode(), ("queue-snapshot-v1\0" + original).encode(), hashlib.sha256).hexdigest()
+        expected_ref = self._transport_ref(route, delivery_id, shown.get("transport_token"))
         if not hmac.compare_digest(note["ref"], expected_ref):
             raise PluginError("notification_ref_changed")
         frozen = strict_json(snapshot_payload(note["snapshot_file"], note["ref"]))
@@ -383,11 +389,19 @@ class QueuedSnapshotPlugin:
         records = self.inbox.transport_records(route)
         for record in records:
             delivery_id = record["delivery_id"]
-            path = self._note_path(route, delivery_id)
+            shown = self._show(route, delivery_id)
+            ref = self._transport_ref(route, delivery_id, shown.get("transport_token"))
+            path = self._note_path(ref)
             if not path.exists():
-                results.append({"delivery_id": delivery_id, "status": "original_transport_pending"})
-                continue
+                legacy = self._legacy_note_path(route, delivery_id)
+                if legacy.exists() and read_private(legacy).get("ref") == ref:
+                    path = legacy
+                else:
+                    results.append({"delivery_id": delivery_id, "status": "original_transport_pending"})
+                    continue
             note = read_private(path)
+            if note.get("ref") != ref:
+                raise PluginError("notification_ref_changed")
             for key, value in (("delivery_id", delivery_id), ("conversation_id", route.conversation_id),
                                ("session_ref", route.session_ref), ("thread_id", route.session_id),
                                ("cwd", str(route.project)), ("owner", route.owner), ("epoch", route.expected_epoch)):

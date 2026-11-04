@@ -182,6 +182,36 @@ class QueuedSnapshotTests(unittest.TestCase):
                 finally:
                     case.doCleanups()
 
+    def test_legacy_inflight_note_reconciles_only_for_current_transport(self):
+        self.prepare()
+        route = self.plugin.routes[0]
+        current = next(self.runtime.glob("*.transport.json"))
+        legacy = self.plugin._legacy_note_path(route, self.note["delivery_id"])
+        current.rename(legacy)
+        result = self.new_plugin().reconcile()
+        self.assertEqual(result["notifications"][0]["reconciliations"][0]["status"], "completed", result)
+        self.assertEqual(len(self.completes()), 1)
+        self.assertTrue(legacy.exists())
+
+    def test_stale_legacy_ref_cannot_complete_new_transport(self):
+        self.prepare()
+        route = self.plugin.routes[0]
+        current = next(self.runtime.glob("*.transport.json"))
+        current.rename(self.plugin._legacy_note_path(route, self.note["delivery_id"]))
+        self.inbox.delivery["transport_token"] = "SECRET-NEW-TRANSPORT"
+        result = self.new_plugin().reconcile()
+        self.assertEqual(result["notifications"][0]["reconciliations"][0]["status"],
+                         "original_transport_pending", result)
+        self.assertFalse(self.completes())
+        self.assertEqual(self.inbox.delivery["turn_state"], "reserved")
+
+    def test_tampered_current_note_ref_cannot_complete(self):
+        self.prepare()
+        path = next(self.runtime.glob("*.transport.json"))
+        altered = dict(self.note, ref="0" * 64)
+        path.write_bytes(encoded(altered))
+        self.assert_rejected()
+
     def test_native_and_reader_rejections(self):
         self.prepare()
         original = copy.deepcopy(self.native.thread)

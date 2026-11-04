@@ -102,4 +102,6 @@ wx-agent-plugin-runner --adapter queue-snapshot \
 
 外层先 claim/reserve，持久化快照与通知意图，再排队一次。模型执行的 `snapshot --file … --ref … --offset …` 子命令仅做本地读取，不加载网关或凭据；每段至多 8192 字节，必须读取完整冻结范围。外层只接受精确 thread/CWD/client ID、成功的规范读取命令、完整分段摘要、明确的最终 JSON 和带有效完成时间的原生成功回合。随后分别记录 turn、提交业务决定、核对 Rust 结果并结束 transport。最终文字本身不算业务确认，也不会发送微信。
 
+合法的 `defer` / `draft` 在终结并经 Rust 显式恢复后，沿用原 delivery ID、原 Session，生成新的 transport 引用；每轮的私有 note、快照和提交标记独立保留。升级前的在途 note 只有与当前 Rust transport 的引用精确匹配时才会采用。旧回合不能作为新一轮的收件或决定证明。
+
 排队或业务提交结果未知时保留原 reservation 与意图，停止重发；`reconcile` 核对原回合，并仅在全部证据成立时记录原决定和 transport。如果业务决定已经成功、仅 transport 结束失败，后续核对只补原 transport，不重复提交决定。该模式的合成检查和实际宿主验收也分别记录，不能用前者宣称后者通过。
