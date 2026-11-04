@@ -104,7 +104,7 @@ wx-agent inbox --config /ABS/private/conversations.json events \
 
 插件安装不默认开启回复或后台模型。Session 使用者可以主动查消息，也可以显式启用其插件监听。插件停止或 Session 离线时，通道仍能采集；一个 Session 不可用不应阻塞另一会话。
 
-跨宿主接入沿用相同通道合同。候选通过已认证 SSH 调用有应用凭据与会话范围的 RPC；Session 插件可选择相同 gateway 后端，微信数据库和 GUI 仍留在微信宿主。两个应用的异机发送及不同物理宿主的限定只读 inbox API 已分别实测；这还不是异机 Session 插件投递。证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+跨宿主接入沿用相同通道合同。通过已认证 SSH 调用有应用凭据与会话范围的 RPC；Session 插件可选择相同 gateway 后端，微信数据库和 GUI 仍留在微信宿主。两个应用的异机发送、限定只读 inbox API，以及已加载原 App 宿主的 queue snapshot 处理已分别实测。证据见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
 
 ## 当前做到哪里，怎样验收
 
@@ -112,13 +112,24 @@ wx-agent inbox --config /ABS/private/conversations.json events \
 | --- | --- | --- |
 | 独立 channel 订阅与显式确认 | 已有 Rust CLI 和重启重放测试 | 订阅不运行模型、不自动 ack；断开后未确认事件可重读 |
 | 多会话 inbox 与处理决定 | 已实现；已有受管测试 Session 的真实入站决定 | 原 delivery、owner/epoch、来源和明确决定可核对 |
-| 共享文字发送及切会话 | 已有实机和用户独立收件确认 | 多会话并发入队、一次 attempt、正确目标、串行桌面 |
-| 现有 Codex 受管适配器 | 可选实验接入，支持自行持有的原 thread | 不等同于任意桌面 Session 的插件接入 |
-| 项目级原 Session 插件 | 原专用 native TUI Session 路径有一次全新入站单回合实机闭环 | 精确 Hook、冻结事件读取、明确决定、原生与 Rust transport 均完成；桌面 App 持有的 Session 未验 |
+| 共享文字发送及切会话 | 新语料连续 30 条通过，用户确认两目标各 15 条 | 交替目标、每条一次 attempt、源事件及独立收件一致 |
+| 共享图片及配文队列 | 群图片后配文整批实机通过 | 精确源像素、各一次 attempt、用户确认图片和配文顺序 |
+| 现有 Codex 受管适配器 | 支持自行持有的原 thread；原私聊单回合读取四条入站并 skip | 原 Session 引用不变，原生及 Rust transport 完成 |
+| 项目级原 Session 插件 | 原专用 native TUI Hook 与已加载 App 的 queue snapshot 路径各有实证 | 精确回合关联、冻结事件读取、明确决定、原生与 Rust transport 均完成 |
 | 应用异机发送 | 两个应用各一次经受限鉴权 SSH 发送，用户独立确认 | 正确目标、内容及换行；越权、无 shell/PTY 探针通过 |
-| 异机只读 inbox API | 不同物理宿主的限定范围读取实测通过 | 正确入站可读、跨会话读取及发送均拒绝；未运行异机 Session 插件 |
-| 异机 Session 插件 | gateway 后端已有，现场闭环未验 | 仍需异机原 Session 收到通知、处理决定与断线恢复证据 |
+| 异机只读 inbox API | 不同物理宿主的限定范围读取实测通过 | 正确入站可读、跨会话读取及发送均拒绝 |
+| 异机 Session 插件 | 已加载原 App Session 读取四条积压及三条新入站并 skip | 完整读取及终态核对；通知进程重启保留同一 reservation，未重复通知 |
+| 人工接管隔离 | 真实人工出站仅接管对应群，正常交还通过 | 测试私聊的 owner、epoch、control 不变，旧 outbox 与 Session 引用保留 |
 
-`codex queue` 退出成功仍只表示排队；插件以原生精确回调和同一 delivery 的业务决定核对实际处理。原专用 native TUI Session 已取得该闭环；不能仅凭 queue 返回值推广到桌面 App 持有的 Session 或异机 Session 插件。[官方命令文档](https://learn.chatgpt.com/docs/developer-commands)与安装版本 help 只说明命令接口。
+`codex queue` 退出成功仍只表示排队。Hook 模式以原生精确回调核对回合；queue snapshot 模式核对精确 client ID、完整读取、最终提案和带完成时间的原生终态，再分别记录业务决定及 Rust transport。[官方命令文档](https://learn.chatgpt.com/docs/developer-commands)与安装版本 help 只说明命令接口。
 
-验收继续区分底层订阅、鉴权 API、原 Session 处理和桌面发送；已通过的专用 TUI 路径不覆盖其他宿主或长期故障场景。项目安装与正常 Hook 信任流程、配置及命令见[Session 插件指南](SESSION_PLUGIN.md)。真实图片队列在聚焦阶段停止，原不明意图保留，尚无图片准备或提交证据。
+验收继续区分底层订阅、鉴权 API、原 Session 处理和桌面发送；有界实测不代表长期运行或任意宿主均已通过。项目安装、配置及命令见[Session 插件指南](SESSION_PLUGIN.md)。旧图片、文字失败及未尝试批次保留，新成功不覆盖旧历史。
+
+## 本轮合并范围与后续讨论
+
+本轮接受上述已实现、已验证的通道、发送队列、应用接入及 Session 处理路径。App 的 queue snapshot 模式要求原聊天宿主正常加载；未加载时保留待办及通知，宿主恢复后核对原通知。
+
+以下两项保留为后续设计与专项验收，不计入本轮已通过范围：
+
+- 未加载 App 原聊天宿主的自动冷唤醒：后续讨论宿主可用性检测及正常激活接口。
+- 旧 App Hook 回调路径：后续讨论原生事件支持、信任后的实际加载机制及是否保留该接入方式；现有 native TUI Hook 实现与已验证路径保留。

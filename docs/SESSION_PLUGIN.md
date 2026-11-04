@@ -2,6 +2,8 @@
 
 wx-cli 独立保存微信事件、订阅进度、持久 inbox、处理决定和发送队列。Codex 插件只把已有 delivery 接到**原 Session**，通过原生 Hook 或下述 queue snapshot 模式核对实际回合。插件不拥有第二份业务账本，也不调用 `thread/start` 或 `thread/resume`；终结状态只通过只读 `thread/read` 核对。总体边界见[通道订阅合同](CHANNEL_SUBSCRIPTIONS.md)。
 
+本轮合并保留已验证的 native TUI Hook 路径，以及**原 App 宿主已加载**时的 queue snapshot 路径。自动冷唤醒与旧 App Hook 回调的设计和专项验收留待后续讨论；这两项不计入本轮已通过范围。
+
 ## 安装到一个项目
 
 需要两件交付物：已安装的 `wx-agent` wheel 提供 `wx-agent-plugin`、`wx-agent-queue-session`、`wx-agent-plugin-runner` 和 `wx-agent-plugin-install`；[插件 bundle](../plugins/codex-wechat/.codex-plugin/plugin.json)提供项目 Skill 的唯一文本来源及标准插件包装。脱离源码检出的 wheel 安装时，须单独提供 bundle 的规范绝对路径；wheel 本身不包含该 Skill 副本。
