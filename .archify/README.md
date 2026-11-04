@@ -1,5 +1,7 @@
 # 仓库架构图
 
+2026-11-01 批准方案的三张图：[原主线实现](../docs/diagrams/wechat-current.html)、[文字发送时序](../docs/diagrams/wechat-send.html)、[多会话目标](../docs/diagrams/wechat-target.html)。前两张固定于当时的 `89f6907` 基线，目标图是批准设计，均不表示新增协调器已部署或通过实机。源位于对应 `*-wechat-*-20261101-160826/candidate.json`；原产物和 finalize 回执留本机。用 `python3 scripts/publish_architecture.py --diagram wechat-current`（或 `wechat-send`、`wechat-target`）从通过回执生成公开副本，`--check` 核对规范化后的字节一致性。生成器仍按下文 Archify 命令重建；不修改原 HTML 或其回执。
+
 [打开单群渠道架构图](../docs/diagrams/agent-channel.html)。图展示代码中的组件责任和数据流，不表示新包已经部署。原始输入为同目录 `candidate.json`；源码链接固定到实现提交，后续代码变更时应重新核对来源。
 
 使用 Archify 3.1.0 和 Node.js 重建。`ARCHIFY_ROOT` 指向你已安装的 Archify；该工具不是本仓库运行依赖，也不会由本仓库安装到全局。

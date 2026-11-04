@@ -20,6 +20,94 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SenderTests(unittest.TestCase):
+    def expected_media_fixture(self, root):
+        root = Path(root).resolve()
+        ui = root / "wechat-wx-cli-test" / "ui"
+        ui.mkdir(parents=True, mode=0o700)
+        ui.parent.chmod(0o700)
+        state = root / "state"; state.mkdir(mode=0o700)
+        app = root / "helper.app"
+        helper = app / "Contents/MacOS/WeChatTestBridge"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"synthetic executable"); helper.chmod(0o700)
+        image = state / "known-frozen-image"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nsynthetic frozen image"); image.chmod(0o600)
+        media = driver.image_descriptor(image, require_private=True)
+        config = dict(self.config, protocol_version=1, wx_cli=str(helper), helper_app=str(app),
+            helper_sha256=hashlib.sha256(helper.read_bytes()).hexdigest(), ui_dir=str(ui),
+            channel_state_dir=str(state), target_group="Synthetic Group", expected_pid=42,
+            window_size={"width":880,"height":640}, expected_draft="", expected_draft_media=media,
+            composer_rect={"x":320,"y":500,"width":400,"height":80},
+            button_point={"x":800,"y":610},
+            conversation_list_rect={"x":60,"y":55,"width":240,"height":570},
+            search_point={"x":155,"y":28})
+        return root, config, media, image
+
+    def test_expected_draft_media_validates_and_forwards_original_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, media, _ = self.expected_media_fixture(directory)
+            with mock.patch.object(Path, "home", return_value=root):
+                checked = driver.safe_config(dict(config))
+            command = driver._prepare_command(self.request, checked)
+            self.assertEqual(command["expectedDraftMedia"], media)
+            image_request = dict(self.request, protocol_version=2, text=None, media=media)
+            driver.request_ok(image_request, checked)
+            self.assertEqual(driver._prepare_command(image_request, checked)["expectedDraftMedia"], media)
+            legacy = dict(checked); legacy.pop("expected_draft_media")
+            expected = dict(command); expected.pop("expectedDraftMedia")
+            self.assertEqual(driver._prepare_command(self.request, legacy), expected)
+
+    def test_expected_draft_media_mutation_after_config_refuses_before_prepare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, _, image = self.expected_media_fixture(directory)
+            with mock.patch.object(Path, "home", return_value=root):
+                checked = driver.safe_config(dict(config))
+            image.write_bytes(b"\x89PNG\r\n\x1a\nchanged image")
+            with self.assertRaises(driver.Refused):
+                driver.request_ok(self.request, checked)
+            with self.assertRaises(driver.Refused):
+                driver._prepare_command(self.request, checked)
+
+    def test_expected_draft_media_invalid_descriptor_refuses_in_config_and_prepare(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, media, image = self.expected_media_fixture(directory)
+            link = image.with_name("image-link"); link.symlink_to(image)
+            for value in (None, {}, dict(media, sha256="0"*64), dict(media, unexpected=True),
+                          dict(media, path=str(link)), dict(media, size_bytes=True)):
+                changed = dict(config, expected_draft_media=value)
+                with self.subTest(value=value), mock.patch.object(Path, "home", return_value=root):
+                    with self.assertRaises(driver.Refused): driver.safe_config(dict(changed))
+                    with self.assertRaises(driver.Refused): driver._prepare_command(self.request, changed)
+            image.chmod(0o644)
+            with self.assertRaises(driver.Refused): driver._prepare_command(self.request, config)
+
+    def test_expected_draft_media_and_nonempty_text_draft_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config, _, _ = self.expected_media_fixture(directory)
+            for text in ("known draft", " "):
+                changed = dict(config, expected_draft=text)
+                with mock.patch.object(Path, "home", return_value=root):
+                    with self.assertRaises(driver.Refused): driver.safe_config(dict(changed))
+                with self.assertRaises(driver.Refused): driver._prepare_command(self.request, changed)
+
+    def test_inherited_recovery_lock_must_reacquire_same_locked_description(self):
+        with tempfile.TemporaryDirectory() as root:
+            lock_path = Path(root) / "sender.lock"
+            held = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            other = os.open(lock_path, os.O_RDWR)
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with mock.patch.dict(os.environ, {"WX_DESKTOP_LOCK_FD": str(other)}):
+                    with self.assertRaises(driver.Refused):
+                        with driver.recovery_sender_lock(lock_path):
+                            pass
+                with mock.patch.dict(os.environ, {"WX_DESKTOP_LOCK_FD": str(held)}):
+                    with driver.recovery_sender_lock(lock_path):
+                        pass
+            finally:
+                os.close(other)
+                os.close(held)
+
     def setUp(self):
         self.binding = {"channel_id": "channel-one", "session_id": "session-one",
                         "account": "local-account", "talker": "group@chatroom",
@@ -69,6 +157,47 @@ class SenderTests(unittest.TestCase):
             os.link(path, link)
             with self.assertRaises(driver.Refused):
                 driver.validate_empty_composer_reference(config)
+
+    def test_empty_composer_alternates_are_bounded_pinned_and_forwarded(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            references = []
+            for index in range(4):
+                path = ui / (str(index) + ".png")
+                raw = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 400, 80) + bytes([index])
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                references.append({"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()})
+            config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_pid=42,
+                          composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                          button_point={"x": 800, "y": 610}, empty_composer_reference=references[0],
+                          empty_composer_alternates=references[1:3])
+            driver.validate_empty_composer_reference(config)
+            self.assertEqual(driver._prepare_command(self.request, config)["emptyComposerAlternates"], references[1:3])
+            for changes in ({"empty_composer_alternates": references[1:]},
+                            {"empty_composer_alternates": [references[0]]},
+                            {"empty_composer_reference": None},
+                            {"empty_composer_alternates": "invalid"},
+                            {"empty_composer_alternates": [dict(references[1], sha256="0" * 64)]}):
+                with self.subTest(changes=changes), self.assertRaises(driver.Refused):
+                    driver.validate_empty_composer_reference(dict(config, **changes))
+
+    def test_recovery_preserves_calibrated_alternates(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_unsent_artifacts(root, modern=True)
+            alternate = {"path": str(Path(root) / "indicator.png"), "sha256": "2" * 64}
+            config["empty_composer_alternates"] = [alternate]
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            for suffix in (".prepare-visual.job.json", ".visual-state.json"):
+                path = Path(root) / (tid + suffix)
+                driver.private_update(path, dict(driver.private_read(path), emptyComposerAlternates=[alternate]))
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                for replacement in (None, [], [dict(alternate, sha256="3" * 64)]):
+                    with self.assertRaisesRegex(driver.Refused, "prior empty composer alternates differ"):
+                        driver.prove_unsent(recovery, dict(config, empty_composer_alternates=replacement),
+                                            2, driver.time.monotonic() + 3, persist=False)
 
     def test_recovery_preserves_reference_and_allows_reviewed_addition(self):
         with tempfile.TemporaryDirectory() as root:
@@ -249,6 +378,355 @@ class SenderTests(unittest.TestCase):
             driver.private_create(ui / (prefix + ".result.json"),
                                   focus_result if action == "focus-group" else {"id": prefix, "ok": True})
         return request, config, tid
+
+    def _prior_empty_inspect_artifacts(self, root):
+        ui = Path(root)
+        ui.chmod(0o700)
+        config = dict(self.config, ui_dir=ui, target_group="Synthetic Group", expected_pid=42)
+        request = dict(self.request)
+        tid = driver.request_ok(request, config)
+        prefix = tid + "-inspect"
+        driver.private_create(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 1,
+            "stage": "started", "status": "failed", "error": "WeChat process or window changed"})
+        driver.private_create(ui / (prefix + ".inspect.job.json"), {"id": prefix, "action": "inspect"})
+        driver.private_create(ui / (prefix + ".result.json"), {
+            "id": prefix, "action": "inspect", "ok": True, "weChatPID": 42, "windows": [],
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True},
+            "session": {"onConsole": True, "locked": None}})
+        return request, config, tid
+
+    def test_empty_inspect_recovery_regression(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_empty_inspect_artifacts(root)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                proof = driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3,
+                                            persist=False)
+            self.assertEqual(proof["prior_focus_mode"], "inspect-only")
+            self.assertEqual(proof["report_stage"], "started")
+            self.assertFalse((config["ui_dir"] / (tid + ".recovery-proof-to-2.json")).exists())
+
+    def test_empty_inspect_preflight_is_read_only_and_proof_is_single_use(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, tid = self._prior_empty_inspect_artifacts(root)
+            recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+            # The production preflight expects an existing shared sender lock.
+            driver.private_create(config["ui_dir"] / "sender.lock", {})
+            before = {path.name: path.read_bytes() for path in config["ui_dir"].iterdir()}
+            with mock.patch.object(driver, "status", return_value=0), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False):
+                self.assertTrue(driver.recovery_preflight(recovery, config)["unsent_proven"])
+            self.assertEqual(before, {path.name: path.read_bytes() for path in config["ui_dir"].iterdir()})
+            driver.private_create(config["ui_dir"] / (tid + "-a2.client-result.json"), {
+                "id": tid + "-a2", "request_id": request["request_id"],
+                "attempt_number": 2, "recovery_from_attempt": 1,
+                "stage": "started", "status": "indeterminate"})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                proof = driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+            self.assertEqual(driver.private_read(Path(proof))["prior_focus_mode"], "inspect-only")
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                with self.assertRaises(driver.Refused):
+                    driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3, persist=False)
+                with self.assertRaises(driver.Refused):
+                    driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+            self.assertEqual(Path(proof).name, tid + ".recovery-proof-to-2.json")
+
+    def test_empty_inspect_recovery_rejects_broken_or_later_evidence(self):
+        mutations = ("missing_report", "missing_job", "missing_result", "wrong_report_id",
+                     "wrong_request", "missing_request", "wrong_attempt", "missing_attempt",
+                     "wrong_stage", "wrong_status", "wrong_error",
+                     "wrong_job_id", "wrong_action", "wrong_result_id", "wrong_result_action", "result_not_ok",
+                     "wrong_pid", "zero_pid", "nonempty_windows", "missing_windows",
+                     "missing_permissions", "bad_permission", "off_console", "locked", "unknown_lock",
+                     "focus_job", "prepare_job", "submit_marker", "visual_state", "other_artifact",
+                     "later_submit", "later_report", "live_helper", "image", "second_recovery")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root:
+                request, config, tid = self._prior_empty_inspect_artifacts(root)
+                ui = config["ui_dir"]
+                recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+                report_path = ui / (tid + ".client-result.json")
+                job_path = ui / (tid + "-inspect.inspect.job.json")
+                result_path = ui / (tid + "-inspect.result.json")
+                report = driver.private_read(report_path)
+                job = driver.private_read(job_path)
+                result = driver.private_read(result_path)
+                if mutation.startswith("missing_") and mutation in ("missing_report", "missing_job", "missing_result"):
+                    {"missing_report": report_path, "missing_job": job_path,
+                     "missing_result": result_path}[mutation].unlink()
+                elif mutation in ("wrong_report_id", "wrong_request", "missing_request", "wrong_attempt",
+                                  "missing_attempt", "wrong_stage", "wrong_status", "wrong_error"):
+                    if mutation in ("missing_request", "missing_attempt"):
+                        report.pop("request_id" if mutation == "missing_request" else "attempt_number")
+                    else:
+                        key, value = {"wrong_report_id": ("id", "other"),
+                                      "wrong_request": ("request_id", "other"),
+                                      "wrong_attempt": ("attempt_number", 2),
+                                      "wrong_stage": ("stage", "inspected"),
+                                      "wrong_status": ("status", "indeterminate"),
+                                      "wrong_error": ("error", "other")}[mutation]
+                        report[key] = value
+                    driver.private_update(report_path, report)
+                elif mutation in ("wrong_job_id", "wrong_action"):
+                    job["id" if mutation == "wrong_job_id" else "action"] = "other"
+                    driver.private_update(job_path, job)
+                elif mutation in ("wrong_result_id", "wrong_result_action", "result_not_ok", "wrong_pid", "zero_pid",
+                                  "nonempty_windows", "missing_windows", "missing_permissions",
+                                  "bad_permission", "off_console", "locked", "unknown_lock"):
+                    if mutation == "wrong_result_id": result["id"] = "other"
+                    if mutation == "wrong_result_action": result["action"] = "other"
+                    if mutation == "result_not_ok": result["ok"] = False
+                    if mutation == "wrong_pid": result["weChatPID"] = 43
+                    if mutation == "zero_pid": result["weChatPID"] = 0
+                    if mutation == "nonempty_windows": result["windows"] = [{"id": 1}]
+                    if mutation == "missing_windows": result.pop("windows")
+                    if mutation == "missing_permissions": result.pop("permissions")
+                    if mutation == "bad_permission": result["permissions"]["postEvents"] = False
+                    if mutation == "off_console": result["session"]["onConsole"] = False
+                    if mutation == "locked": result["session"]["locked"] = True
+                    if mutation == "unknown_lock": result["session"]["locked"] = "unknown"
+                    driver.private_update(result_path, result)
+                elif mutation in ("focus_job", "prepare_job", "submit_marker", "visual_state", "other_artifact"):
+                    suffix = {"focus_job": "-focus.focus-group.job.json",
+                              "prepare_job": ".prepare-visual.job.json",
+                              "submit_marker": ".submit-attempted.json",
+                              "visual_state": ".visual-state.json",
+                              "other_artifact": "-unknown.result.json"}[mutation]
+                    driver.private_create(ui / (tid + suffix), {"id": tid})
+                elif mutation == "image":
+                    recovery = dict(recovery, protocol_version=2, text=None, media={})
+                elif mutation == "second_recovery":
+                    recovery = dict(recovery, attempt_number=3, recovery_from_attempt=2)
+                elif mutation in ("later_submit", "later_report"):
+                    driver.private_create(ui / (tid + ("-a2.submit-attempted.json" if mutation == "later_submit"
+                                                     else "-a3.client-result.json")), {"id": tid})
+                with mock.patch.object(driver, "_helper_is_live", return_value=mutation == "live_helper"):
+                    with self.assertRaises(driver.Refused):
+                        driver.prove_unsent(recovery, config, recovery["attempt_number"],
+                                            driver.time.monotonic() + 3, persist=False)
+
+    def test_empty_inspect_locked_recheck_accepts_only_current_started_report(self):
+        for mutation in (None, "current_focus", "other_attempt", "wrong_request", "wrong_stage"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root:
+                request, config, tid = self._prior_empty_inspect_artifacts(root)
+                ui = config["ui_dir"]
+                current_path = ui / (tid + "-a2.client-result.json")
+                current = {"id": tid + "-a2", "request_id": request["request_id"],
+                           "attempt_number": 2, "recovery_from_attempt": 1,
+                           "stage": "started", "status": "indeterminate"}
+                if mutation == "wrong_request": current["request_id"] = "other"
+                if mutation == "wrong_stage": current["stage"] = "inspected"
+                driver.private_create(current_path, current)
+                if mutation == "current_focus":
+                    driver.private_create(ui / (tid + "-a2-focus.focus-group.job.json"), {"id": tid})
+                if mutation == "other_attempt":
+                    driver.private_create(ui / (tid + "-a3.client-result.json"), {"id": tid})
+                recovery = dict(request, attempt_number=2, recovery_from_attempt=1)
+                with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                    if mutation is None:
+                        proof = driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+                        self.assertEqual(driver.private_read(Path(proof))["prior_focus_mode"], "inspect-only")
+                    else:
+                        with self.assertRaises(driver.Refused):
+                            driver.prove_unsent(recovery, config, 2, driver.time.monotonic() + 3)
+
+    def _prior_focus_timeout_artifacts(self, root):
+        request, config, base = self._prior_empty_inspect_artifacts(root)
+        ui = config["ui_dir"]
+        prior_proof = ui / (base + ".recovery-proof-to-2.json")
+        driver.private_create(prior_proof, {
+            "request_id": request["request_id"], "from_attempt": 1,
+            "attempt_number": 2, "transaction_id": base,
+            "result_error": "WeChat process or window changed", "report_stage": "started",
+            "report_status": "failed", "prior_focus_mode": "inspect-only",
+            "proof_saved_at": "2026-10-27T06:18:20+00:00"})
+        tid = base + "-a2"
+        inspect_id = tid + "-inspect"
+        focus_id = tid + "-focus"
+        frame = {"x": 520, "y": 220, "width": 880, "height": 640}
+        config.update(conversation_kind="group", conversation_list_rect={"x": 1, "y": 60, "width": 200, "height": 200},
+                      search_point={"x": 20, "y": 30})
+        driver.private_create(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 2,
+            "recovery_from_attempt": 1, "recovery_proof": str(prior_proof),
+            "stage": "inspected", "status": "indeterminate", "error": "helper action timed out"})
+        driver.private_create(ui / (inspect_id + ".inspect.job.json"), {"id": inspect_id, "action": "inspect"})
+        driver.private_create(ui / (inspect_id + ".result.json"), {
+            "id": inspect_id, "action": "inspect", "ok": True, "weChatPID": 42,
+            "windows": [{"id": 835, "frame": frame}],
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True},
+            "session": {"onConsole": True, "locked": None}})
+        driver.private_create(ui / (focus_id + ".focus-group.job.json"), {
+            "id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+            "targetKind": "group", "expectedPID": 42, "expectedWindowID": 835,
+            "expectedFrame": frame, "conversationListRect": config["conversation_list_rect"],
+            "searchPoint": config["search_point"]})
+        driver.private_create(ui / (focus_id + ".result.json"), {
+            "id": focus_id, "ok": False, "error": "Cannot snapshot a clipboard item",
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+        (ui / (focus_id + ".focus-attempted.json")).touch(mode=0o600)
+        for suffix in ("before-search-click.png", "before-search-select.png", "focus-initial.png"):
+            path = ui / (focus_id + "." + suffix)
+            path.write_bytes(b"synthetic pixels")
+            path.chmod(0o600)
+        return request, config, base, tid
+
+    def test_focus_timeout_recovery_regression(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, _, _ = self._prior_focus_timeout_artifacts(root)
+            recovery = dict(request, attempt_number=3, recovery_from_attempt=2)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                proof = driver.prove_unsent(recovery, config, 3, driver.time.monotonic() + 3,
+                                            persist=False)
+            self.assertEqual(proof["prior_focus_mode"], "focus-timeout-unsent")
+
+    def test_focus_timeout_preflight_and_locked_proof_are_single_use(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, base, tid = self._prior_focus_timeout_artifacts(root)
+            recovery = dict(request, attempt_number=3, recovery_from_attempt=2)
+            driver.private_create(config["ui_dir"] / "sender.lock", {})
+            before = {path.name: path.read_bytes() for path in config["ui_dir"].iterdir()}
+            with mock.patch.object(driver, "status", return_value=0), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False):
+                self.assertTrue(driver.recovery_preflight(recovery, config)["unsent_proven"])
+            self.assertEqual(before, {path.name: path.read_bytes() for path in config["ui_dir"].iterdir()})
+            driver.private_create(config["ui_dir"] / (base + "-a3.client-result.json"), {
+                "id": base + "-a3", "request_id": request["request_id"],
+                "attempt_number": 3, "recovery_from_attempt": 2,
+                "stage": "started", "status": "indeterminate"})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                proof = driver.prove_unsent(recovery, config, 3, driver.time.monotonic() + 3)
+                self.assertEqual(driver.private_read(Path(proof))["prior_focus_mode"], "focus-timeout-unsent")
+                with self.assertRaises(driver.Refused):
+                    driver.prove_unsent(recovery, config, 3, driver.time.monotonic() + 3)
+                with self.assertRaises(driver.Refused):
+                    driver.prove_unsent(recovery, config, 3, driver.time.monotonic() + 3, persist=False)
+            self.assertEqual(Path(proof).name, tid + ".recovery-proof-to-3.json")
+
+    def test_focus_timeout_preflight_keeps_reconciled_helper_marker_read_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            request, config, _, tid = self._prior_focus_timeout_artifacts(root)
+            ui = config["ui_dir"]
+            driver.private_create(ui / "sender.lock", {})
+            marker = ui / driver.HELPER_UNRESOLVED
+            driver.private_create(marker, {"id": tid + "-focus", "action": "focus-group"})
+            before = {path.name: path.read_bytes() for path in ui.iterdir()}
+            recovery = dict(request, attempt_number=3, recovery_from_attempt=2)
+            with mock.patch.object(driver, "status", return_value=0), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False):
+                self.assertTrue(driver.recovery_preflight(recovery, config)["unsent_proven"])
+            self.assertEqual(before, {path.name: path.read_bytes() for path in ui.iterdir()})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                driver._guard_helper(config, driver.time.monotonic() + 3)
+            self.assertFalse(marker.exists())
+
+    def test_guard_rejects_unknown_success_without_action(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            marker = ui / driver.HELPER_UNRESOLVED
+            driver.private_create(marker, {"id": "test-inspect", "action": "inspect"})
+            driver.private_create(ui / "test-inspect.inspect.job.json", {"id": "test-inspect", "action": "inspect"})
+            driver.private_create(ui / "test-inspect.result.json", {"id": "test-inspect", "ok": True})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+                 self.assertRaisesRegex(driver.Refused, "prior helper terminal result is invalid"):
+                driver._guard_helper({"ui_dir": ui}, driver.time.monotonic() + 3)
+            self.assertTrue(marker.exists())
+
+    def test_focus_timeout_recovery_rejects_incomplete_or_changed_trace(self):
+        mutations = ("wrong_report_request", "wrong_report_error", "wrong_report_stage",
+                     "wrong_report_attempt", "wrong_report_proof", "wrong_proof_request",
+                     "wrong_proof_mode", "wrong_first_result", "wrong_inspect_pid",
+                     "empty_second_windows", "wrong_inspect_window", "bad_inspect_permission",
+                     "locked_session", "wrong_focus_target", "wrong_focus_frame",
+                     "wrong_focus_error", "focus_ok", "focus_action", "bad_focus_permission",
+                     "nonempty_focus_marker", "missing_capture", "missing_focus_result",
+                     "missing_old_proof", "prepare_job", "visual_state",
+                     "submit_job", "focus_evidence", "unknown_artifact", "early_a3_report",
+                     "live_helper", "image", "wrong_recovery_attempt")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root:
+                request, config, base, tid = self._prior_focus_timeout_artifacts(root)
+                ui = config["ui_dir"]
+                report_path = ui / (tid + ".client-result.json")
+                proof_path = ui / (base + ".recovery-proof-to-2.json")
+                old_result_path = ui / (base + "-inspect.result.json")
+                inspect_path = ui / (tid + "-inspect.result.json")
+                focus_job_path = ui / (tid + "-focus.focus-group.job.json")
+                focus_result_path = ui / (tid + "-focus.result.json")
+                changes = {
+                    "wrong_report_request": (report_path, "request_id", "other"),
+                    "wrong_report_error": (report_path, "error", "other"),
+                    "wrong_report_stage": (report_path, "stage", "prepared"),
+                    "wrong_report_attempt": (report_path, "attempt_number", 3),
+                    "wrong_report_proof": (report_path, "recovery_proof", "other"),
+                    "wrong_proof_request": (proof_path, "request_id", "other"),
+                    "wrong_proof_mode": (proof_path, "prior_focus_mode", "other"),
+                    "wrong_first_result": (old_result_path, "windows", [{"id": 1}]),
+                    "wrong_inspect_pid": (inspect_path, "weChatPID", 43),
+                    "empty_second_windows": (inspect_path, "windows", []),
+                    "wrong_inspect_window": (inspect_path, "windows", [{"id": 0, "frame": {}}]),
+                    "bad_inspect_permission": (inspect_path, "permissions", {}),
+                    "locked_session": (inspect_path, "session", {"onConsole": True, "locked": True}),
+                    "wrong_focus_target": (focus_job_path, "targetGroup", "other"),
+                    "wrong_focus_frame": (focus_job_path, "expectedFrame", {}),
+                    "wrong_focus_error": (focus_result_path, "error", "other"),
+                    "focus_ok": (focus_result_path, "ok", True),
+                    "focus_action": (focus_result_path, "action", "focus-group"),
+                    "bad_focus_permission": (focus_result_path, "permissions", {}),
+                }
+                if mutation in changes:
+                    path, key, value = changes[mutation]
+                    data = driver.private_read(path)
+                    data[key] = value
+                    driver.private_update(path, data)
+                elif mutation == "nonempty_focus_marker":
+                    (ui / (tid + "-focus.focus-attempted.json")).write_text("{}")
+                elif mutation == "missing_capture":
+                    (ui / (tid + "-focus.focus-initial.png")).unlink()
+                elif mutation == "missing_focus_result":
+                    focus_result_path.unlink()
+                elif mutation == "missing_old_proof":
+                    proof_path.unlink()
+                elif mutation in ("prepare_job", "visual_state", "submit_job", "focus_evidence",
+                                  "unknown_artifact", "early_a3_report"):
+                    suffix = {"prepare_job": ".prepare-visual.job.json",
+                              "visual_state": ".visual-state.json",
+                              "submit_job": ".submit-visual.job.json",
+                              "focus_evidence": "-focus.focus-evidence.json",
+                              "unknown_artifact": "-focus.other.json",
+                              "early_a3_report": ""}[mutation]
+                    path = ui / (base + "-a3.client-result.json") if mutation == "early_a3_report" else ui / (tid + suffix)
+                    driver.private_create(path, {"id": tid})
+                recovery = dict(request, attempt_number=3, recovery_from_attempt=2)
+                if mutation == "image": recovery = dict(recovery, protocol_version=2, text=None, media={})
+                if mutation == "wrong_recovery_attempt": recovery["recovery_from_attempt"] = 1
+                with mock.patch.object(driver, "_helper_is_live", return_value=mutation == "live_helper"):
+                    with self.assertRaises(driver.Refused):
+                        driver.prove_unsent(recovery, config, 3, driver.time.monotonic() + 3, persist=False)
+
+    def test_focus_timeout_locked_recheck_rejects_extra_or_changed_attempt_three(self):
+        for mutation in ("extra_focus", "extra_submit", "wrong_request", "wrong_stage", "wrong_attempt"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root:
+                request, config, base, _ = self._prior_focus_timeout_artifacts(root)
+                ui = config["ui_dir"]
+                report_path = ui / (base + "-a3.client-result.json")
+                report = {"id": base + "-a3", "request_id": request["request_id"],
+                          "attempt_number": 3, "recovery_from_attempt": 2,
+                          "stage": "started", "status": "indeterminate"}
+                if mutation == "wrong_request": report["request_id"] = "other"
+                if mutation == "wrong_stage": report["stage"] = "inspected"
+                if mutation == "wrong_attempt": report["attempt_number"] = 4
+                driver.private_create(report_path, report)
+                if mutation.startswith("extra_"):
+                    driver.private_create(ui / (base + "-a3" +
+                                             ("-focus.focus-group.job.json" if mutation == "extra_focus"
+                                              else ".submit-attempted.json")), {"id": base})
+                recovery = dict(request, attempt_number=3, recovery_from_attempt=2)
+                with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                    with self.assertRaises(driver.Refused):
+                        driver.prove_unsent(recovery, config, 3, driver.time.monotonic() + 3)
 
     def test_prior_helper_blocks_new_desktop_actions_even_after_lock_release(self):
         # A timed-out helper launched by `open` can outlive its Python driver
@@ -479,10 +957,110 @@ class SenderTests(unittest.TestCase):
             def fake_open(_argv, _deadline, limit):
                 driver.private_create(ui / (tid + ".result.json"), result)
                 return ""
-            with mock.patch.object(driver, "call", side_effect=fake_open):
+            with mock.patch.object(driver, "call", side_effect=fake_open), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=False):
                 with self.assertRaisesRegex(driver.Uncertain, "^bridge permissions missing$"):
                     driver.bridge({"ui_dir": ui, "helper_app": "/private/bridge.app"}, tid,
                                   "inspect", {}, driver.time.monotonic() + 2, 1)
+
+    def test_bridge_collects_late_focus_failure_while_holding_ui_guard(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            tid = "focus-late"
+            config = {"ui_dir": ui, "helper_app": "/private/bridge.app"}
+            clock = [0.0]
+            def advance(seconds):
+                clock[0] += seconds
+                if clock[0] >= 23 and not (ui / (tid + ".result.json")).exists():
+                    driver.private_create(ui / (tid + ".result.json"), {
+                        "id": tid, "ok": False, "error": "Cannot snapshot a clipboard item",
+                        "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+            with mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(driver.time, "sleep", side_effect=advance), \
+                 mock.patch.object(driver, "call", return_value=""), \
+                 mock.patch.object(driver, "_helper_is_live", side_effect=lambda *_: clock[0] < 24):
+                with self.assertRaisesRegex(driver.Uncertain,
+                                            "focus failed before message preparation: clipboard state changed"):
+                    driver.bridge(config, tid, "focus-group", {}, 48.0, 18.0)
+            self.assertGreaterEqual(clock[0], 24)
+            self.assertFalse((ui / driver.HELPER_UNRESOLVED).exists())
+
+    def test_unresolved_helper_blocks_later_ui_until_terminal_result_and_exit(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            tid = "focus-unresolved"
+            config = {"ui_dir": ui, "helper_app": "/private/bridge.app"}
+            clock = [0.0]
+            with mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(driver.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                 mock.patch.object(driver, "call", return_value=""), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=True):
+                with self.assertRaisesRegex(driver.Uncertain, "focus before message preparation helper result or exit unresolved"):
+                    driver.bridge(config, tid, "focus-group", {}, 48.0, 18.0)
+                self.assertLessEqual(clock[0], 54)
+                with self.assertRaisesRegex(driver.Refused, "prior helper result or exit is unresolved"):
+                    driver._guard_helper(config, clock[0] + 8)
+            marker = ui / driver.HELPER_UNRESOLVED
+            self.assertTrue(marker.exists())
+            driver.private_create(ui / (tid + ".result.json"), {
+                "id": tid, "ok": False, "error": "Cannot snapshot a clipboard item",
+                "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+            with mock.patch.object(driver, "_helper_is_live", return_value=True):
+                with self.assertRaises(driver.Refused):
+                    driver._guard_helper(config, driver.time.monotonic() + 8)
+            with mock.patch.object(driver, "_helper_is_live", return_value=False):
+                driver._guard_helper(config, driver.time.monotonic() + 8)
+            self.assertFalse(marker.exists())
+
+    def test_submit_timeout_remains_distinct_and_blocked(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            clock = [0.0]
+            with mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(driver.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                 mock.patch.object(driver, "call", return_value=""), \
+                 mock.patch.object(driver, "_helper_is_live", return_value=True):
+                with self.assertRaisesRegex(driver.Uncertain, "submit-visual helper result or exit unresolved"):
+                    driver.bridge({"ui_dir": ui, "helper_app": "/private/bridge.app"},
+                                  "submit-unknown", "submit-visual", {}, 48.0, 18.0)
+            self.assertTrue((ui / driver.HELPER_UNRESOLVED).exists())
+
+    def test_late_start_focus_timeout_stays_within_total_budget(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            clock = [40.0]  # Prior status, target lookup and inspect used the budget.
+            with mock.patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(driver.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                 mock.patch.object(driver, "call", return_value=""):
+                with self.assertRaisesRegex(driver.Uncertain,
+                                            "focus before message preparation helper result or exit unresolved"):
+                    driver.bridge({"ui_dir": ui, "helper_app": "/private/bridge.app"},
+                                  "late-focus", "focus-group", {}, 48.0, 18.0)
+            self.assertLess(clock[0], 49.0)
+            self.assertTrue((ui / driver.HELPER_UNRESOLVED).exists())
+
+    def test_unresolved_marker_refuses_focus_and_send_before_desktop_action(self):
+        with tempfile.TemporaryDirectory() as root:
+            ui = Path(root)
+            ui.chmod(0o700)
+            config = dict(self.config, ui_dir=ui)
+            driver.private_create(ui / driver.HELPER_UNRESOLVED,
+                                  {"id": "prior-focus", "action": "focus-group"})
+            driver.private_create(ui / "prior-focus.focus-group.job.json",
+                                  {"id": "prior-focus", "action": "focus-group"})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+                 mock.patch.object(driver, "status"), \
+                 mock.patch.object(driver, "bridge") as bridge:
+                with self.assertRaisesRegex(driver.Refused, "prior helper result or exit is unresolved"):
+                    driver.focus_only(config)
+                with self.assertRaisesRegex(driver.Refused, "prior helper result or exit is unresolved"):
+                    driver.run(self.request, config)
+            bridge.assert_not_called()
+            self.assertFalse(list(ui.glob("*.client-result.json")))
 
     def test_slow_focus_completion_or_failure_preserves_single_attempt(self):
         # Native search has a six-second polling budget *after* search setup.
@@ -510,14 +1088,15 @@ class SenderTests(unittest.TestCase):
                         _, tid, command = pending.pop()
                         if not focus_ok:
                             driver.private_create(ui / (tid + ".result.json"), {
-                                "id": tid, "ok": False, "error": "Selected chat header is not exact target and kind"})
+                                "id": tid, "ok": False, "error": "Selected chat header is not exact target and kind",
+                                "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
                             return
                         evidence = {key: command[key] for key in
                                     ("targetGroup", "targetKind", "expectedPID", "expectedWindowID", "expectedFrame")}
                         evidence.update(id=tid, source="search", category="group-chats", selectedAt=1234.5)
                         driver.private_create(ui / (tid + ".focus-evidence.json"), evidence)
                         driver.private_create(ui / (tid + ".result.json"), {
-                            "id": tid, "ok": True, "focused": True, "alreadySelected": False,
+                            "id": tid, "action": "focus-group", "ok": True, "focused": True, "alreadySelected": False,
                             "source": "search", "category": "group-chats", "targetKind": "group",
                             "focusEvidenceID": tid})
 
@@ -529,7 +1108,7 @@ class SenderTests(unittest.TestCase):
                     command = driver.private_read(Path(argv[-1]))
                     tid, action = command["id"], command["action"]
                     actions.append(action)
-                    result = {"id": tid, "ok": True}
+                    result = {"id": tid, "action": action, "ok": True}
                     suffix = ".result.json"
                     if action == "inspect":
                         result.update(weChatPID=42, windows=[{"id": 20, "frame": frame}],
@@ -807,6 +1386,570 @@ class SenderTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 driver.private_create(report, {"stage": "started"})
             self.assertEqual(driver.private_read(report)["stage"], "started")
+
+
+class FirstFocusArchiveTests(unittest.TestCase):
+    def fixture(self, directory):
+        request, config, tid = ImageAbandonProofTests.fixture(self, directory)
+        request.pop("abandon_protocol_version")
+        request.update(focus_abandon_protocol_version=1, content_kind="text", text="Known test message")
+        ui = Path(directory)
+        result = driver.private_read(ui / (tid + "-focus.result.json"))
+        result["error"] = driver.FOCUS_HEADER_REJECTION_ERROR
+        driver.private_update(ui / (tid + "-focus.result.json"), result)
+        report = driver.private_read(ui / (tid + ".client-result.json"))
+        report["error"] = "focus failed before message preparation: " + driver.helper_reason(result)
+        driver.private_update(ui / (tid + ".client-result.json"), report)
+        driver.private_update(ui / (tid + "-focus.focus-polls.json"), [
+            {"elapsedMs": 200, "windowCount": 2, "popupPresent": True,
+             "popupSelected": True, "windows": [{"id": 21}, {"id": 22}]}])
+        path = ui / (tid + "-focus.focus-search-after-click.png")
+        path.write_bytes(b"synthetic private capture"); path.chmod(0o600)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status"), \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("archive must not operate UI")):
+            return driver.focus_abandon_preflight(request, config)
+
+    def test_first_selected_header_rejection_archives_without_mutating_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            before = {p.name: p.read_bytes() for p in Path(directory).iterdir()}
+            self.assertTrue(self.prove(request, config)["focus_failure_unsent_proven"])
+            self.assertEqual(before, {p.name: p.read_bytes() for p in Path(directory).iterdir()})
+            with mock.patch.object(driver, "status"), self.assertRaises(driver.Refused):
+                driver.recovery_preflight(request, config)
+
+    def test_prepare_submit_or_later_attempt_never_qualifies(self):
+        for suffix in (".prepare-visual.job.json", ".visual-state.json", ".submit-attempted.json",
+                       ".submit-visual.result.json", "-a2.client-result.json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(Path(directory) / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_only_exact_first_text_failure_and_complete_permissions_qualify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            for change in ({"content_kind": "image"}, {"attempt_number": 2},
+                           {"protocol_version": True}, {"text": ""}, {"talker": "another"}):
+                with self.subTest(change=change), self.assertRaises(driver.Refused):
+                    self.prove(dict(request, **change), config)
+            result = driver.private_read(Path(directory) / (tid + "-focus.result.json"))
+            result["error"] = "Search popup not enumerated by ScreenCaptureKit within six seconds"
+            driver.private_update(Path(directory) / (tid + "-focus.result.json"), result)
+            with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
+class ImageAbandonProofTests(unittest.TestCase):
+    def test_image_abandonment_has_a_separate_capability_without_changing_recovery(self):
+        for flag, expected in (
+                ("--abandon-capabilities", {"protocol_version": 1, "abandon_protocol_version": 1,
+                    "image_before_prepare_only": True, "pre_submit_proof_required": True}),
+                ("--recovery-capabilities", {"protocol_version": 1, "recovery_protocol_version": 1,
+                    "pre_submit_proof_required": True})):
+            output = io.StringIO()
+            with self.subTest(flag=flag), contextlib.redirect_stdout(output):
+                self.assertEqual(driver.main([flag]), 0)
+            self.assertEqual(json.loads(output.getvalue()), expected)
+
+    def fixture(self, directory):
+        ui = Path(directory).resolve(); ui.chmod(0o700)
+        (ui / "sender.lock").touch(mode=0o600)
+        request = {"protocol_version": 1, "abandon_protocol_version": 1,
+                   "content_kind": "image", "request_id": "image-before-prepare",
+                   "attempt_number": 1, "channel_id": "channel-one",
+                   "session_id": "session-one", "account": "synthetic-account",
+                   "talker": "synthetic@chatroom"}
+        config = {"ui_dir": ui, "binding": {k: request[k] for k in
+                  ("channel_id", "session_id", "account", "talker")},
+                  "target_name": "Synthetic Group", "target_group": "Synthetic Group",
+                  "conversation_kind": "group", "expected_pid": 42,
+                  "window_size": {"width": 880, "height": 640},
+                  "conversation_list_rect": {"x": 60, "y": 55, "width": 240, "height": 570},
+                  "search_point": {"x": 155, "y": 28}}
+        tid = "send-" + hashlib.sha256(b"channel-one\0image-before-prepare").hexdigest()[:48]
+        focus = tid + "-focus"; inspect = tid + "-inspect"
+        permissions = {"accessibility": True, "screenRecording": True, "postEvents": True}
+        frame = {"x": 100, "y": 100, "width": 880, "height": 640}
+        driver.private_create(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 1,
+            "channel_id": request["channel_id"], "session_id": request["session_id"],
+            "stage": "inspected", "status": "indeterminate",
+            "error": "focus failed before message preparation: helper rejected action"})
+        driver.private_create(ui / (inspect + ".inspect.job.json"), {"id": inspect, "action": "inspect"})
+        driver.private_create(ui / (inspect + ".result.json"), {
+            "id": inspect, "action": "inspect", "ok": True, "weChatPID": 42,
+            "windows": [{"id": 21, "frame": frame}], "permissions": permissions,
+            "session": {"onConsole": True, "locked": False}})
+        driver.private_create(ui / (focus + ".focus-group.job.json"), {
+            "id": focus, "action": "focus-group", "targetGroup": "Synthetic Group",
+            "targetKind": "group", "expectedPID": 42, "expectedWindowID": 21,
+            "expectedFrame": frame, "conversationListRect": config["conversation_list_rect"],
+            "searchPoint": config["search_point"]})
+        driver.private_create(ui / (focus + ".result.json"), {
+            "id": focus, "ok": False,
+            "error": "Search popup not enumerated by ScreenCaptureKit within six seconds",
+            "permissions": permissions})
+        driver.private_create(ui / (focus + ".focus-polls.json"), [
+            {"elapsedMs": elapsed, "windowCount": 1, "popupPresent": False,
+             "popupSelected": False, "windows": [{"id": 21, **frame}]}
+            for elapsed in (10, 5500)])
+        marker = ui / (focus + ".focus-attempted.json"); marker.touch(mode=0o600)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status"), \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("proof must not operate UI")):
+            return driver.abandon_preflight(request, config)
+
+    def test_image_focus_failure_proof_is_read_only_and_never_authorizes_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            before = {p.name: p.read_bytes() for p in Path(directory).iterdir()}
+            self.assertEqual(self.prove(request, config), {
+                "protocol_version": 1, "abandon_protocol_version": 1,
+                "unsent_proven": True, "before_prepare": True})
+            self.assertEqual(before, {p.name: p.read_bytes() for p in Path(directory).iterdir()})
+            with self.assertRaises(driver.Refused):
+                driver.request_ok(dict(request, protocol_version=2), config)
+
+    def test_prepare_submit_or_later_attempt_trace_refuses_image_abandonment(self):
+        for suffix in (".prepare-visual.job.json", ".prepare-visual.result.json",
+                       ".visual-state.json", ".submit-attempted.json",
+                       ".submit-visual.job.json", ".submit-visual.result.json",
+                       "-a2.client-result.json", "-a3-inspect.result.json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(Path(directory) / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_missing_mismatched_or_nonterminal_native_proof_refuses(self):
+        mutations = (
+            (".client-result.json", {"stage": "group_focused"}),
+            (".client-result.json", {"media_prepared": {"exact_pixels": True}}),
+            (".client-result.json", {"focus_evidence_id": "contradictory-focus-success"}),
+            (".client-result.json", {"attempt_number": 2}),
+            ("-inspect.result.json", {"permissions": {}}),
+            ("-inspect.result.json", {"weChatPID": 43}),
+            ("-focus.focus-group.job.json", {"targetGroup": "Another Group"}),
+            ("-focus.result.json", {"ok": True}),
+            ("-focus.result.json", {"error": "Cannot snapshot a clipboard item"}),
+            ("-focus.result.json", None),
+        )
+        for suffix, changed in mutations:
+            with self.subTest(suffix=suffix, changed=changed), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory); path = Path(directory) / (tid + suffix)
+                if changed is None: path.unlink()
+                else: driver.private_update(path, dict(driver.private_read(path), **changed))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            with mock.patch.object(driver, "_helper_is_live", return_value=True), \
+                 mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.abandon_preflight(request, config)
+            for changed in ({"attempt_number": 2}, {"talker": "another@chatroom"},
+                            {"content_kind": "text"}, {"recovery_from_attempt": 1},
+                            {"protocol_version": True}, {"attempt_number": True}):
+                with self.subTest(changed=changed), self.assertRaises(driver.Refused):
+                    self.prove(dict(request, **changed), config)
+
+    def test_missing_or_inconsistent_timeout_polls_and_busy_sender_refuse(self):
+        for replacement in (None, [], [{"elapsedMs": 6000}],
+                            [{"elapsedMs": 5500, "windowCount": 2, "popupPresent": True,
+                              "popupSelected": False, "windows": []}]):
+            with self.subTest(polls=replacement), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = Path(directory) / (tid + "-focus.focus-polls.json")
+                if replacement is None: path.unlink()
+                else: driver.private_update(path, replacement)
+                with self.assertRaises((driver.Refused, OSError)):
+                    self.prove(request, config)
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            with (Path(directory) / "sender.lock").open() as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
+class ImageCopyRejectionTests(unittest.TestCase):
+    def fixture(self, directory):
+        request, config, tid = ImageAbandonProofTests().fixture(directory)
+        request.pop("abandon_protocol_version")
+        request["image_rejection_protocol_version"] = 1
+        ui = config["ui_dir"]
+        state = ui / "state"; state.mkdir(mode=0o700)
+        frozen = state / "outgoing-media"; frozen.mkdir(mode=0o700)
+        image = frozen / request["request_id"]
+        import base64
+        raw = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        image.write_bytes(raw); image.chmod(0o600)
+        request["media"] = driver.image_descriptor(image, require_private=True)
+        config.update(channel_state_dir=state, expected_draft="",
+                      composer_rect={"x": 320, "y": 500, "width": 400, "height": 80},
+                      button_point={"x": 800, "y": 610}, helper_app="new-helper-4")
+        focus = tid + "-focus"
+        frame = {"x": 100, "y": 100, "width": 880, "height": 640}
+        driver.private_update(ui / (focus + ".result.json"), {
+            "id": focus, "action": "focus-group", "ok": True, "focused": True,
+            "alreadySelected": False, "source": "search", "targetKind": "group",
+            "focusEvidenceID": focus, "category": "group-chats",
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+        driver.private_create(ui / (focus + ".focus-evidence.json"), {
+            "id": focus, "targetGroup": config["target_group"], "targetKind": "group",
+            "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame,
+            "source": "search", "category": "group-chats", "selectedAt": 1})
+        driver.private_update(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 1,
+            "channel_id": request["channel_id"], "session_id": request["session_id"],
+            "stage": "group_focused", "status": "indeterminate", "error": "helper rejected action",
+            "focus_evidence_id": focus, "focus_category": "group-chats", "target_kind": "group"})
+        job = dict(driver._prepare_command(request, config, 21, frame, focus), id=tid, action="prepare-visual")
+        driver.private_create(ui / (tid + ".prepare-visual.job.json"), job)
+        driver.private_create(ui / (tid + ".prepare-visual.result.json"), {
+            "id": tid, "ok": False,
+            "error": "Composer Copy did not replace image sentinel exactly once (types: public.file-url,public.tiff)",
+            "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}})
+        visual = dict(job, stage="prepare-attempted", text=""); visual.pop("action")
+        driver.private_create(ui / (tid + ".visual-state.json"), visual)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status") as status, \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("archive must not operate GUI")), \
+             mock.patch.object(driver, "_guard_helper", wraps=driver._guard_helper) as guard:
+            result = driver.image_rejection_preflight(request, config)
+            self.assertEqual(status.call_count, 2)
+            self.assertTrue(all(call.kwargs.get("clear") is False for call in guard.call_args_list))
+            return result
+
+    def test_separate_capability_and_failure_response(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--image-rejection-capabilities"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "protocol_version": 1, "image_rejection_protocol_version": 1,
+            "prepare_copy_rejection_only": True, "no_submit_evidence_required": True})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(b"{}"))), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--image-rejection-preflight"]), 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "protocol_version": 1, "image_rejection_protocol_version": 1, "prepare_rejection_proven": False})
+
+    def test_original_rejection_proof_is_read_only_and_old_abandon_still_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            before = {str(p): p.read_bytes() for p in Path(directory).rglob("*") if p.is_file()}
+            self.assertEqual(self.prove(request, config), {
+                "protocol_version": 1, "image_rejection_protocol_version": 1, "prepare_rejection_proven": True})
+            self.assertEqual(before, {str(p): p.read_bytes() for p in Path(directory).rglob("*") if p.is_file()})
+            old = {k:v for k,v in request.items() if k not in ("media", "image_rejection_protocol_version")}
+            old["abandon_protocol_version"] = 1
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.abandon_preflight(old, config)
+
+    def test_known_error_requires_exact_phrase_and_raster_type(self):
+        prefix = "Composer Copy did not replace image sentinel exactly once (types:"
+        for types in (" public.file-url,public.tiff", "public.file-url,public.tiff"):
+            self.assertTrue(driver._known_image_copy_rejection(prefix + types + ")"))
+        for types in ("  public.tiff", "\tpublic.tiff", "\npublic.tiff", "\u00a0public.tiff",
+                      "", " ", " public.file-url", "public.file-url", " public.tiff,", " public.tiff, public.png"):
+            self.assertFalse(driver._known_image_copy_rejection(prefix + types + ")"), repr(types))
+        for error in ("Composer Copy did not replace image sentinel exactly once",
+                      "Composer Copy did not replace image sentinel exactly once (types:public.file-url)",
+                      "Composer Copy did not replace image sentinel exactly once (types:public.png) trailing",
+                      "Other error (types:public.png)", "Cannot snapshot a clipboard item"):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = config["ui_dir"] / (tid + ".prepare-visual.result.json")
+                driver.private_update(path, dict(driver.private_read(path), error=error))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_submit_later_observation_unknown_files_and_missing_proof_refuse(self):
+        for suffix in (".submit-visual.job.json", ".submit-visual.result.json", ".submit-attempted.json",
+                       "-a2.client-result.json", "-a3-inspect.result.json", ".late-observed.json", ".unexpected.json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(config["ui_dir"] / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        for suffix in (".prepare-visual.job.json", ".prepare-visual.result.json", ".visual-state.json",
+                       "-inspect.result.json", "-focus.result.json", "-focus.focus-evidence.json"):
+            with self.subTest(missing=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                (config["ui_dir"] / (tid + suffix)).unlink()
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_contradictory_identity_prepared_pixels_calibration_and_source_refuse(self):
+        mutations = (
+            (".client-result.json", {"stage": "submit_clicked"}),
+            (".client-result.json", {"status": "ui_observed"}),
+            (".client-result.json", {"media_prepared": {}}),
+            (".client-result.json", {"event_cursor": 14}),
+            (".client-result.json", {"request_id": "old-private-unknown"}),
+            (".prepare-visual.result.json", {"ok": True, "prepared": True}),
+            (".prepare-visual.result.json", {"permissions": {}}),
+            (".prepare-visual.job.json", {"media": {}}),
+            (".prepare-visual.job.json", {"expectedPID": 43}),
+            (".prepare-visual.job.json", {"composerRect": {}}),
+            (".visual-state.json", {"stage": "prepared"}),
+            (".visual-state.json", {"stage": "submitted-unverified"}),
+            (".visual-state.json", {"preparedPixelSHA256": None}),
+            (".visual-state.json", {"preparedCopyType": "public.png"}),
+            ("-inspect.result.json", {"weChatPID": 43}),
+            ("-focus.focus-evidence.json", {"targetKind": "private"}),
+            ("-focus.focus-evidence.json", {"expectedFrame": {}}),
+            ("-focus.result.json", {"category": "contacts"}),
+        )
+        for suffix, updates in mutations:
+            with self.subTest(suffix=suffix, updates=updates), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = config["ui_dir"] / (tid + suffix)
+                driver.private_update(path, dict(driver.private_read(path), **updates))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            Path(request["media"]["path"]).write_bytes(b"not original pixels")
+            with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_lock_live_helper_and_proof_time_change_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            with (config["ui_dir"] / "sender.lock").open() as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+            with mock.patch.object(driver, "_helper_is_live", return_value=True), mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.image_rejection_preflight(request, config)
+            original = driver._image_rejection_snapshot
+            calls = []
+            def changed(*args):
+                value = original(*args); calls.append(None)
+                if len(calls) == 1:
+                    path = config["ui_dir"] / (tid + ".prepare-visual.result.json")
+                    driver.private_update(path, driver.private_read(path))
+                return value
+            with mock.patch.object(driver, "_image_rejection_snapshot", side_effect=changed):
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
+class TextButtonRejectionTests(unittest.TestCase):
+    def fixture(self, directory):
+        request, config, tid = ImageAbandonProofTests().fixture(directory)
+        request.pop("abandon_protocol_version")
+        request.update(text_button_rejection_protocol_version=1, content_kind="text", text="Synthetic original caption body")
+        request["talker"] = "synthetic_friend"
+        config["binding"]["talker"] = request["talker"]
+        config.update(conversation_kind="private", target_name="Synthetic Friend", target_group="Synthetic Friend", expected_draft="",
+            composer_rect={"x": 320, "y": 500, "width": 400, "height": 80}, button_point={"x": 800, "y": 610})
+        ui = config["ui_dir"]
+        focus = tid + "-focus"
+        frame = {"x": 100, "y": 100, "width": 880, "height": 640}
+        permissions = {"accessibility": True, "screenRecording": True, "postEvents": True}
+        driver.private_update(ui / (focus + ".focus-group.job.json"), {
+            "id": focus, "action": "focus-group", "targetGroup": config["target_group"], "targetKind": "private",
+            "expectedPID": 42, "expectedWindowID": 21, "expectedFrame": frame,
+            "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]})
+        driver.private_update(ui / (focus + ".result.json"), {
+            "id": focus, "action": "focus-group", "ok": True, "focused": True, "alreadySelected": False,
+            "source": "search", "targetKind": "private", "focusEvidenceID": focus, "category": "contacts", "permissions": permissions})
+        driver.private_create(ui / (focus + ".focus-evidence.json"), {
+            "id": focus, "targetGroup": config["target_group"], "targetKind": "private", "expectedPID": 42,
+            "expectedWindowID": 21, "expectedFrame": frame, "source": "search", "category": "contacts", "selectedAt": 1})
+        driver.private_update(ui / (focus + ".focus-polls.json"), [{"elapsedMs": 250, "windowCount": 2,
+            "popupPresent": True, "popupSelected": True, "windows": [{"id": 21, **frame}, {"id": 22, **frame}]}])
+        driver.private_update(ui / (tid + ".client-result.json"), {
+            "id": tid, "request_id": request["request_id"], "attempt_number": 1,
+            "channel_id": request["channel_id"], "session_id": request["session_id"],
+            "stage": "prepared", "status": "indeterminate", "error": "submit outcome uncertain: Send button not confirmed",
+            "focus_evidence_id": focus, "focus_category": "contacts", "target_kind": "private"})
+        job = dict(driver._prepare_command(request, config, 21, frame, focus), id=tid, action="prepare-visual")
+        driver.private_create(ui / (tid + ".prepare-visual.job.json"), job)
+        driver.private_create(ui / (tid + ".prepare-visual.result.json"), {
+            "id": tid, "action": "prepare-visual", "ok": True, "prepared": True, "permissions": permissions})
+        state = dict(job, stage="prepared"); state.pop("action")
+        driver.private_create(ui / (tid + ".visual-state.json"), state)
+        driver.private_create(ui / (tid + ".submit-visual.job.json"), dict(job, action="submit-visual"))
+        driver.private_create(ui / (tid + ".submit-visual.result.json"), {
+            "id": tid, "ok": False, "error": "Expected exactly one visible Send label in lower conversation pane", "permissions": permissions})
+        import base64
+        (ui / (tid + ".before-submit.png")).write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+        (ui / (tid + ".before-submit.png")).chmod(0o600)
+        return request, config, tid
+
+    def prove(self, request, config):
+        with mock.patch.object(driver, "_helper_is_live", return_value=False), \
+             mock.patch.object(driver, "status") as status, \
+             mock.patch.object(driver, "bridge", side_effect=AssertionError("no GUI/copy/send")), \
+             mock.patch.object(driver, "_guard_helper", wraps=driver._guard_helper) as guard:
+            proof = driver.text_button_rejection_preflight(request, config)
+            self.assertEqual(status.call_count, 2)
+            self.assertTrue(all(call.kwargs.get("clear") is False for call in guard.call_args_list))
+            return proof
+
+    def test_exact_native_prepared_rejection_is_read_only_and_separate_from_old_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            before = {p.name:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in Path(directory).iterdir()}
+            self.assertEqual(self.prove(request, config), {
+                "protocol_version": 1, "text_button_rejection_protocol_version": 1, "button_rejection_proven": True})
+            self.assertEqual(before,{p.name:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in Path(directory).iterdir()})
+            with mock.patch.object(driver, "_helper_is_live", return_value=False), mock.patch.object(driver, "status"):
+                old = {k:v for k,v in request.items() if k not in ("text_button_rejection_protocol_version", "content_kind")}
+                with self.assertRaises(driver.Refused): driver.prove_unsent(dict(old, attempt_number=2, recovery_from_attempt=1), config, 2, 999999999)
+                with self.assertRaises(driver.Refused): driver.abandon_preflight(request, config)
+            self.assertFalse((config["ui_dir"] / (tid + ".submit-attempted.json")).exists())
+
+    def test_separate_capability_and_silent_negative_protocol(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--text-button-rejection-capabilities"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {"protocol_version": 1, "text_button_rejection_protocol_version": 1,
+            "prepared_text_only": True, "submit_marker_forbidden": True})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(b"{}"))), contextlib.redirect_stdout(output):
+            self.assertEqual(driver.main(["--text-button-rejection-preflight"]), 1)
+        self.assertEqual(json.loads(output.getvalue()), {"protocol_version": 1, "text_button_rejection_protocol_version": 1, "button_rejection_proven": False})
+
+    def test_missing_proof_or_present_marker_later_submit_and_extra_artifacts_refuse(self):
+        for suffix in (".submit-attempted.json", ".submit-immediate.png", ".submit-after-click.png", ".late-observed.json",
+                       "-a2.client-result.json", "-a3-inspect.result.json", ".unknown.json"):
+            with self.subTest(extra=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                driver.private_create(config["ui_dir"] / (tid + suffix), {})
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        for suffix in (".client-result.json", "-inspect.result.json", "-focus.focus-evidence.json",
+                       ".prepare-visual.result.json", ".submit-visual.job.json", ".submit-visual.result.json", ".visual-state.json"):
+            with self.subTest(missing=suffix), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                (config["ui_dir"] / (tid + suffix)).unlink()
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+    def test_actual_error_alias_state_permissions_body_and_binding_must_all_match(self):
+        mutations = (
+            (".client-result.json", {"stage": "submit_clicked"}), (".client-result.json", {"status": "ui_observed"}),
+            (".client-result.json", {"observation": {}}), (".client-result.json", {"event_cursor": 15}),
+            (".client-result.json", {"error": "Send button not confirmed"}), (".client-result.json", {"attempt_number": 2}),
+            (".prepare-visual.result.json", {"prepared": False}), (".prepare-visual.result.json", {"permissions": {}}),
+            (".prepare-visual.result.json", {"action": "submit-visual"}), (".prepare-visual.result.json", {"media_prepared": {}}),
+            (".submit-visual.result.json", {"error": "Expected exactly one visible Send label in lower conversation pane "}),
+            (".submit-visual.result.json", {"error": "Send label is not at calibrated point"}),
+            (".submit-visual.result.json", {"ok": True, "submitted": True}), (".submit-visual.result.json", {"permissions": {}}),
+            (".visual-state.json", {"stage": "submit-attempted"}), (".visual-state.json", {"stage": "submitted-unverified"}),
+            (".visual-state.json", {"text": "changed body"}), (".prepare-visual.job.json", {"text": "changed body"}),
+            (".submit-visual.job.json", {"text": "changed body"}), (".submit-visual.job.json", {"expectedPID": 43}),
+            ("-focus.focus-evidence.json", {"targetKind": "group"}), ("-inspect.result.json", {"weChatPID": 43}),
+        )
+        for suffix, updates in mutations:
+            with self.subTest(suffix=suffix, updates=updates), tempfile.TemporaryDirectory() as directory:
+                request, config, tid = self.fixture(directory)
+                path = config["ui_dir"] / (tid + suffix)
+                driver.private_update(path, dict(driver.private_read(path), **updates))
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, _ = self.fixture(directory)
+            for updates in ({"text": "other body"}, {"talker": "another_friend"}, {"attempt_number": 2},
+                            {"text_button_rejection_protocol_version": True}, {"content_kind": "image"}):
+                with self.subTest(request=updates), self.assertRaises(driver.Refused): self.prove(dict(request, **updates), config)
+
+    def test_live_helper_locks_and_slow_proof_rewrite_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, config, tid = self.fixture(directory)
+            for path in (config["ui_dir"] / (tid + ".submit-visual.result.json"),):
+                path.chmod(0o644)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+                path.chmod(0o600)
+            with (config["ui_dir"] / "sender.lock").open() as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+            with mock.patch.object(driver, "_helper_is_live", return_value=True), mock.patch.object(driver, "status"):
+                with self.assertRaises(driver.Refused): driver.text_button_rejection_preflight(request, config)
+            original = driver._text_button_rejection_snapshot
+            calls = []
+            def rewrite(*args):
+                snapshot = original(*args); calls.append(None)
+                if len(calls) == 1:
+                    path = config["ui_dir"] / (tid + ".submit-visual.result.json")
+                    driver.private_update(path, driver.private_read(path))
+                return snapshot
+            with mock.patch.object(driver, "_text_button_rejection_snapshot", side_effect=rewrite):
+                with self.assertRaises(driver.Refused): self.prove(request, config)
+
+
+class ImageSetupPreflightTests(unittest.TestCase):
+    def test_unavailable_image_credentials_refuse_before_any_helper_or_lock(self):
+        for reply in ({"credential_ready": False}, {"credential_ready": 1}, {}, [], None):
+            with self.subTest(reply=reply), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory).resolve(); state.chmod(0o700)
+                config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+                with mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": "image"}), \
+                     mock.patch.object(driver, "call", return_value=json.dumps(reply)) as query, \
+                     mock.patch.object(driver, "safe_config", side_effect=AssertionError("no helper bundle access")), \
+                     mock.patch.object(driver, "desktop_lock", side_effect=AssertionError("no desktop lock")), \
+                     mock.patch.object(driver, "_guard_helper", side_effect=AssertionError("no helper")), \
+                     mock.patch.object(driver, "bridge", side_effect=AssertionError("no GUI")):
+                    result = driver.dispatch_preflight(config, validate_config=True)
+                self.assertEqual(result, {"ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False})
+                self.assertEqual([str(p) for p in query.call_args.args[0]],
+                    [str(Path(sys.executable).resolve()), "outbox", "--state-dir", str(state), "image-verification-status"])
+
+    def test_dispatch_mode_returns_exact_setup_refusal_without_reading_stdin(self):
+        class NoStdin:
+            @property
+            def buffer(self):
+                raise AssertionError("dispatch preflight must not read stdin")
+            def read(self, *args):
+                raise AssertionError("dispatch preflight must not read stdin")
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve(); state.chmod(0o700)
+            config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": "image", "WX_SENDER_CONFIG": str(state / "config.json")}), \
+                 mock.patch.object(sys, "stdin", NoStdin()), \
+                 mock.patch.object(driver, "private_read", return_value=config), \
+                 mock.patch.object(driver, "call", return_value='{"credential_ready":false}'), \
+                 mock.patch.object(driver, "safe_config", side_effect=AssertionError("no helper bundle access")), \
+                 mock.patch.object(driver, "bridge", side_effect=AssertionError("no UI")), \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(driver.main(["--dispatch-preflight"]), 0)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False})
+
+    def test_image_readiness_errors_refuse_without_desktop_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve(); state.chmod(0o700)
+            config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+            for side_effect in (driver.Refused("verification unavailable"), OSError("missing"), ValueError("invalid")):
+                with self.subTest(error=type(side_effect).__name__), \
+                     mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": "image"}), \
+                     mock.patch.object(driver, "call", side_effect=side_effect), \
+                     mock.patch.object(driver, "bridge", side_effect=AssertionError("no UI")):
+                    self.assertEqual(driver.dispatch_preflight(config), {
+                        "ready": False, "reason_code": "image_verification_unavailable", "desktop_touched": False})
+
+    def test_ready_image_and_text_keep_normal_desktop_preflight(self):
+        for hint in ("image", "text", ""):
+            with self.subTest(hint=hint), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory).resolve(); state.chmod(0o700)
+                config = {"wx_cli": str(Path(sys.executable).resolve()), "channel_state_dir": str(state)}
+                order = []
+                def query(*args, **kw):
+                    order.append("credentials"); return '{"credential_ready":true}'
+                with mock.patch.dict(os.environ, {"WX_PREFLIGHT_CONTENT_KIND": hint}), \
+                     mock.patch.object(driver, "call", side_effect=query) as call, \
+                     mock.patch.object(driver, "safe_config", side_effect=lambda c: order.append("config") or c), \
+                     mock.patch.object(driver, "desktop_lock", return_value=contextlib.nullcontext()), \
+                     mock.patch.object(driver, "_guard_helper", side_effect=lambda *a, **kw: order.append("helper")), \
+                     mock.patch.object(driver, "status"), \
+                     mock.patch.object(driver, "bridge", return_value={}), \
+                     mock.patch.object(driver, "inspect_ok"):
+                    self.assertEqual(driver.dispatch_preflight(config, validate_config=True), {"ready": True})
+                self.assertEqual(call.call_count, 1 if hint == "image" else 0)
+                self.assertEqual(order, ["credentials", "config", "helper"] if hint == "image" else ["config", "helper"])
 
 
 if __name__ == "__main__":

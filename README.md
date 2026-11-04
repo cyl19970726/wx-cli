@@ -8,15 +8,21 @@
 
 ## 一个仓库，三个执行层
 
+多会话扩展的设计见[批准方案](docs/MULTI_CONVERSATION_PLAN.md)，新增入口见[托管会话指南](docs/MANAGED_CONVERSATIONS.md)，实际进度见[实施与验证记录](docs/MULTI_CONVERSATION_IMPLEMENTATION.md)。本分支增加逐会话控制、Rust 持久 inbox/文字图片调度与受管 Codex Session 适配器；新版本的工程验证、实机发送和独立收件分别记录，不扩大下述历史验收范围。
+
 | 层 | 提供什么 | 入口 |
 | --- | --- | --- |
-| Rust / wx-cli | 加密副本读取、稳定群/个人会话身份发现、NDJSON 事件、consumer 确认、持久发件箱 | `wx-cli conversations` / `wx-cli channel` / `wx-cli outbox` |
-| Python / wx-agent | 单群自动运行、按需会话选择/分页/聚焦/发送/回复、启停与健康状态、Codex 适配、带来源的会话笔记 | `wx-agent` |
-| Swift / macOS bridge | 核验目标窗口与草稿，准备文本，单次点击发送 | 独立构建和授权的原生助手 |
+| Rust / wx-cli | 加密副本读取、稳定身份、事件/consumer/outbox，以及托管 owner、inbox 与调度引用 | `wx-cli conversations` / `channel` / `outbox` / `coordinator` |
+| Python / wx-agent | 按需 CLI、旧单群兼容、托管采集/Session 分发、独立桌面执行器及派生健康状态 | `wx-agent` |
+| Swift / macOS bridge | 核验目标窗口与草稿，准备文本或单张 PNG/JPEG，单次点击发送 | 独立构建和授权的原生助手 |
 
 项目内 [wechat-group-agent skill](.agents/skills/wechat-group-agent/SKILL.md) 教 Agent 如何操作上述 CLI。skill 不自带后台监听器，也不会为手动会话启动模型；MCP 尚未实现，后续若开发应复用同一套状态和协议。
 
-当前 Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。若选择的群复用已有单群 controller，桌面写操作会协调该原 writer，并在完成后恢复原启停状态。`wx-agent chat` 仍是既有单群入口。多常驻 Agent、逐会话运行模式表、MCP 与共享桌面多群调度尚未实现。
+通道能力与 Agent Session 接入分开：wx-cli 保存事件、订阅进度和发送队列，普通应用可直接提交授权的群通知，Session 插件负责通知原 Session 并消费事件。[应用客户端与鉴权网关](docs/APPLICATION_CLIENT.md)及[项目级 Codex 插件](docs/SESSION_PLUGIN.md)复用原 inbox/outbox。两个应用的鉴权异机发送、原专用 native TUI Session 的单回合入站处理、群图片后配文均有实机和各自收件证据；queue snapshot 模式已让另一宿主上由桌面 App 持有的原 Session 读取真实积压及新入站并记录 `skip`，带 reservation 的通知进程重启未重复通知，人工发言的逐会话接管及交还也通过。App 原聊天宿主须正常加载；此模式不代表旧 App Hook 回调已通过，历史 `defer` 业务待办继续保留。首轮压力批次在成功 10 条后被标题保护拦下；修复后的独立新语料已连续完成 30 条，用户确认私聊、测试群各 15 条且顺序内容正常，旧失败批次保留。精确版本、能力范围和未完成项见[通道订阅合同](docs/CHANNEL_SUBSCRIPTIONS.md)和[实施记录](docs/MULTI_CONVERSATION_IMPLEMENTATION.md)。
+
+Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。未迁移会话继续使用原 controller 协调；托管会话通过 `configure` 显式迁移，使用 `wx-agent inbox` 和 `dispatch` 共享处理记录及桌面队列。原专用 native TUI Session 已有受管入站闭环；正在被桌面 App 持有的业务 Session 暂只支持主动 CLI。MCP 尚未实现。
+
+图片发送命令、内容冻结与当前实机状态见[单图片发送记录](docs/IMAGE_SEND_VALIDATION_20261024.md)和[CLI 用法](docs/CONVERSATIONS_CLI.md)。
 
 ## 已经具备的能力
 

@@ -106,6 +106,52 @@ fields. Change only `action` from `prepare-visual` to `submit-visual`:
  "buttonPoint":{"x":830,"y":610}}
 ```
 
+For one image, use those same actions and coordinates with `media` in place of
+message text. `text`/`body` must be absent or empty, and `expectedDraft` must be
+empty. Image preparation also requires a calibrated `emptyComposerReference`;
+the exact composer pixels must match it when an empty Copy leaves the clipboard
+sentinel unchanged. Never calibrate this reference over an unknown draft.
+
+```json
+{"id":"example-image-001","action":"prepare-visual",
+ "targetGroup":"Synthetic Test Group","targetKind":"group",
+ "focusEvidenceID":"example-focus-001","expectedDraft":"",
+ "emptyComposerReference":{"path":"/ABS/private/ui/empty.png","sha256":"64 lowercase hex digits"},
+ "media":{"path":"/ABS/private/frozen-image.png","sha256":"64 lowercase hex digits",
+          "mime_type":"image/png","size_bytes":12345},
+ "expectedPID":12345,"expectedWindowID":678,
+ "expectedFrame":{"x":100,"y":100,"width":900,"height":650},
+ "composerRect":{"x":310,"y":500,"width":560,"height":95},
+ "buttonPoint":{"x":830,"y":610}}
+```
+
+The image source must be an absolute, canonical, owned regular file with one
+link and mode `0600`. The helper opens it without following a symlink or
+blocking on a special file, verifies declared size and SHA-256, checks PNG/JPEG
+magic and decoded type, and decodes exactly one
+frame before any desktop action. Limits are 16 MiB encoded, 8192 pixels per
+side, and 40 million pixels total. EXIF orientation is normalized into the
+decoded pixels before paste. It pastes native PNG/TIFF pasteboard data,
+then copies from the composer and requires a decoded, exact sRGB pixel digest
+match. A thumbnail, changed pixels, an unreadable image, or a copy without
+exactly one decodable raster item stops the transaction. Rich metadata and file
+URLs may accompany that raster but are never used as image data or opened.
+Image Copy must replace the clipboard sentinel. Its change count must advance
+and remain stable through decoding, a short delay, and a fresh target frame;
+the number of ownership changes is not fixed ([NSPasteboard.changeCount](https://developer.apple.com/documentation/appkit/nspasteboard/changecount)).
+Submit loads and verifies the same source again,
+requires the prepared pixel digest, and copies the composer image again before
+the existing single Send click. No image resize or recompression tolerance is
+currently accepted.
+
+Image results expose `media_prepared` or `media_submitted` dictionaries with
+`sha256`, `pixel_sha256`, `composer_pixel_sha256`, `width`, `height`,
+`mime_type`, `size_bytes`, `composer_copy_type`, and `exact_pixels: true`.
+Submission also includes `prepared_copy_type`, `post_click_capture`,
+`post_click_capture_sha256`, and `post_click_header_verified`. The screenshot
+is a private, transaction-ID-named window capture after the click. These are
+local UI evidence, not proof of an outgoing event or recipient receipt.
+
 `body` is accepted as an alias for `text`; if both appear, they must match.
 `text` supports Unicode Chinese, punctuation, emoji, tabs, and multiple lines.
 It must contain meaningful text, have at most 2,000 Swift characters and
@@ -133,13 +179,18 @@ uses this fallback. Both visual stages must retain the same reference. Without
 the option, the existing blank-image check applies. Recalibrate after any UI
 appearance or geometry change; do not capture an unknown draft as a reference.
 
-The Send-button OCR accepts the exact labels `Send` or `发送`. There must be
-exactly one accepted label in the lower conversation pane, and the 68×34 crop
-centered on the calibrated button point must contain that label alone. The
+The Send-button OCR accepts the exact labels `Send` or `发送`. The 68×34 crop
+centered on the calibrated button point must contain exactly one OCR label,
+which must be one of those exact labels. The
 tight crop excludes adjacent toolbar glyphs that can otherwise become extra
 OCR text. The label's recognized center must also be within 16px horizontally
-and 10px vertically of the click point. Duplicate labels, mixed-language
-duplicates, extended labels and labels outside the button crop still refuse.
+and 10px vertically of the click point. Broad lower-pane OCR only rejects
+additional exact Send labels whose complete bounds fit neither the button crop
+nor the declared composer. A draft may contain `Send` or `发送`; broad OCR may
+also miss or misread the real button. Exact candidates with clipped or invalid
+bounds still refuse, as do duplicate, extended or misplaced tight-crop labels.
+The click point must be outside the composer, and the button label must not be
+wholly inside it. The button crop may partially overlap the composer.
 
 The app requires its output directory and parent to be owned by the current
 user, non-symlinks, and mode `0700`. Runtime output stays in
@@ -169,7 +220,8 @@ exactly to `expectedDraft` or `text`. If copying an empty draft leaves the
 sentinel unchanged, it additionally requires a visually blank composer; any
 uncertainty stops. Preparation pastes plain text over the selected old draft,
 then copies it back to verify. Submission copies it back again before a fresh
-header and Send-button check and one click. It does not send media.
+header and Send-button check and one click. The image branch uses decoded pixel
+evidence from the composer instead of copied-text equality.
 
 The original clipboard is snapshotted in memory only and never written to an
 output file. Restoration occurs only if the pasteboard change count still
@@ -182,8 +234,8 @@ command rather than being discarded.
 Posting a Send click is **not delivery proof**; verify independently with the
 authorized test account. A failed step may leave a partial draft. `./test-parameters.sh`
 runs local, no-GUI checks of text validation, line-ending comparison,
-transaction consistency, empty-copy handling, and clipboard restoration
-conditions.
+transaction consistency, empty-copy handling, image source validation,
+pasteboard round trips and clipboard restoration conditions.
 
 ## Outbox sender integration
 

@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "多会话目标：两种入口，共用文字与图片发送队列",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-wechat-target-20261101-160826/wechat-target.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "source",
+      "type": "database",
+      "label": "授权聊天数据",
+      "sublabel": "群聊与私聊",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        170,
+        76
+      ]
+    },
+    {
+      "id": "collector",
+      "type": "backend",
+      "label": "增量采集",
+      "sublabel": "结构化读取；不占桌面",
+      "pos": [
+        330,
+        40
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "复用并改并发"
+    },
+    {
+      "id": "events",
+      "type": "database",
+      "label": "各会话事件日志",
+      "sublabel": "独立 cursor 与原文",
+      "pos": [
+        620,
+        40
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "已有底座"
+    },
+    {
+      "id": "inbox",
+      "type": "messagebus",
+      "label": "Session 收件箱",
+      "sublabel": "绑定 owner · 持久待投递",
+      "pos": [
+        910,
+        40
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "待实现"
+    },
+    {
+      "id": "owners",
+      "type": "backend",
+      "label": "每会话专属 Session",
+      "sublabel": "各群／私聊各自一个",
+      "pos": [
+        620,
+        290
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "并行想 · 同会话有序"
+    },
+    {
+      "id": "intents",
+      "type": "backend",
+      "label": "统一 outbox",
+      "sublabel": "文字／冻结图片 · 原请求 ID",
+      "pos": [
+        330,
+        290
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "复用并扩展"
+    },
+    {
+      "id": "queue",
+      "type": "messagebus",
+      "label": "全局发送队列",
+      "sublabel": "持久排队 · 暂停／核查",
+      "pos": [
+        40,
+        290
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "待实现"
+    },
+    {
+      "id": "executor",
+      "type": "backend",
+      "label": "唯一桌面执行器",
+      "sublabel": "复用 Python + Swift 守卫",
+      "pos": [
+        40,
+        540
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "按桌面通道串行"
+    },
+    {
+      "id": "wechat",
+      "type": "frontend",
+      "label": "微信 GUI",
+      "sublabel": "切会话 → 输入 → 发一次",
+      "pos": [
+        330,
+        540
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "tag": "继续核验本地出站"
+    }
+  ],
+  "connections": [
+    {
+      "id": "capture",
+      "from": "collector",
+      "to": "source",
+      "label": "复制后查询",
+      "variant": "default"
+    },
+    {
+      "id": "append",
+      "from": "collector",
+      "to": "events",
+      "label": "记录增量",
+      "variant": "default"
+    },
+    {
+      "id": "schedule-delivery",
+      "from": "events",
+      "to": "inbox",
+      "label": "生成通知",
+      "variant": "default"
+    },
+    {
+      "id": "pull",
+      "from": "owners",
+      "to": "events",
+      "label": "主动 CLI 读取",
+      "variant": "emphasis"
+    },
+    {
+      "id": "push",
+      "from": "inbox",
+      "to": "owners",
+      "label": "空闲时投递",
+      "variant": "dashed"
+    },
+    {
+      "id": "decide",
+      "from": "owners",
+      "to": "intents",
+      "label": "决定需要回复",
+      "variant": "emphasis"
+    },
+    {
+      "id": "enqueue",
+      "from": "intents",
+      "to": "queue",
+      "label": "引用已冻结意图",
+      "variant": "emphasis"
+    },
+    {
+      "id": "claim",
+      "from": "queue",
+      "to": "executor",
+      "label": "领取下一条",
+      "variant": "emphasis"
+    },
+    {
+      "id": "perform",
+      "from": "executor",
+      "to": "wechat",
+      "label": "核验后发送",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两种形态共用底座",
+      "items": [
+        "pull：专属 Session 主动用 CLI 查看历史、判断、发文字或图片。",
+        "push：新消息先入该 Session 的持久收件箱，忙时等待，空闲后处理。",
+        "推送不是强制回复；skip、defer、draft 都是合法结果。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "读和想并行，桌面发串行",
+      "items": [
+        "每个群／私聊有独立 owner、进度和上下文；同会话一个处理租约。",
+        "所有 Session 只提交意图；不各自抢剪贴板或点微信。",
+        "人工接管 A 会话只停 A 的自动处理；桌面本身不安全时则停全部 GUI 发送。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "明确标为设计，不冒充现状",
+      "items": [
+        "这张是目标方案，包含尚未实现的收件箱、Session 投递和持久发送队列。",
+        "图片 PR #5 是已有代码候选，真实发送与独立收件仍待验收。",
+        "企业微信 API 适配器与 MCP 后置；不在这张个人微信 GUI 图中混画。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "恢复与不确定结果",
+      "items": [
+        "通知漏建：按事件日志补齐；重复 delivery：返回原处理结果。",
+        "Session 或发送请求结果不明：先核对原回合／attempt，不新建替身或换 ID 重发。",
+        "桌面清理与核查完成才恢复发送；独立收件确认保留为证据等级，不逐条阻塞整个队列。"
+      ]
+    }
+  ]
+}

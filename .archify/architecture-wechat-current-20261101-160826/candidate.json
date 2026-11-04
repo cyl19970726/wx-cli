@@ -1,0 +1,444 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "微信收发：当前架构与临时回复器",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-wechat-current-20261101-160826/wechat-current.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/cyl19970726/wx-cli.git",
+      "revision": "11e20ca59d8e360c3b281d563e6f30053d13c031"
+    },
+    "views": [
+      {
+        "id": "manual-path",
+        "label": "① 专属 Session 主动调用",
+        "focus": [
+          "owner",
+          "cli",
+          "rust",
+          "driver",
+          "swift",
+          "wechat"
+        ],
+        "note": "当前业务 Session 可自行调用 CLI；读和发消息不需要再经过临时回复模型。"
+      },
+      {
+        "id": "legacy-agent",
+        "label": "② 旧单群临时回复",
+        "focus": [
+          "runner",
+          "ephemeral",
+          "rust",
+          "driver"
+        ],
+        "note": "runner 每次传入有限上下文，启动临时 Codex 文案生成；不会自动续接原业务 Session。"
+      },
+      {
+        "id": "desktop-path",
+        "label": "③ 桌面执行与核验",
+        "focus": [
+          "rust",
+          "files",
+          "driver",
+          "swift",
+          "wechat"
+        ],
+        "note": "文字来自数据库副本；OCR 用于界面检查。CGEvent 点击后仍须核对本地出站记录。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "owner",
+      "type": "external",
+      "label": "业务 Session",
+      "sublabel": "已有项目上下文",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        170,
+        76
+      ],
+      "sources": [
+        {
+          "path": "docs/AGENT_INTEGRATION.md",
+          "line": 3,
+          "end_line": 15
+        }
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "按需会话 CLI",
+      "sublabel": "选群／私聊 · 读／回复",
+      "pos": [
+        330,
+        40
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 217,
+          "end_line": 244
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 379,
+          "end_line": 476
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/conversations.py",
+          "line": 574,
+          "end_line": 640
+        }
+      ]
+    },
+    {
+      "id": "rust",
+      "type": "backend",
+      "label": "Rust 消息与发件账本",
+      "sublabel": "事件 · 游标 · 意图 · 尝试",
+      "pos": [
+        620,
+        40
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 206,
+          "end_line": 218
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/outgoing.rs",
+          "line": 382,
+          "end_line": 399
+        },
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 318,
+          "end_line": 360
+        }
+      ],
+      "tag": "持久化权威"
+    },
+    {
+      "id": "driver",
+      "type": "backend",
+      "label": "Python 发送驱动",
+      "sublabel": "共享 sender.lock",
+      "pos": [
+        910,
+        40
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 639,
+          "end_line": 680
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 682,
+          "end_line": 729
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/macos_sender_driver.py",
+          "line": 763,
+          "end_line": 857
+        }
+      ],
+      "tag": "锁忙／异常即停"
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "旧单群 runner",
+      "sublabel": "逐条处理 · 保存 pending",
+      "pos": [
+        330,
+        270
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/channel_agent.py",
+          "line": 355,
+          "end_line": 405
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/channel_agent.py",
+          "line": 406,
+          "end_line": 480
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/channel_agent.py",
+          "line": 482,
+          "end_line": 505
+        }
+      ],
+      "tag": "可选启动"
+    },
+    {
+      "id": "files",
+      "type": "database",
+      "label": "微信本地加密文件",
+      "sublabel": "只复制；查询私有副本",
+      "pos": [
+        620,
+        270
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "crates/wx-cli/src/cmd/channel.rs",
+          "line": 318,
+          "end_line": 360
+        }
+      ],
+      "tag": "不以 SQLite 打开原库"
+    },
+    {
+      "id": "swift",
+      "type": "backend",
+      "label": "Swift 原生助手",
+      "sublabel": "截图／OCR · 剪贴板 · 点击",
+      "pos": [
+        910,
+        270
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 147,
+          "end_line": 230
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 489,
+          "end_line": 595
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 707,
+          "end_line": 954
+        }
+      ],
+      "tag": "核验后提交一次"
+    },
+    {
+      "id": "ephemeral",
+      "type": "backend",
+      "label": "临时 Codex 文案器",
+      "sublabel": "一次 exec --ephemeral",
+      "pos": [
+        330,
+        500
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "packages/wx-agent/src/wx_agent/codex_reply_agent.py",
+          "line": 51,
+          "end_line": 104
+        },
+        {
+          "path": "packages/wx-agent/src/wx_agent/codex_reply_agent.py",
+          "line": 114,
+          "end_line": 151
+        }
+      ],
+      "tag": "仅 text 或 skip"
+    },
+    {
+      "id": "wechat",
+      "type": "frontend",
+      "label": "Mac 微信窗口",
+      "sublabel": "输入框、搜索框、发送按钮",
+      "pos": [
+        910,
+        500
+      ],
+      "size": [
+        200,
+        76
+      ],
+      "sources": [
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 467,
+          "end_line": 488
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 548,
+          "end_line": 595
+        },
+        {
+          "path": "native/macos/wechat-bridge/main.swift",
+          "line": 888,
+          "end_line": 954
+        }
+      ],
+      "tag": "GUI 发送通道"
+    }
+  ],
+  "connections": [
+    {
+      "id": "manual-cli",
+      "from": "owner",
+      "to": "cli",
+      "label": "按需调用",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-rust",
+      "from": "cli",
+      "to": "rust",
+      "label": "读／写请求",
+      "variant": "emphasis"
+    },
+    {
+      "id": "invoke-driver",
+      "from": "rust",
+      "to": "driver",
+      "label": "已记录尝试",
+      "variant": "emphasis"
+    },
+    {
+      "id": "driver-evidence",
+      "from": "driver",
+      "to": "rust",
+      "label": "查出站／返回证据",
+      "variant": "default",
+      "labelDy": 12
+    },
+    {
+      "id": "runner-rust",
+      "from": "runner",
+      "to": "rust",
+      "label": "消费／发件",
+      "variant": "default"
+    },
+    {
+      "id": "query-copy",
+      "from": "rust",
+      "to": "files",
+      "label": "复制后查询",
+      "variant": "default"
+    },
+    {
+      "id": "generate",
+      "from": "runner",
+      "to": "ephemeral",
+      "label": "上下文 →",
+      "variant": "default"
+    },
+    {
+      "id": "reply-result",
+      "from": "ephemeral",
+      "to": "runner",
+      "label": "正文／skip",
+      "variant": "default"
+    },
+    {
+      "id": "native-action",
+      "from": "driver",
+      "to": "swift",
+      "label": "动作 job",
+      "variant": "emphasis"
+    },
+    {
+      "id": "native-result",
+      "from": "swift",
+      "to": "driver",
+      "label": "result 回报",
+      "variant": "default"
+    },
+    {
+      "id": "operate-wechat",
+      "from": "swift",
+      "to": "wechat",
+      "label": "检查后操作",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "先区分两种入口",
+      "items": [
+        "业务 Session 主动使用 CLI：它自己决定读什么、是否回复。",
+        "旧单群 runner 是可选的自动路径；不会因为打开 CLI 就自动启动。",
+        "图按已合并代码 11e20ca 绘制；描述能力和调用关系，不表示进程此刻正在运行。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "临时回复器有什么上下文",
+      "items": [
+        "当前入站文本 + 最多最近 12 条上下文 + 可选的会话需求笔记。",
+        "每次在临时目录执行 codex exec --ephemeral；没有续接原业务 thread。",
+        "禁用 shell、应用、插件和网页搜索，不能自行查飞书、表格或开发代码。",
+        "只返回正文或 skip；生成失败最多尝试 3 次，GUI 发送不随模型重试而重发。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "桌面执行器是两层程序",
+      "items": [
+        "Python 持有共享锁、写动作 JSON、启动助手并等待结果，统一保存阶段证据。",
+        "Swift 用 ScreenCaptureKit 获取窗口图像，Vision OCR 核对标题、搜索结果和发送按钮。",
+        "通过 NSPasteboard 与 Command-V 输入；复制输入框全文后比对，最后用 CGEvent 点发送。",
+        "不是让大模型每次看整屏再随意点鼠标；具体守卫、坐标和操作顺序由程序执行。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "为什么还需要全局队列",
+      "items": [
+        "当前注册表锁覆盖整次命令；多个同入口调用会串行等待。",
+        "独立 driver 竞争 sender.lock 时锁忙即拒绝；Rust attempt 此前可能已经记下。",
+        "缺的是持久排队、唯一执行器和恢复协调，而不是再给每个群添加一把锁。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "观察证据与图片的边界",
+      "items": [
+        "Swift submitted 只表示点击已发出；ui_observed 表示匹配了目标会话的新本地出站事件。",
+        "两者都不证明客户已读；结果不明保留原 ID 核查。",
+        "图片发送在独立 PR #5 候选：代码／CI 已通过，实机收件尚待验收；不属于这张文字主线。"
+      ]
+    }
+  ]
+}

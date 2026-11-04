@@ -8,8 +8,8 @@ app="$build_root/WeChat Test Bridge.app"
 mkdir -p "$app/Contents/MacOS"
 cp Info.plist "$app/Contents/Info.plist"
 xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macos14.0 -O \
-  -framework AppKit -framework ApplicationServices -framework CoreGraphics \
+  -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework CoreImage \
   -framework ScreenCaptureKit -framework Vision \
-  main.swift VisualParameters.swift ClipboardSupport.swift -o "$app/Contents/MacOS/WeChatTestBridge"
+  main.swift VisualParameters.swift MediaSupport.swift ClipboardSupport.swift -o "$app/Contents/MacOS/WeChatTestBridge"
 codesign --force --sign - --identifier io.codex.wechat-test-bridge "$app"
 codesign --verify --strict --verbose=1 "$app"

@@ -41,6 +41,11 @@ def check_install(wheel, tests=None):
                        cwd=root, env=clean_env, check=True)
         subprocess.run([str(command), "--help"], cwd=root, env=clean_env, check=True,
                        stdout=subprocess.PIPE, text=True)
+        for name in ("wx-agent-plugin", "wx-agent-queue-session", "wx-agent-plugin-runner", "wx-agent-plugin-install",
+                     "wx-agent-gateway", "wx-agent-gateway-client"):
+            entry = bin_dir / (name + ".exe" if os.name == "nt" else name)
+            subprocess.run([str(entry), "--help"], cwd=root, env=clean_env, check=True,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True)
         result = subprocess.run(
             [str(python), "-c", "import wx_agent; print(wx_agent.__file__)"],
             cwd=root, env=clean_env, check=True, capture_output=True, text=True,

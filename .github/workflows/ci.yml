@@ -29,6 +29,15 @@ jobs:
       - run: cargo build --locked
       - name: Synthetic channel CLI integration
         run: python scripts/test_local_channel.py --binary target/debug/wx-cli
+      - name: Synthetic coordinator, application, gateway and plugin integration
+        env:
+          PYTHONPATH: packages/wx-agent/src
+        run: >-
+          python -m unittest scripts.test_multi_conversation
+          scripts.test_application_integration scripts.test_gateway_integration
+          scripts.test_plugin_integration scripts.test_plugin_adversarial
+          scripts.test_queue_snapshot_integration
+          scripts.test_image_observation
       - name: Sender contract against compiled CLI events
         env:
           PYTHONPATH: packages/wx-agent/src
@@ -61,3 +70,5 @@ jobs:
       - uses: actions/checkout@v6
       - name: Native bridge parameter tests
         run: native/macos/wechat-bridge/test-parameters.sh
+      - name: Build native bridge
+        run: WX_BRIDGE_BUILD_DIR="$RUNNER_TEMP/wechat-bridge" native/macos/wechat-bridge/build.sh

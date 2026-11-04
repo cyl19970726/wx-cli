@@ -124,6 +124,34 @@ enum VisualParameters {
         return abs(center.x - point.x) <= 16 && abs(center.y - point.y) <= 10
     }
 
+    static func sendButtonPane(imageWidth: Int, imageHeight: Int) -> CGRect? {
+        guard imageWidth > 0, imageHeight > 0 else { return nil }
+        return CGRect(x: CGFloat(imageWidth) * 0.30, y: CGFloat(imageHeight) * 0.84,
+                      width: CGFloat(imageWidth) * 0.70, height: CGFloat(imageHeight) * 0.16).integral
+    }
+
+    static func sendButtonConfirmed(wideLabels: [HeaderOCRCandidate], buttonLabels: [HeaderOCRCandidate],
+                                    point: CGPoint, composerRect: CGRect,
+                                    imageWidth: Int, imageHeight: Int) -> Bool {
+        func whole(_ rect: CGRect, inside region: CGRect) -> Bool {
+            rect.minX.isFinite && rect.minY.isFinite && rect.size.width.isFinite && rect.size.height.isFinite &&
+                rect.size.width > 0 && rect.size.height > 0 && region.contains(rect)
+        }
+        guard let pane = sendButtonPane(imageWidth: imageWidth, imageHeight: imageHeight),
+              let crop = sendButtonCrop(at: point, imageWidth: imageWidth, imageHeight: imageHeight),
+              whole(composerRect, inside: CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)),
+              !composerRect.contains(point),
+              buttonLabels.allSatisfy({ whole($0.bounds, inside: crop) && !composerRect.contains($0.bounds) }),
+              sendLabelAtButton(buttonLabels, point: point, crop: crop) else { return false }
+        // Broad OCR is only an ambiguity check. A missed/misread button is not
+        // evidence against the independently verified tight crop, and a draft
+        // can legitimately contain an exact Send label inside the composer.
+        return wideLabels.filter { ["Send", "发送"].contains($0.text) }.allSatisfy {
+            whole($0.bounds, inside: pane) &&
+                (crop.contains($0.bounds) || composerRect.contains($0.bounds))
+        }
+    }
+
     // Compare every calibrated composer pixel, including guidance and any draft.
     // There is no text whitelist, tolerance, caret mask or partial-region match.
     static func matchesEmptyComposer(_ image: CGImage, rect: CGRect, reference: CGImage) -> Bool {
@@ -146,6 +174,13 @@ enum VisualParameters {
         }
         guard let current = pixels(crop), let expected = pixels(reference) else { return false }
         return current == expected
+    }
+
+    // Each approved appearance still compares the entire composer exactly.
+    // This permits calibrated input indicators without ignoring any pixels.
+    static func matchesEmptyComposer(_ image: CGImage, rect: CGRect, references: [CGImage]) -> Bool {
+        guard !references.isEmpty, references.count <= 3 else { return false }
+        return references.contains { matchesEmptyComposer(image, rect: rect, reference: $0) }
     }
 
     static func withinFocusSearchBudget(_ elapsed: TimeInterval) -> Bool {
@@ -187,7 +222,13 @@ enum VisualParameters {
         guard let rect = headerTitleRect(imageWidth: imageWidth, imageHeight: imageHeight) else {
             return false
         }
-        let overlapping = candidates.filter { $0.bounds.intersects(rect) }
+        let overlapping = candidates.filter {
+            let overlap = $0.bounds.intersection(rect)
+            // Vision's normalized coordinates may turn exact pixel-edge
+            // contact into ~0.0000002 px of overlap. This tolerance is far
+            // below one pixel; any meaningful crossing remains ambiguous.
+            return !overlap.isNull && overlap.width > 0.0001 && overlap.height > 0.0001
+        }
         guard overlapping.count == 1 else { return false }
         let candidate = overlapping[0]
         let inside = rect.insetBy(dx: 3, dy: 3)

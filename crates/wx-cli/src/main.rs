@@ -370,6 +370,14 @@ enum Commands {
         #[command(subcommand)]
         action: cmd::channel::ChannelAction,
     },
+    /// Coordinate conversation ownership, durable inbox and desktop dispatch.
+    Coordinator {
+        /// Private root shared by the managed conversations.
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[command(subcommand)]
+        action: cmd::coordinator::CoordinatorAction,
+    },
     /// Discover chatroom IDs from encrypted contact metadata.
     Groups {
         #[command(subcommand)]
@@ -595,6 +603,7 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Channel { state_dir, action } => cmd::channel::run(&state_dir, action),
+        Commands::Coordinator { state_dir, action } => cmd::coordinator::run(&state_dir, action),
         Commands::Groups { action } => cmd::groups::run(action),
         Commands::Conversations { action } => cmd::conversations::run(action),
         Commands::Outbox { state_dir, action } => cmd::outgoing::run(&state_dir, action),

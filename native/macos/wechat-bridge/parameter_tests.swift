@@ -6,6 +6,8 @@ import ImageIO
 @main struct ParameterTests {
     static func main() {
         emptyComposerChecks()
+        imageMediaChecks()
+        sendButtonContextChecks()
         for label in ["Send", "发送"] {
             precondition(VisualParameters.uniqueSendLabel([label], atButton: true))
             precondition(VisualParameters.uniqueSendLabel(["Toolbar", label], atButton: false))
@@ -259,6 +261,28 @@ import ImageIO
                                                          imageWidth: 880, imageHeight: 640))
         precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, crossingBoundary], target: "Synthetic Peer", kind: .private,
                                                          imageWidth: 880, imageHeight: 640))
+        // Vision normalizes pixel boundaries; conversion back to pixels can
+        // turn exact edge contact into a fraction-of-a-millionth overlap.
+        let lowerEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 570, y: 49.9999998, width: 36, height: 12))
+        precondition(VisualParameters.uniqueHeaderTitle([privateTitle, lowerEdgeContact],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        precondition(VisualParameters.uniqueHeaderTitle([title, lowerEdgeContact],
+            target: "测试群", kind: .group, imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.uniqueHeaderTitle([lowerEdgeContact],
+            target: "Unrelated line", kind: .private, imageWidth: 880, imageHeight: 640))
+        let realOverlap = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 570, y: 49.999, width: 36, height: 12))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, realOverlap],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let sideEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 719.9999998, y: 20, width: 36, height: 12))
+        precondition(VisualParameters.uniqueHeaderTitle([privateTitle, sideEdgeContact],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let sideOverlap = HeaderOCRCandidate(text: "Unrelated line",
+            bounds: CGRect(x: 719.999, y: 20, width: 36, height: 12))
+        precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, sideOverlap],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
         let token = "private-sentinel"
         precondition(VisualParameters.copyIsExpected(expected: "a b\n😊", sentinel: token,
                                                      beforeCount: 10, afterCount: 11,
@@ -309,9 +333,10 @@ import ImageIO
     }
 
     static func emptyComposerChecks() {
-        func image(_ changed: Bool = false) -> CGImage {
+        func image(_ changed: Bool = false, unexpectedDraft: Bool = false) -> CGImage {
             var bytes = [UInt8](repeating: 255, count: 4 * 3 * 4)
             if changed { bytes[0] = 254 }
+            if unexpectedDraft { bytes[4] = 253 }
             let provider = CGDataProvider(data: Data(bytes) as CFData)!
             return CGImage(width: 4, height: 3, bitsPerComponent: 8, bitsPerPixel: 32,
                 bytesPerRow: 16, space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -321,6 +346,14 @@ import ImageIO
         let original = image(), rect = CGRect(x: 0, y: 0, width: 4, height: 3)
         precondition(VisualParameters.matchesEmptyComposer(original, rect: rect, reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(image(true), rect: rect, reference: original))
+        let indicator = image(true)
+        precondition(VisualParameters.matchesEmptyComposer(indicator, rect: rect, references: [original, indicator]))
+        precondition(!VisualParameters.matchesEmptyComposer(indicator, rect: rect, references: [original]))
+        precondition(!VisualParameters.matchesEmptyComposer(image(true, unexpectedDraft: true),
+            rect: rect, references: [original, indicator]))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect, references: []))
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect,
+            references: [original, indicator, original, indicator]))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 1, dy: 0), reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: CGRect(x: 0, y: 0, width: 3, height: 3), reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 0.1, dy: 0), reference: original))
@@ -359,5 +392,259 @@ import ImageIO
         try! Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: path)
         refused(EmptyComposerReference(path: path.path,
             sha256: SHA256.hash(data: try! Data(contentsOf: path)).map { String(format: "%02x", $0) }.joined()))
+    }
+
+    static func sendButtonContextChecks() {
+        let point = CGPoint(x: 829, y: 606)
+        let composer = CGRect(x: 308, y: 497, width: 559, height: 93)
+        let button = HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 819, y: 601, width: 26, height: 12))
+        func accepts(_ wide: [HeaderOCRCandidate], _ narrow: [HeaderOCRCandidate]? = nil,
+                     composerRect: CGRect? = nil) -> Bool {
+            VisualParameters.sendButtonConfirmed(wideLabels: wide, buttonLabels: narrow ?? [button],
+                point: point, composerRect: composerRect ?? composer, imageWidth: 880, imageHeight: 640)
+        }
+        precondition(accepts([])) // Wide OCR may miss or misread the real button.
+        precondition(accepts([HeaderOCRCandidate(text: "Other", bounds: button.bounds)]))
+        precondition(accepts([button]))
+        let draft = HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 330, y: 548, width: 26, height: 12))
+        precondition(accepts([draft]))
+        precondition(accepts([draft, button]))
+        precondition(accepts([HeaderOCRCandidate(text: "Send", bounds: draft.bounds)]))
+        precondition(!accepts([draft, button], composerRect:
+            CGRect(x: 308, y: 497, width: 559, height: 130)))
+        // A crop may overlap the composer while its click and label retain
+        // distinct button roles. The real calibration overlaps by one pixel.
+        precondition(VisualParameters.sendButtonCrop(at: point, imageWidth: 880, imageHeight: 640)!
+            .intersects(composer))
+        precondition(accepts([]))
+        // Broad OCR missing the real button must not turn draft text into one.
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [draft],
+            point: CGPoint(x: 343, y: 554), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        // Exercise each role fence independently, within the original center tolerances.
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [
+            HeaderOCRCandidate(text: "发送", bounds: CGRect(x: 819, y: 591, width: 26, height: 8))],
+            point: CGPoint(x: 829, y: 588), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [
+            HeaderOCRCandidate(text: "发送", bounds: CGRect(x: 819, y: 580, width: 26, height: 8))],
+            point: CGPoint(x: 829, y: 592), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        // Full boxes must fit a declared region, not just intersect its edge.
+        for bounds in [CGRect(x: 700, y: 605, width: 26, height: 12),
+                       CGRect(x: 330, y: 584, width: 26, height: 12),
+                       CGRect(x: 786, y: 601, width: 26, height: 12),
+                       CGRect(x: 330, y: 532, width: 26, height: 12),
+                       CGRect(x: 870, y: 601, width: 26, height: 12),
+                       CGRect(x: 330, y: 548, width: -26, height: 12),
+                       CGRect(x: CGFloat.nan, y: 548, width: 26, height: 12)] {
+            precondition(!accepts([HeaderOCRCandidate(text: "Send", bounds: bounds)]))
+        }
+        precondition(!accepts([], []))
+        precondition(!accepts([], [button, button]))
+        precondition(!accepts([], [button, HeaderOCRCandidate(text: "Send", bounds: button.bounds)]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送文件", bounds: button.bounds)]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "Send now", bounds: button.bounds)]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 859, y: 601, width: 20, height: 12))]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 795, y: 601, width: 12, height: 12))]))
+        precondition(!accepts([], [HeaderOCRCandidate(text: "发送",
+            bounds: CGRect(x: 819, y: 601, width: 0, height: 12))]))
+        precondition(!VisualParameters.sendButtonConfirmed(wideLabels: [], buttonLabels: [button],
+            point: CGPoint(x: 10, y: 606), composerRect: composer, imageWidth: 880, imageHeight: 640))
+        precondition(!VisualParameters.sendLabelAtButton([button], point: CGPoint(x: 780, y: 606),
+            crop: VisualParameters.sendButtonCrop(at: point, imageWidth: 880, imageHeight: 640)!))
+        precondition(!accepts([], composerRect: CGRect(x: 308, y: 497, width: 600, height: 93)))
+    }
+
+    static func imageMediaChecks() {
+        let width = 4, height = 3
+        var bytes = [UInt8](repeating: 255, count: width * height * 4)
+        bytes[0] = 14
+        bytes[4] = 67
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("source.png")
+        let png = try! MediaSupport.pngData(image)
+        try! png.write(to: path)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let input = ImageMedia(path: path.path, sha256: MediaSupport.digest(png),
+                               mimeType: "image/png", sizeBytes: png.count)
+        let loaded = try! MediaSupport.load(input)
+        precondition(loaded.pixels.width == width && loaded.pixels.height == height)
+        precondition(loaded.pixels == (try! MediaSupport.decode(png, allowedTypes: ["public.png"])).1)
+        imageCopyReplacementChecks(loaded: loaded, png: png)
+        let jpegBuffer = NSMutableData()
+        let jpegDestination = CGImageDestinationCreateWithData(jpegBuffer, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(jpegDestination, image, nil)
+        precondition(CGImageDestinationFinalize(jpegDestination))
+        let jpeg = jpegBuffer as Data
+        let jpegPath = directory.appendingPathComponent("source.jpg")
+        try! jpeg.write(to: jpegPath)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: jpegPath.path)
+        let jpegInput = ImageMedia(path: jpegPath.path, sha256: MediaSupport.digest(jpeg),
+                                   mimeType: "image/jpeg", sizeBytes: jpeg.count)
+        let loadedJPEG = try! MediaSupport.load(jpegInput)
+        precondition(loadedJPEG.pixels.width == width && loadedJPEG.pixels.height == height)
+        let rotatedBuffer = NSMutableData()
+        let rotatedDestination = CGImageDestinationCreateWithData(rotatedBuffer, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(rotatedDestination, image,
+            [kCGImagePropertyOrientation: 6] as CFDictionary)
+        precondition(CGImageDestinationFinalize(rotatedDestination))
+        let rotatedJPEG = rotatedBuffer as Data
+        let rotatedPath = directory.appendingPathComponent("rotated.jpg")
+        try! rotatedJPEG.write(to: rotatedPath)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: rotatedPath.path)
+        let rotatedInput = ImageMedia(path: rotatedPath.path,
+            sha256: MediaSupport.digest(rotatedJPEG), mimeType: "image/jpeg",
+            sizeBytes: rotatedJPEG.count)
+        let loadedRotated = try! MediaSupport.load(rotatedInput)
+        precondition(loadedRotated.pixels.width == height && loadedRotated.pixels.height == width)
+        let normalizedPNG = try! MediaSupport.pngData(loadedRotated.image)
+        precondition((try! MediaSupport.decode(normalizedPNG, allowedTypes: ["public.png"])).1 ==
+                     loadedRotated.pixels)
+        func refused(_ candidate: ImageMedia) {
+            do { _ = try MediaSupport.load(candidate); preconditionFailure("unsafe image source accepted") }
+            catch {}
+        }
+        refused(ImageMedia(path: input.path, sha256: String(repeating: "0", count: 64),
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes))
+        refused(ImageMedia(path: input.path, sha256: input.sha256,
+                           mimeType: "image/jpeg", sizeBytes: input.sizeBytes))
+        refused(ImageMedia(path: input.path, sha256: input.sha256,
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes + 1))
+        try! FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path)
+        refused(input)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let fifo = directory.appendingPathComponent("blocked-source.png")
+        precondition(mkfifo(fifo.path, 0o600) == 0)
+        refused(ImageMedia(path: fifo.path, sha256: input.sha256,
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes))
+        let link = directory.appendingPathComponent("link.png")
+        try! FileManager.default.createSymbolicLink(at: link, withDestinationURL: path)
+        refused(ImageMedia(path: link.path, sha256: input.sha256,
+                           mimeType: input.mimeType, sizeBytes: input.sizeBytes))
+        let board = NSPasteboard(name: NSPasteboard.Name("codex-image-tests-" + UUID().uuidString))
+        board.clearContents()
+        precondition(board.setString("original clipboard", forType: .string))
+        let snapshot = try! ClipboardSnapshot.capture(board: board)
+        let owned = try! setClipboardImage(loaded, snapshot: snapshot)
+        precondition(try! MediaSupport.copiedImage(from: board, expected: loaded.pixels) != "")
+        let wrong = ImagePixels(width: width, height: height, sha256: String(repeating: "0", count: 64))
+        do {
+            _ = try MediaSupport.copiedImage(from: board, expected: wrong)
+            preconditionFailure("wrong composer pixels accepted")
+        } catch {}
+        try! snapshot.restore(ifCurrentCount: owned)
+        precondition(board.string(forType: .string) == "original clipboard")
+        let jpegSnapshot = try! ClipboardSnapshot.capture(board: board)
+        let jpegOwned = try! setClipboardImage(loadedJPEG, snapshot: jpegSnapshot)
+        precondition(try! MediaSupport.copiedImage(from: board, expected: loadedJPEG.pixels) != "")
+        try! jpegSnapshot.restore(ifCurrentCount: jpegOwned)
+        precondition(board.string(forType: .string) == "original clipboard")
+        let textOnly = NSPasteboard(name: NSPasteboard.Name("codex-image-text-" + UUID().uuidString))
+        textOnly.clearContents()
+        precondition(textOnly.setString("image label", forType: .string))
+        do {
+            _ = try MediaSupport.copiedImage(from: textOnly, expected: loaded.pixels)
+            preconditionFailure("text copy accepted as image evidence")
+        } catch {}
+        func acceptWeChatMixed(_ type: NSPasteboard.PasteboardType, _ data: Data) {
+            let mixed = NSPasteboard(name: NSPasteboard.Name("codex-image-mixed-" + UUID().uuidString))
+            mixed.clearContents()
+            let item = NSPasteboardItem()
+            precondition(item.setData(png, forType: .png))
+            precondition(item.setData(data, forType: type))
+            precondition(mixed.writeObjects([item]))
+            precondition(try! MediaSupport.copiedImage(from: mixed, expected: loaded.pixels) == "public.png")
+        }
+        acceptWeChatMixed(NSPasteboard.PasteboardType("public.file-url"), Data("file:///tmp/other".utf8))
+        acceptWeChatMixed(.rtf, Data("{\\rtf1 extra}".utf8))
+        let multipage = NSMutableData()
+        let multipageDestination = CGImageDestinationCreateWithData(multipage, "public.tiff" as CFString, 2, nil)!
+        CGImageDestinationAddImage(multipageDestination, image, nil)
+        CGImageDestinationAddImage(multipageDestination, image, nil)
+        precondition(CGImageDestinationFinalize(multipageDestination))
+        do {
+            _ = try MediaSupport.decode(multipage as Data, allowedTypes: ["public.tiff"])
+            preconditionFailure("multi-frame image accepted")
+        } catch {}
+        try! Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: path)
+        refused(ImageMedia(path: path.path,
+                           sha256: MediaSupport.digest(try! Data(contentsOf: path)),
+                           mimeType: "image/png", sizeBytes: 8))
+    }
+
+    static func imageCopyReplacementChecks(loaded: LoadedImage, png: Data) {
+        let board = NSPasteboard(name: NSPasteboard.Name("codex-image-copy-proof-" + UUID().uuidString))
+        board.clearContents()
+        precondition(board.setString("original", forType: .string))
+        let snapshot = try! ClipboardSnapshot.capture(board: board)
+        let sentinel = "private-image-sentinel"
+        let owned = try! setClipboardString(sentinel, snapshot: snapshot)
+
+        func refused(_ ownedCount: Int, _ pixels: ImagePixels = loaded.pixels) {
+            do {
+                _ = try copiedImageReplacingSentinel(from: board, ownedCount: ownedCount,
+                    sentinel: sentinel, expected: pixels)
+                preconditionFailure("unsafe image Copy evidence accepted")
+            } catch {}
+        }
+        func imageItem() -> NSPasteboardItem {
+            let item = NSPasteboardItem()
+            precondition(item.setData(png, forType: .png))
+            return item
+        }
+
+        refused(owned) // unchanged sentinel
+        board.clearContents()
+        precondition(board.setString(sentinel, forType: .string))
+        refused(owned) // count advanced, sentinel still present
+        board.clearContents()
+        precondition(board.writeObjects([imageItem()]))
+        let copiedCount = board.changeCount
+        precondition(copiedCount == owned + 2)
+        let (type, provenCount) = try! copiedImageReplacingSentinel(
+            from: board, ownedCount: owned, sentinel: sentinel, expected: loaded.pixels)
+        precondition(type == "public.png" && provenCount == copiedCount)
+        refused(copiedCount) // unchanged ownership
+        refused(copiedCount + 1) // backwards ownership
+        refused(owned, ImagePixels(width: loaded.pixels.width, height: loaded.pixels.height,
+            sha256: String(repeating: "0", count: 64)))
+
+        let sentinelImage = imageItem()
+        precondition(sentinelImage.setString(sentinel, forType: .string))
+        board.clearContents()
+        precondition(board.writeObjects([sentinelImage]))
+        refused(owned) // raster present, but sentinel is still advertised
+
+        board.clearContents()
+        precondition(board.writeObjects([imageItem(), imageItem()]))
+        refused(owned) // multiple image items
+        board.clearContents()
+        precondition(board.setString("not raster", forType: .string))
+        refused(owned) // no image bytes
+        board.clearContents()
+        precondition(board.setString("file:///tmp/image.png", forType: .fileURL))
+        refused(owned) // a file URL is not decoded image evidence
+
+        board.clearContents()
+        precondition(board.writeObjects([imageItem()]))
+        let stableCount = try! copiedImageReplacingSentinel(from: board, ownedCount: owned,
+            sentinel: sentinel, expected: loaded.pixels).1
+        board.clearContents()
+        precondition(board.setString("external change", forType: .string))
+        do {
+            try snapshot.restore(ifCurrentCount: stableCount)
+            preconditionFailure("external clipboard change was overwritten")
+        } catch {}
+        precondition(board.string(forType: .string) == "external change")
     }
 }

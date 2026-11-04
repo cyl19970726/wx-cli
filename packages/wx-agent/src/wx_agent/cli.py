@@ -6,7 +6,7 @@ import sys
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="wx-agent", description=__doc__)
-    parser.add_argument("command", choices=("start", "status", "pause", "resume", "stop", "run", "reply", "sender", "probe", "memory", "chat", "conversations"))
+    parser.add_argument("command", choices=("start", "status", "pause", "resume", "stop", "run", "reply", "sender", "probe", "memory", "chat", "conversations", "dispatch", "inbox"))
     if not args or args[0] in ("-h", "--help"):
         parser.parse_args(args)
         return 0
@@ -30,6 +30,12 @@ def main(argv=None):
     if command == "conversations":
         from .conversations import main as conversations
         return conversations(remaining)
+    if command == "dispatch":
+        from .dispatch import main as dispatch
+        return dispatch(remaining)
+    if command == "inbox":
+        from .inbox import main as inbox
+        return inbox(remaining)
     from .memory import main as memory
     return memory(remaining)
 

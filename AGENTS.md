@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-This fork provides on-demand, authorized group/private conversation access and an optional single-group resident agent. Make small changes that advance the requested behavior; do not broaden a task into unrelated product work, new protocols/hooks, multi-account scheduling, multiple resident agents or MCP.
+This fork provides authorized group/private conversation access, per-conversation owners and a shared managed desktop queue. Preserve the legacy single-group baseline where not migrated. Make coherent changes within the approved multi-conversation plan; do not broaden this into unrelated product work, multi-account scheduling or MCP.
 
 Read only the context relevant to the change. Start with `README.md`, `docs/architecture.md`, `CONTRIBUTING.md`, and the specific CLI or contract document being changed. Read the security and deployment guidance when touching source data, credentials, desktop automation or a live runtime. Preserve unrelated work in the shared checkout.
 
@@ -25,6 +25,7 @@ Read only the context relevant to the change. Start with `README.md`, `docs/arch
 
 - Copy encrypted WeChat source files to a private snapshot before database access. Never open or mutate the live source database with SQLite; do not change keys or commit decrypted content.
 - Keep one active writer per bound state directory. Import and coordinate an existing controller instead of duplicating its channel or consumer. All desktop focus/send paths use the shared UI lock.
+- Managed channels use the Rust coordinator in the canonical desktop `ui_dir`. Preserve origin owner/epoch on intents, turn reservations and pending work; never infer current authorization for an orphan intent. Old clients must not claim managed outbox attempts. A managed Session is distinct from a thread currently held by the desktop app; never resume or copy the latter through an independent transport.
 - Manual reads do not start a model or resident process. Do not enable automatic replies to every message; a reply or skip is a deliberate decision based on authorized context. Keep manual/on-demand and resident-runner behavior distinct.
 - Record an outbox attempt before desktop effects. A failed, submitted, uncertain or unknown outcome is not an automatic retry opportunity. Keep the original request ID and stop for review. Use `recover-unsent` only when its narrow code and evidence contract applies. `ui_observed` is local evidence, not recipient confirmation.
 - Do not remove or recreate state to clear a failure. A migration must preserve bindings, cursors, pending work, leases and outbox history, with a tested rollback path.
@@ -43,4 +44,5 @@ Read only the context relevant to the change. Start with `README.md`, `docs/arch
 - Keep PRs focused and describe the triggering problem, resulting behavior, validation and remaining risks. Do not commit or push unless the task authorizes it. Preserve upstream attribution and the MIT license.
 - Do not rebuild or replace a signed native helper as a side effect of Python work. A necessary helper upgrade requires an explicit plan, preserved state and rollback evidence, writer stopped cleanly, and fresh verification of helper identity and macOS permissions before GUI work.
 - Install project skills only under `.agents/skills/`. Global skill installation or discovery requires explicit authorization for the exact skill and global scope.
+- The optional plugin module keeps its canonical skill under `plugins/codex-wechat/.agents/skills/`. Its installer keeps skills and installation records in the explicit project. A linked worktree requires an explicit `--hooks-project` for the corresponding main checkout of the same Git repository, because the native host reads shared Hook declarations there; preserve unrelated shared entries and use normal hook trust review. A distributable plugin manifest does not authorize global registration or installation.
 - Keep operational history in the relevant validation record, not in this durable agreement. Do not claim unimplemented capability or current deployment state from old evidence.

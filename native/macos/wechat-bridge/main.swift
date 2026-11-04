@@ -15,11 +15,14 @@ private struct Command: Decodable {
     let action: String
     let text: String?
     let body: String?
+    let media: ImageMedia?
     let targetGroup: String?
     let targetKind: TargetKind?
     let focusEvidenceID: String?
     let expectedDraft: String?
+    let expectedDraftMedia: ImageMedia?
     let emptyComposerReference: EmptyComposerReference?
+    let emptyComposerAlternates: [EmptyComposerReference]?
     let expectedPID: Int32?
     let expectedWindowID: UInt32?
     let expectedFrame: RectInput?
@@ -242,11 +245,16 @@ private struct VisualStage: Codable {
     let id: String
     var stage: String
     let text: String
+    let media: ImageMedia?
+    var preparedPixelSHA256: String?
+    var preparedCopyType: String?
     let targetGroup: String
     let targetKind: TargetKind
     let focusEvidenceID: String
     let expectedDraft: String
+    let expectedDraftMedia: ImageMedia?
     let emptyComposerReference: EmptyComposerReference?
+    let emptyComposerAlternates: [EmptyComposerReference]?
     let expectedPID: Int32
     let expectedWindowID: UInt32
     let expectedFrame: RectInput
@@ -300,21 +308,32 @@ private func exclusiveMarker(_ url: URL) throws {
 }
 
 private func visualInputs(_ command: Command) throws -> VisualStage {
-    guard let text = command.text ?? command.body,
-          command.text == nil || command.body == nil || command.text == command.body,
+    let suppliedText = command.text ?? command.body ?? ""
+    let alternates = command.emptyComposerAlternates ?? []
+    let references = [command.emptyComposerReference].compactMap { $0 } + alternates
+    guard alternates.count <= 2,
+          alternates.isEmpty || command.emptyComposerReference != nil,
+          Set(references.map(\.path)).count == references.count,
+          Set(references.map(\.sha256)).count == references.count else {
+        throw Failure("Empty composer references must be a bounded, distinct calibrated set")
+    }
+    guard command.text == nil || command.body == nil || command.text == command.body,
           let targetGroup = command.targetGroup,
           let targetKind = command.targetKind,
           let focusEvidenceID = command.focusEvidenceID, safeID(focusEvidenceID),
           let expectedDraft = command.expectedDraft,
-          VisualParameters.acceptsText(text, allowEmpty: false),
+          VisualParameters.acceptsText(suppliedText, allowEmpty: command.media != nil),
+          (command.media == nil && !suppliedText.isEmpty) ||
+              (command.media != nil && suppliedText.isEmpty && expectedDraft.isEmpty),
           VisualParameters.acceptsText(expectedDraft, allowEmpty: true),
+          command.media == nil || command.emptyComposerReference != nil,
           VisualParameters.acceptsGroup(targetGroup),
           let pid = command.expectedPID,
           let windowID = command.expectedWindowID,
           let frame = command.expectedFrame,
           let composer = command.composerRect,
           let button = command.buttonPoint else {
-        throw Failure("Visual action requires valid text, targetGroup, targetKind, focusEvidenceID, expectedDraft and calibrated window coordinates")
+        throw Failure("Visual action requires exactly one text or image body, valid target and calibrated window coordinates")
     }
     guard pid > 0, windowID > 0,
           frame.width >= 300, frame.height >= 250,
@@ -331,10 +350,14 @@ private func visualInputs(_ command: Command) throws -> VisualStage {
         throw Failure("Visual coordinates must identify the lower-right composer and Send button inside the expected window")
     }
     return VisualStage(id: command.id, stage: "",
-                       text: VisualParameters.canonicalNewlines(text), targetGroup: targetGroup,
+                       text: VisualParameters.canonicalNewlines(suppliedText),
+                       media: command.media, preparedPixelSHA256: nil, preparedCopyType: nil,
+                       targetGroup: targetGroup,
                        targetKind: targetKind, focusEvidenceID: focusEvidenceID,
                        expectedDraft: VisualParameters.canonicalNewlines(expectedDraft),
+                       expectedDraftMedia: command.expectedDraftMedia,
                        emptyComposerReference: command.emptyComposerReference,
+                       emptyComposerAlternates: command.emptyComposerAlternates,
                        expectedPID: pid, expectedWindowID: windowID,
                        expectedFrame: frame, composerRect: composer, buttonPoint: button)
 }
@@ -347,7 +370,9 @@ private func sameVisualInputs(_ a: VisualStage, _ b: VisualStage) -> Bool {
     a.targetKind == b.targetKind && a.focusEvidenceID == b.focusEvidenceID &&
     a.expectedWindowID == b.expectedWindowID && a.expectedFrame == b.expectedFrame &&
     a.composerRect == b.composerRect && a.buttonPoint == b.buttonPoint &&
-    a.emptyComposerReference == b.emptyComposerReference
+    a.expectedDraftMedia == b.expectedDraftMedia &&
+    a.emptyComposerReference == b.emptyComposerReference &&
+    a.emptyComposerAlternates == b.emptyComposerAlternates && a.media == b.media
 }
 
 private func screenshotText(_ image: CGImage, rect: CGRect) throws -> [String] {
@@ -384,36 +409,33 @@ private func requireDraft(_ image: CGImage, rect: CGRect, expected: String) thro
     }
 }
 
-private func requireSendButton(_ image: CGImage, point: CGPoint) throws {
-    let lowerPane = CGRect(x: CGFloat(image.width) * 0.30,
-                           y: CGFloat(image.height) * 0.84,
-                           width: CGFloat(image.width) * 0.70,
-                           height: CGFloat(image.height) * 0.16).integral
-    let allLabels = try screenshotText(image, rect: lowerPane).map(normalizedDraft)
-    guard VisualParameters.uniqueSendLabel(allLabels, atButton: false) else {
-        throw Failure("Expected exactly one visible Send label in lower conversation pane")
-    }
-    guard let crop = VisualParameters.sendButtonCrop(at: point,
+private func requireSendButton(_ image: CGImage, point: CGPoint, composerRect: CGRect) throws {
+    guard let lowerPane = VisualParameters.sendButtonPane(imageWidth: image.width, imageHeight: image.height),
+          let crop = VisualParameters.sendButtonCrop(at: point,
         imageWidth: image.width, imageHeight: image.height) else {
         throw Failure("Calibrated Send button point is outside captured window")
     }
-    guard let buttonImage = image.cropping(to: crop) else {
-        throw Failure("Calibrated Send button crop is unavailable")
+    func candidates(in rect: CGRect) throws -> [HeaderOCRCandidate] {
+        guard let cropped = image.cropping(to: rect) else {
+            throw Failure("Send button OCR crop is unavailable")
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: cropped).perform([request])
+        return (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
+            guard let text = result.topCandidates(1).first?.string else { return nil }
+            let bounds = result.boundingBox
+            return HeaderOCRCandidate(text: normalizedDraft(text), bounds: CGRect(
+                x: rect.minX + bounds.minX * rect.width,
+                y: rect.minY + (1 - bounds.maxY) * rect.height,
+                width: bounds.width * rect.width, height: bounds.height * rect.height))
+        }
     }
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    request.recognitionLanguages = ["zh-Hans", "en-US"]
-    request.usesLanguageCorrection = false
-    try VNImageRequestHandler(cgImage: buttonImage).perform([request])
-    let candidates = (request.results ?? []).compactMap { result -> HeaderOCRCandidate? in
-        guard let text = result.topCandidates(1).first?.string else { return nil }
-        let bounds = result.boundingBox
-        return HeaderOCRCandidate(text: normalizedDraft(text), bounds: CGRect(
-            x: crop.minX + bounds.minX * crop.width,
-            y: crop.minY + (1 - bounds.maxY) * crop.height,
-            width: bounds.width * crop.width, height: bounds.height * crop.height))
-    }
-    guard VisualParameters.sendLabelAtButton(candidates, point: point, crop: crop) else {
+    guard try VisualParameters.sendButtonConfirmed(wideLabels: candidates(in: lowerPane),
+        buttonLabels: candidates(in: crop), point: point, composerRect: composerRect,
+        imageWidth: image.width, imageHeight: image.height) else {
         throw Failure("Unique Send label not confirmed at button point")
     }
 }
@@ -475,6 +497,32 @@ private func mouseClick(_ point: CGPoint) throws {
     up.post(tap: .cghidEventTap)
 }
 
+private func imageContextCopy(_ point: CGPoint, expectedPID: Int32) throws {
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard let down = CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
+                             mouseCursorPosition: point, mouseButton: .right),
+          let up = CGEvent(mouseEventSource: source, mouseType: .rightMouseUp,
+                           mouseCursorPosition: point, mouseButton: .right) else {
+        throw Failure("Could not construct image context Copy")
+    }
+    down.post(tap: .cghidEventTap)
+    usleep(100_000)
+    up.post(tap: .cghidEventTap)
+    usleep(400_000)
+    let app = AXUIElementCreateApplication(expectedPID)
+    let nodes = traverse(app, maxNodes: 500)
+    let labels = Set(["复制", "Copy"])
+    let copies = nodes.filter { node in
+        node.role == kAXMenuItemRole as String && labels.contains(node.title)
+    }
+    guard copies.count == 1, let copy = copies.first else {
+        throw Failure("Image context menu has no unique Copy action")
+    }
+    guard AXUIElementPerformAction(copy.element, kAXPressAction as CFString) == .success else {
+        throw Failure("Image context Copy action was not accepted")
+    }
+}
+
 private func key(_ code: CGKeyCode, command: Bool = false) throws {
     guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
           let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
@@ -487,7 +535,8 @@ private func key(_ code: CGKeyCode, command: Bool = false) throws {
 }
 
 private func readSelectedDraft(_ state: VisualStage, step: String, expected: String) async throws -> String {
-    let reference = try state.emptyComposerReference?.load(in: outputDirectory, rect: state.composerRect.rect)
+    let approved = [state.emptyComposerReference].compactMap { $0 } + (state.emptyComposerAlternates ?? [])
+    let references = try approved.map { try $0.load(in: outputDirectory, rect: state.composerRect.rect) }
     let (window, _, _) = try await freshVisual(state, step: "\(step)-before-click", draft: nil)
     let clickPoint = CGPoint(x: state.composerRect.x + 25, y: state.composerRect.y + 20)
     try mouseClick(globalPoint(clickPoint, window: window))
@@ -511,22 +560,23 @@ private func readSelectedDraft(_ state: VisualStage, step: String, expected: Str
         let copied = board.string(forType: .string)
         var visuallyBlank = false
         if expected.isEmpty && afterCount == ownedCount {
-            for observation in 0..<(reference == nil ? 1 : 3) {
+            for observation in 0..<(references.isEmpty ? 1 : 3) {
                 guard board.changeCount == ownedCount, board.string(forType: .string) == sentinel else {
                     throw Failure("Clipboard changed during empty draft verification")
                 }
                 let suffix = observation == 0 ? "" : "-\(observation)"
                 let (_, image, _) = try await freshVisual(state, step: "\(step)-empty-check\(suffix)", draft: nil)
-                visuallyBlank = (try? requireDraft(image, rect: state.composerRect.rect, expected: "")) != nil
-                if let reference, !visuallyBlank {
+                if !references.isEmpty {
                     visuallyBlank = VisualParameters.matchesEmptyComposer(image, rect: state.composerRect.rect,
-                                                                         reference: reference)
+                                                                         references: references)
+                } else {
+                    visuallyBlank = (try? requireDraft(image, rect: state.composerRect.rect, expected: "")) != nil
                 }
                 guard board.changeCount == ownedCount, board.string(forType: .string) == sentinel else {
                     throw Failure("Clipboard changed during empty draft verification")
                 }
                 if visuallyBlank { break }
-                if reference != nil && observation < 2 { try await Task.sleep(nanoseconds: 300_000_000) }
+                if !references.isEmpty && observation < 2 { try await Task.sleep(nanoseconds: 300_000_000) }
             }
         }
         guard VisualParameters.copyIsExpected(expected: expected, sentinel: sentinel,
@@ -561,6 +611,119 @@ private func pastePlainText(_ state: VisualStage, step: String) async throws {
         if NSPasteboard.general.changeCount == ownedCount,
            NSPasteboard.general.string(forType: .string) == state.text {
             try? snapshot.restore(ifCurrentCount: ownedCount)
+        }
+        throw error
+    }
+}
+
+private func pasteNativeImage(_ state: VisualStage, image: LoadedImage, step: String) async throws {
+    let snapshot = try ClipboardSnapshot.capture()
+    let owned = try setClipboardImage(image, snapshot: snapshot)
+    do {
+        _ = try await freshVisual(state, step: "\(step)-before-paste", draft: nil)
+        guard NSPasteboard.general.changeCount == owned else {
+            throw Failure("Clipboard changed before image Paste")
+        }
+        _ = try MediaSupport.copiedImage(from: .general, expected: image.pixels)
+        try key(9, command: true)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        try snapshot.restore(ifCurrentCount: owned)
+    } catch {
+        if NSPasteboard.general.changeCount == owned {
+            try? snapshot.restore(ifCurrentCount: owned)
+        }
+        throw error
+    }
+}
+
+// A staged image may be a separate accessibility element from the editable
+// composer. Only use its center when exactly one image belongs to the guarded
+// window and lies wholly inside the declared composer.
+private func stagedImagePoint(_ state: VisualStage, window: SCWindow) throws -> CGPoint {
+    let app = AXUIElementCreateApplication(state.expectedPID)
+    let composer = state.composerRect.rect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
+    let candidates = traverse(app).compactMap { node -> CGPoint? in
+        guard node.role == kAXImageRole as String,
+              let owner = node.ownerWindow, let ownerFrame = axFrame(owner),
+              abs(ownerFrame.minX - window.frame.minX) <= 3,
+              abs(ownerFrame.minY - window.frame.minY) <= 3,
+              abs(ownerFrame.width - window.frame.width) <= 3,
+              abs(ownerFrame.height - window.frame.height) <= 3,
+              let frame = axFrame(node.element),
+              frame.width >= 16, frame.height >= 16,
+              composer.contains(frame) else { return nil }
+        return CGPoint(x: frame.midX, y: frame.midY)
+    }
+    guard candidates.count == 1, let point = candidates.first else {
+        throw Failure("Cannot uniquely locate staged image inside guarded composer")
+    }
+    return point
+}
+
+private func readSelectedImage(_ state: VisualStage, image: LoadedImage,
+                               step: String) async throws -> String {
+    let (window, _, _) = try await freshVisual(state, step: "\(step)-before-click", draft: nil)
+    let point = CGPoint(x: state.composerRect.x + 25, y: state.composerRect.y + 20)
+    try mouseClick(globalPoint(point, window: window))
+    try await Task.sleep(nanoseconds: 200_000_000)
+    _ = try await freshVisual(state, step: "\(step)-before-select", draft: nil)
+    try key(0, command: true)
+    try await Task.sleep(nanoseconds: 200_000_000)
+    _ = try await freshVisual(state, step: "\(step)-before-copy", draft: nil)
+    let snapshot = try ClipboardSnapshot.capture()
+    let sentinel = "CODEX-IMAGE-COPY-\(UUID().uuidString)"
+    let owned = try setClipboardString(sentinel, snapshot: snapshot)
+    var verifiedCopyCount: Int?
+    do {
+        _ = try await freshVisual(state, step: "\(step)-copy-ready", draft: nil)
+        guard NSPasteboard.general.changeCount == owned else {
+            throw Failure("Clipboard changed before image Copy")
+        }
+        try key(8, command: true)
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let board = NSPasteboard.general
+        let copiedCount = board.changeCount
+        if copiedCount == owned && board.string(forType: .string) == sentinel {
+            let (currentWindow, _, _) = try await freshVisual(state, step: "\(step)-image-fallback-ready", draft: nil)
+            guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
+                throw Failure("Clipboard changed before staged image selection")
+            }
+            let imagePoint = try stagedImagePoint(state, window: currentWindow)
+            let (clickWindow, _, _) = try await freshVisual(state, step: "\(step)-image-fallback-before-click", draft: nil)
+            guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
+                throw Failure("Clipboard changed before staged image click")
+            }
+            guard try stagedImagePoint(state, window: clickWindow) == imagePoint else {
+                throw Failure("Staged image moved before selection")
+            }
+            try mouseClick(imagePoint)
+            try await Task.sleep(nanoseconds: 200_000_000)
+            _ = try await freshVisual(state, step: "\(step)-image-fallback-before-copy", draft: nil)
+            guard board.changeCount == owned, board.string(forType: .string) == sentinel else {
+                throw Failure("Clipboard changed before staged image Copy")
+            }
+            try imageContextCopy(imagePoint, expectedPID: state.expectedPID)
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        let (type, provenCount) = try copiedImageReplacingSentinel(
+            from: board, ownedCount: owned, sentinel: sentinel, expected: image.pixels)
+        verifiedCopyCount = provenCount
+        try await Task.sleep(nanoseconds: 200_000_000)
+        guard board.changeCount == provenCount else {
+            throw Failure("Clipboard changed after image evidence capture")
+        }
+        _ = try await freshVisual(state, step: "\(step)-copied", draft: nil)
+        guard board.changeCount == provenCount else {
+            throw Failure("Clipboard changed during image evidence capture")
+        }
+        try snapshot.restore(ifCurrentCount: provenCount)
+        return type
+    } catch {
+        let board = NSPasteboard.general
+        if board.changeCount == owned && board.string(forType: .string) == sentinel {
+            try? snapshot.restore(ifCurrentCount: owned)
+        } else if let verifiedCopyCount, board.changeCount == verifiedCopyCount {
+            try? snapshot.restore(ifCurrentCount: verifiedCopyCount)
         }
         throw error
     }
@@ -887,6 +1050,8 @@ private func runFocus(_ command: Command) async throws -> [String: Any] {
 
 private func runVisual(_ command: Command) async throws -> [String: Any] {
     let input = try visualInputs(command)
+    // Validate and fully decode the frozen source before any desktop action.
+    let sourceImage = try input.media.map(MediaSupport.load)
     if command.action == "prepare-visual" {
         // Marker is durable before the first click; any partial attempt blocks repeat.
         try exclusiveMarker(visualStageURL(input.id))
@@ -894,11 +1059,30 @@ private func runVisual(_ command: Command) async throws -> [String: Any] {
         state.stage = "prepare-attempted"
         try writeStage(state)
         let (_, _, lockStatus) = try await freshVisual(state, step: "prepare-start", draft: nil)
-        _ = try await readSelectedDraft(state, step: "old-draft", expected: state.expectedDraft)
-        try await pastePlainText(state, step: "replace-draft")
-        _ = try await readSelectedDraft(state, step: "new-draft", expected: state.text)
+        if let image = input.expectedDraftMedia {
+            _ = try await readSelectedImage(state, image: MediaSupport.load(image), step: "old-image")
+        } else {
+            _ = try await readSelectedDraft(state, step: "old-draft", expected: state.expectedDraft)
+        }
+        if let image = sourceImage {
+            try await pasteNativeImage(state, image: image, step: "replace-draft")
+            let copyType = try await readSelectedImage(state, image: image, step: "new-image")
+            state.preparedPixelSHA256 = image.pixels.sha256
+            state.preparedCopyType = copyType
+        } else {
+            try await pastePlainText(state, step: "replace-draft")
+            _ = try await readSelectedDraft(state, step: "new-draft", expected: state.text)
+        }
         state.stage = "prepared"
         try writeStage(state)
+        if let image = sourceImage {
+            var proof = image.evidence
+            proof["composer_pixel_sha256"] = state.preparedPixelSHA256
+            proof["composer_copy_type"] = state.preparedCopyType
+            proof["exact_pixels"] = true
+            return ["prepared": true, "lockStatus": lockStatus, "media_prepared": proof,
+                    "message": "Decoded image pixels copied back exactly; no Send action performed"]
+        }
         return ["prepared": true, "lockStatus": lockStatus,
                 "message": "Exact copied draft verified; no Send action performed"]
     }
@@ -906,19 +1090,45 @@ private func runVisual(_ command: Command) async throws -> [String: Any] {
     guard state.stage == "prepared", sameVisualInputs(state, input) else {
         throw Failure("Submit requires matching prepared transaction")
     }
-    _ = try await readSelectedDraft(state, step: "submit-draft", expected: state.text)
+    var submitCopyType: String?
+    if let image = sourceImage {
+        guard state.preparedPixelSHA256 == image.pixels.sha256,
+              state.preparedCopyType != nil else {
+            throw Failure("Prepared image pixel evidence does not match source")
+        }
+        submitCopyType = try await readSelectedImage(state, image: image, step: "submit-image")
+    } else {
+        _ = try await readSelectedDraft(state, step: "submit-draft", expected: state.text)
+    }
     let (window, image, lockStatus) = try await freshVisual(state, step: "before-submit", draft: nil)
-    try requireSendButton(image, point: state.buttonPoint.point)
+    try requireSendButton(image, point: state.buttonPoint.point, composerRect: state.composerRect.rect)
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(state.id).submit-attempted.json"))
     var attempted = state
     attempted.stage = "submit-attempted"
     try writeStage(attempted)
     let (currentWindow, currentImage, _) = try await freshVisual(state, step: "submit-immediate", draft: nil)
     guard currentWindow.windowID == window.windowID else { throw Failure("Window changed before final click") }
-    try requireSendButton(currentImage, point: state.buttonPoint.point)
+    try requireSendButton(currentImage, point: state.buttonPoint.point, composerRect: state.composerRect.rect)
     try mouseClick(globalPoint(state.buttonPoint.point, window: currentWindow))
     attempted.stage = "submitted-unverified"
     try writeStage(attempted)
+    if let image = sourceImage {
+        try await Task.sleep(nanoseconds: 350_000_000)
+        let (_, _, postLockStatus) = try await freshVisual(state, step: "submit-after-click", draft: nil)
+        let postPath = outputDirectory.appendingPathComponent("\(state.id).submit-after-click.png")
+        let postHash = MediaSupport.digest(try Data(contentsOf: postPath))
+        var proof = image.evidence
+        proof["composer_pixel_sha256"] = image.pixels.sha256
+        proof["composer_copy_type"] = submitCopyType
+        proof["prepared_copy_type"] = state.preparedCopyType
+        proof["exact_pixels"] = true
+        proof["post_click_capture"] = postPath.path
+        proof["post_click_capture_sha256"] = postHash
+        proof["post_click_header_verified"] = true
+        proof["post_click_lock_status"] = postLockStatus
+        return ["submitted": true, "lockStatus": lockStatus, "media_submitted": proof,
+                "message": "One visual Send click posted; post-click window captured; delivery needs independent verification"]
+    }
     return ["submitted": true, "lockStatus": lockStatus,
             "message": "One visual Send click posted; delivery needs independent verification"]
 }

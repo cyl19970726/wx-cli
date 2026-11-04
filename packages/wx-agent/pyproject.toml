@@ -18,6 +18,12 @@ wx-agent = "wx_agent.cli:main"
 wx-agent-sender = "wx_agent.macos_sender_driver:main"
 wx-agent-reply = "wx_agent.codex_reply_agent:main"
 wx-agent-probe = "wx_agent.sender_guard_probe:main"
+wx-agent-plugin = "wx_agent.codex_plugin:main"
+wx-agent-queue-session = "wx_agent.queued_snapshot:main"
+wx-agent-plugin-runner = "wx_agent.plugin_runner:main"
+wx-agent-plugin-install = "wx_agent.plugin_install:main"
+wx-agent-gateway = "wx_agent.gateway:main"
+wx-agent-gateway-client = "wx_agent.gateway_client:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

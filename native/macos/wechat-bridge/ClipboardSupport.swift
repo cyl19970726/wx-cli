@@ -68,3 +68,51 @@ func setClipboardString(_ value: String, snapshot: ClipboardSnapshot) throws -> 
     }
     return board.changeCount
 }
+
+func setClipboardImage(_ image: LoadedImage, snapshot: ClipboardSnapshot) throws -> Int {
+    let board = snapshot.board
+    guard board.changeCount == snapshot.changeCount else {
+        throw ClipboardFailure("Clipboard changed before image write")
+    }
+    // Both representations contain the already validated decoded image. A
+    // file URL would invite the receiver to open a path after our validation.
+    let png = try MediaSupport.pngData(image.image)
+    guard png.count <= MediaSupport.maximumBytes * 12,
+          let tiff = NSBitmapImageRep(cgImage: image.image).tiffRepresentation,
+          tiff.count <= MediaSupport.maximumBytes * 12 else {
+        throw ClipboardFailure("Native image representation is too large")
+    }
+    let item = NSPasteboardItem()
+    guard item.setData(png, forType: .png), item.setData(tiff, forType: .tiff) else {
+        throw ClipboardFailure("Cannot create native image pasteboard item")
+    }
+    board.clearContents()
+    let clearedCount = board.changeCount
+    guard board.changeCount == clearedCount, board.writeObjects([item]) else {
+        try? snapshot.restore(ifCurrentCount: clearedCount)
+        throw ClipboardFailure("Could not write native image pasteboard item")
+    }
+    do {
+        _ = try MediaSupport.copiedImage(from: board, expected: image.pixels)
+    } catch {
+        try? snapshot.restore(ifCurrentCount: board.changeCount)
+        throw error
+    }
+    return board.changeCount
+}
+
+// A Copy may change pasteboard ownership more than once. Prove the final
+// raster, not a particular number of ownership changes.
+func copiedImageReplacingSentinel(from board: NSPasteboard, ownedCount: Int,
+                                  sentinel: String, expected: ImagePixels) throws -> (String, Int) {
+    let count = board.changeCount
+    guard count > ownedCount, board.string(forType: .string) != sentinel,
+          board.changeCount == count else {
+        throw ClipboardFailure("Image Copy did not replace sentinel with stable clipboard ownership (before: \(ownedCount), after: \(count))")
+    }
+    let type = try MediaSupport.copiedImage(from: board, expected: expected)
+    guard board.changeCount == count else {
+        throw ClipboardFailure("Clipboard changed during image decoding")
+    }
+    return (type, count)
+}

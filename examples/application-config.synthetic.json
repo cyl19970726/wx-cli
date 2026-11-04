@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "application_id": "app_a",
+  "wx_agent": "/ABS/synthetic/venv/bin/wx-agent",
+  "wx_cli": "/ABS/synthetic/bin/wx-cli",
+  "conversation_config": "/ABS/synthetic/private/conversations/config.json",
+  "coordinator_root": "/ABS/synthetic/private/ui",
+  "conversations": {
+    "0123456789abcdef0123456789abcdef": {
+      "state_dir": "/ABS/synthetic/private/registry/channels/0123456789abcdef0123456789abcdef",
+      "owner": "synthetic_owner_a",
+      "expected_epoch": 1
+    }
+  }
+}

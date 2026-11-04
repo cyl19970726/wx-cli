@@ -49,9 +49,13 @@ Codex 适配器匿名化成员标签，并只把笔记文案加入提示，不�
 
 ### 显式恢复已证实未提交的尝试
 
-常规 `failed`、`indeterminate` 或未知结果仍必须停止，不能自动重试、换 request ID 或重新创建相同意图。只有操作者确认原尝试未提交，且受保护的原生证据能证明这一点时，才允许显式 `recover-unsent`。当前允许的原生准备错误仅有 `Cannot snapshot a clipboard item` 和 `Copied composer text does not exactly match expected draft`；其他错误、模糊状态或仅凭人工猜测都不能恢复。已提交、出现任何 submit 阶段证据、`ui_observed`、收件确认或 P3 错误目标发送均不能走此恢复路径，也不能重放。
+常规 `failed`、`indeterminate` 或未知结果仍必须停止，不能自动重试、换 request ID 或重新创建相同意图。只有操作者确认原尝试未提交，且受保护的原生证据能证明这一点时，才允许显式 `recover-unsent`。准备阶段只接受 `Cannot snapshot a clipboard item` 和 `Copied composer text does not exactly match expected draft`。另有一个更早的 inspect-only 特例：原报告必须精确记录 attempt 1、相同 request ID、`stage=started`、`status=failed` 和 `error=WeChat process or window changed`；同一 transaction ID 下只能有该报告、inspect job 和 inspect result 三份产物。inspect job 与 result 的 ID/action 必须匹配，result 的 `ok=true`、正数且等于当前配置的 PID、精确空 `windows=[]`、三项权限全 true、`onConsole=true` 且未锁定必须同时成立。此时未进入 focus/prepare/submit；任何对应产物、其他同 ID 产物、存活 helper 或已存在恢复证明都拒绝。只读 preflight 不容许下一 attempt 的任何产物；锁内复验只容许驱动刚创建、ID/请求/attempt/恢复来源/started 状态均精确匹配的下一 attempt 报告。图片、其他错误、模糊状态或仅凭人工猜测不能恢复。已提交、出现任何 submit 阶段证据、`ui_observed`、收件确认或 P3 错误目标发送均不能走此恢复路径，也不能重放。
 
-恢复保留原 request ID、正文、绑定和不可变历史尝试，并要求调用者指定与 outbox 当前状态完全匹配的 `expected_attempt`。驱动必须先报告受支持的 recovery capability；只读 preflight 在不领取新 attempt 的情况下核对原 request/channel/session/account/talker/text、指定 attempt、完整的 inspect/focus/prepare 作业与结果、原准备阶段错误、已记录的权限、无提交痕迹及无存活 helper。任何证据缺失、重复、悬空或不匹配，或发现 submit 证据/存活 helper，均拒绝恢复。Rust 只有在 preflight 明确证明未提交后，才以事务比较领取下一 attempt；驱动随后在共用 UI 锁内重新核验证据并保存恢复证明，然后最多执行一次发送尝试。缺少能力握手或 positive proof 时失败关闭，不自动退回普通 `send`。
+另一个经过审查的历史链特例只接受 `expected_attempt=2`：attempt 1 必须符合上述 inspect-only 证据并保留其 1→2 恢复证明；attempt 2 必须在 `inspected/indeterminate` 状态记录 `helper action timed out`，随后同一次 focus 返回完整终端失败 `Cannot snapshot a clipboard item`，助手已退出。原 inspect、focus job 的目标/PID/窗口/坐标与当前配置必须匹配，原截图和标记须完整，整个请求的产物集合不得包含 prepare、state、submit 或任何未知阶段。此路径只允许显式恢复到 attempt 3，不接受其他任意超时或自动重试。preflight 不得有 attempt 3 产物；锁内仅允许当前刚生成、字段精确一致的 attempt 3 起始报告，并独占写入新恢复证明。当前剪贴板正常或群内没有出站消息都不能替代历史证明。
+
+恢复保留原 request ID、正文、绑定和不可变历史尝试，并要求调用者指定与 outbox 当前状态完全匹配的 `expected_attempt`。驱动必须先报告受支持的 recovery capability；只读 preflight 在不领取新 attempt 的情况下核对原 request/channel/session/account/talker/text、指定 attempt，并按上述互斥证据形态核对原尝试、无提交痕迹及无存活 helper。任何证据缺失、重复、悬空或不匹配，或发现 submit 证据/存活 helper，均拒绝恢复。Rust 只有在 preflight 明确证明未提交后，才以事务比较领取下一 attempt；驱动随后在共用 UI 锁内重新核验证据并保存恢复证明，然后最多执行一次发送尝试。下一次动作必须重新 inspect/focus/prepare，不沿用旧窗口结果。缺少能力握手或 positive proof 时失败关闭，不自动退回普通 `send`。
+
+原生动作启动前保存私有未解决标记；动作超时后在总预算内等待晚到终端结果和进程退出。只有二者均核实，写路径才清理标记；只读 preflight 不清理。未解决标记会阻止后续 GUI 动作，即使上一驱动已退出并释放 UI 锁。focus 失败只证明消息准备尚未开始，submit 失败仍表示发送结果不明。不得通过删除标记或清空剪贴板绕过校验。
 
 若原 prepare 作业使用过 `emptyComposerReference`，其作业、持久 visual state 与当前配置中的引用必须完全一致，恢复时不得替换或移除。经过审查的升级可以为未配置过参考图的旧尝试新增校准，但不改变原失败证据、正文、绑定或无 submit 的证明要求。参考图自身不能授权恢复。
 
@@ -70,3 +74,24 @@ Codex 适配器匿名化成员标签，并只把笔记文案加入提示，不�
 ## 兼容性
 
 Rust 协议版本与 Python 包版本分别管理。脚本兼容入口依赖完整源码树或已安装包，不再支持只复制几个旧 launcher 就部署。原来的独立运行版保持原样，升级必须停一个、启动一个并核验原状态；不删除 channel/outbox 来绕过命令变化。
+
+
+## 单图片意图与协议 2
+
+`outbox queue-image --request-id ID --channel-id CHANNEL --session-id SESSION --image PATH` 在既有 journal 中建立 `media_queued` 意图；只有新二进制可领取此状态。文字 queue／协议 1 不变。图片完整验证后冻结，绑定媒体真实类型、字节数和 SHA-256，驱动收到协议 2 的 `media:{path,sha256,mime_type,size_bytes}`，不以 `text` 传路径。领取 attempt 前及驱动 GUI 前复核冻结内容。原文件变化不改变已保存意图；冻结内容变化停止。迁移保留旧文本和不可变 attempt；回退仅替换代码，不恢复过时状态快照。
+
+图片同样先持久记录 attempt 后操作 GUI；prepared／submitted 必须附带匹配来源和复制回规范化像素的图片证据。发送后保留绑定本次目标与操作的截图，关联正确 talker／self 的唯一新 Image 事件；微信重编码不要求输入和输出原文件字节相等。`ui_observed` 不代表收件。图片不支持 `recover-unsent`，不能换 ID 或换 GUI 路径重发。尺寸／格式限制、安装和实际验收见[图片记录](IMAGE_SEND_VALIDATION_20261024.md)。
+
+## 托管协调契约
+
+新增 `wx-cli coordinator --state-dir DESKTOP_UI_DIR` 使用私有 SQLite 保存每会话 owner、input、reply_policy、control epoch、cutover、通知水位和处理进度，以及 inbox/持久待办和 dispatch 引用。它不复制原 channel 事件或 outbox 正文。原 consumer、pending、lease、全部 attempts 和图片冻结副本原样保留。新绑定默认 observe；明确既有授权通过迁移参数保留。所有自动路由显式使用 conversation ID，不读取 selected_id。
+
+托管 queue/queue-image 必须携带原 owner 和 expected epoch。Rust 先验证，再冻结意图并保存 `managed_owner/managed_epoch`；冻结与注记间崩溃留下的无来源意图保持隔离，不被对账授予当前 owner 权限。`managed_queued/managed_media_queued` 不能由旧二进制的 queued 领取路径处理；数据库触发器还拒绝旧 attempt/recovery 插入。只有经过当前协调器领取、token/代际校验的 managed-send 能记录尝试。普通 direct send 与 narrow recover 在托管模式拒绝。
+
+事件落盘→inbox、outbox冻结→dispatch引用不是跨库事务。水位与通知在协调器事务中提交；启动/周期 reconcile 从原日志补缺，delivery/request 的幂等键保持不变。owner 迁移与 takeover 使旧 epoch 无效，未决投递显式交接；不能从 cursor 0 重跑历史。defer/draft 是持续待办，保存原事件、负责人、条件与期限；处理前缀前进不关闭待办。待审草稿不会到期自动发送。
+
+唯一执行器先持有桌面所有权，再在原 sender.lock 中检查领取、原 helper、权限与窗口。就绪后才记录 attempt；忙时排队，不消耗 attempt。driver 继承同一打开文件的锁，原 helper 未解决标记阻止父进程退出后的后继 GUI 动作。所有托管 send/reply/send-image/focus 共享该协调；旧 runner 拒绝托管 channel，防止静默 ack 非文本。其他同 OS 用户的任意 shell/原生调用并非此协议能隔离的恶意进程边界。
+
+dispatch完成从原 outbox结果推导。ui_observed 释放干净桌面，不等待每条人工收件确认；未知/环境异常暂停通道且保留原请求。显式检查旧 helper 和桌面后，review可恢复其他合格项，未知项本身不转回队列。不能把租约过期当成没有点击。
+
+Session投递先持久 reserve，再 turn/start，再记录原 thread/turn。busy、离线及结果不明不会新建替身或重复 turn；同 session_ref 的 active reservation 唯一。transport终结与业务处理决定独立；只有 Session 显式调用 inbox complete 才推进处理。模型最终文案/工具日志不转发微信。当前只接受自持的同宿主 Codex app-server Session，桌面 App 持有的 thread 与跨主机推送未接入。详见[操作与恢复](MANAGED_CONVERSATIONS.md)。

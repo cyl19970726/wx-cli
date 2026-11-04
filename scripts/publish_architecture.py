@@ -9,7 +9,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
-    parser.add_argument("--diagram", choices=("architecture", "capabilities"), default="architecture")
+    parser.add_argument("--diagram", choices=("architecture", "capabilities", "wechat-current", "wechat-target", "wechat-send"), default="architecture")
     parser.add_argument("--receipt", type=Path, help="passing finalize summary from a named review directory")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -18,11 +18,17 @@ def main():
         source = folder / "candidate.json"
         stem = "agent-channel"
         default_receipt = folder / (stem + ".finalize-summary.json")
-    else:
+    elif args.diagram == "capabilities":
         folder = root / ".archify/tree-conversation-capabilities-20261016-general"
         source = root / "docs/diagrams/conversation-capabilities.tree.json"
         stem = "conversation-capabilities"
         default_receipt = folder / "revision-3" / (stem + ".finalize-summary.json")
+    else:
+        stem=args.diagram
+        mode="sequence" if stem=="wechat-send" else "architecture"
+        folder=root/ (".archify/"+mode+"-"+stem+"-20261101-160826")
+        source=folder/"candidate.json"
+        default_receipt=folder/(stem+".finalize-summary.json")
     receipt_path = args.receipt or default_receipt
     receipt = json.loads(receipt_path.read_text())
     if receipt.get("status") != "pass":

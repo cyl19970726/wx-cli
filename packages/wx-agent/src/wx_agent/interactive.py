@@ -35,7 +35,8 @@ def _check(condition, code, message):
 
 
 def _fingerprint(settings):
-    raw = json.dumps(settings, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    canonical = {key: value for key, value in settings.items() if key != "_compatible_fingerprints"}
+    raw = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -69,6 +70,13 @@ def _command(settings, section, *parts, data=None):
 
 
 def _json(settings, section, *parts, data=None):
+    if section == "outbox" and parts and parts[0] == "send":
+        from . import dispatch
+        if dispatch.managed_root(settings["state_dir"]):
+            return dispatch.send_existing(settings["wx_cli"], settings["state_dir"],
+                                          parts[parts.index("--request-id") + 1],
+                                          owner=settings.get("_dispatch_owner"),
+                                          expected_epoch=settings.get("_dispatch_epoch"))
     try:
         return runner.one_json(_command(settings, section, *parts, data=data))
     except runner.RunnerError as exc:
@@ -98,8 +106,9 @@ def _status(settings):
 
 def _selection(settings, binding):
     selected = _read_optional(Path(settings["state_dir"]) / SELECTION_NAME)
+    fingerprints = {_fingerprint(settings), *settings.get("_compatible_fingerprints", ())}
     _check(selected is not None, "selection_required", "select the bound group first")
-    _check(selected.get("version") == 1 and selected.get("config_fingerprint") == _fingerprint(settings)
+    _check(selected.get("version") == 1 and selected.get("config_fingerprint") in fingerprints
            and selected.get("binding") == {key: binding.get(key) for key in STATE_KEYS}
            and selected.get("talker") == binding["talker"], "selection_drift", "group selection or config changed")
     return selected
@@ -284,16 +293,26 @@ def groups(settings, name, exact=False):
     return result
 
 
-def select(settings, talker):
+def select(settings, talker, compatible=()):
     state_dir = Path(settings["state_dir"])
     with _lock(state_dir, ctl.LOCK_NAME):
         binding = _status(settings)["binding"]
         _check(talker == binding["talker"], "different_group", "only the configured group can be selected")
-        selected = {"version": 1, "config_fingerprint": _fingerprint(settings),
+        def snapshot(source):
+            _check(source.get("state_dir") == settings.get("state_dir")
+                   and {key: value for key, value in source.items() if key != "wx_cli"}
+                   == {key: value for key, value in settings.items() if key != "wx_cli"},
+                   "selection_drift", "compatible selection configuration differs")
+            return {"version": 1, "config_fingerprint": _fingerprint(source),
                     "binding": {key: binding.get(key) for key in STATE_KEYS}, "talker": talker}
+        selected = snapshot(settings)
+        compatible = tuple(compatible)
+        expected = (selected, *(snapshot(source) for source in compatible))
         existing = _read_optional(state_dir / SELECTION_NAME)
-        _check(existing is None or existing == selected, "selection_drift", "existing group selection differs")
-        runner.save(state_dir / SELECTION_NAME, selected)
+        _check(existing is None or existing in expected, "selection_drift", "existing group selection differs")
+        # Keep the stable entry's fingerprint when a managed candidate is the
+        # only caller creating the selection; either exact fingerprint is valid.
+        runner.save(state_dir / SELECTION_NAME, existing or (expected[-1] if compatible else selected))
         return {"selected": True, "binding": selected["binding"]}
 
 
@@ -407,13 +426,14 @@ def reply(settings, cursor, text):
         if pending is not None and status["consumer_cursor"] == cursor:
             _check(existing is not None, "cursor_drift", "ack advanced without a durable outbox request")
         if existing is None:
+            fence = ("--owner", settings["_dispatch_owner"], "--expected-epoch", str(settings["_dispatch_epoch"])) if settings.get("_dispatch_owner") is not None else ()
             _json(settings, "outbox", "queue", "--request-id", request_id,
                   "--channel-id", binding["channel_id"], "--session-id", binding["session_id"],
-                  "--text-stdin", data=text)
+                  "--text-stdin", *fence, data=text)
         item = _json(settings, "outbox", "show", "--request-id", request_id)
         _check(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
         _text_match(item, text)
-        if item.get("status") == "queued":
+        if item.get("status") in ("queued", "managed_queued", "managed_media_queued"):
             lease["pending"]["phase"] = "queued"
             runner.save(state_dir / LEASE_NAME, lease)
             try:
