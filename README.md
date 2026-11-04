@@ -20,7 +20,7 @@
 
 通道能力与 Agent Session 接入分开：wx-cli 保存事件、订阅进度和发送队列，普通应用可直接提交授权的群通知，Session 插件负责通知原 Session 并消费事件。[应用客户端与鉴权网关](docs/APPLICATION_CLIENT.md)及[项目级 Codex 插件](docs/SESSION_PLUGIN.md)复用原 inbox/outbox。两个应用的鉴权异机发送、原专用 native TUI Session 的单回合入站处理、群图片后配文均有实机和各自收件证据；queue snapshot 模式已让另一宿主上由桌面 App 持有的原 Session 读取真实积压及新入站并记录 `skip`，带 reservation 的通知进程重启未重复通知，人工发言的逐会话接管及交还也通过。App 原聊天宿主须正常加载；此模式不代表旧 App Hook 回调已通过，历史 `defer` 业务待办继续保留。首轮压力批次在成功 10 条后被标题保护拦下；修复后的独立新语料已连续完成 30 条，用户确认私聊、测试群各 15 条且顺序内容正常，旧失败批次保留。精确版本、能力范围和未完成项见[通道订阅合同](docs/CHANNEL_SUBSCRIPTIONS.md)和[实施记录](docs/MULTI_CONVERSATION_IMPLEMENTATION.md)。
 
-Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。未迁移会话继续使用原 controller 协调；托管会话通过 `configure` 显式迁移，使用 `wx-agent inbox` 和 `dispatch` 共享处理记录及桌面队列。原专用 native TUI Session 已有受管入站闭环；正在被桌面 App 持有的业务 Session 暂只支持主动 CLI。MCP 尚未实现。
+Agent 可通过 [`wx-agent conversations`](docs/CONVERSATIONS_CLI.md) 按需发现并选择授权的群聊或个人会话、分页阅读、聚焦、发送或回复；纯手动流程无需模型或常驻 Agent。未迁移会话继续使用原 controller 协调；托管会话通过 `configure` 显式迁移，使用 `wx-agent inbox` 和 `dispatch` 共享处理记录及桌面队列。原专用 native TUI Session 和已加载 App 宿主的 queue snapshot 模式各有原 Session 入站闭环；自动冷唤醒与旧 App Hook 回调另行设计和验收。MCP 尚未实现。
 
 图片发送命令、内容冻结与当前实机状态见[单图片发送记录](docs/IMAGE_SEND_VALIDATION_20261024.md)和[CLI 用法](docs/CONVERSATIONS_CLI.md)。
 

@@ -110,6 +110,24 @@ class ApplicationClientTests(unittest.TestCase):
         self.assertEqual((error.exception.code, error.exception.request_id),
                          ("text_conflict", "app_a.notice-001"))
 
+    def test_invalid_text_is_definite_before_any_transport_or_intent(self):
+        for text in (None, "", "   ", "字" * 2001, "🙂" * 2001,
+                     "body\n", "body\r", "body\x00", "body\x7f", "\ud800"):
+            with self.subTest(text_type=type(text).__name__, length=len(text) if text else 0):
+                self.calls.clear()
+                with self.assertRaises(ApplicationError) as error:
+                    self.client().send_text(CID, "notice-001", text)
+                self.assertNotIsInstance(error.exception, ResultUnknown)
+                self.assertEqual((error.exception.code, error.exception.request_id),
+                                 ("invalid_text", "app_a.notice-001"))
+                self.assertEqual(self.calls, [])
+
+    def test_unicode_character_limit_accepts_exact_boundary(self):
+        text = "🙂" * 2000
+        sent = self.client().send_text(CID, "notice-001", text)
+        self.assertEqual(sent["status"], "pending")
+        self.assertEqual(self.calls[-1][1], text)
+
     def test_timeout_is_unknown_with_same_id_and_no_retry(self):
         self.timeout = True
         with self.assertRaises(ResultUnknown) as error:

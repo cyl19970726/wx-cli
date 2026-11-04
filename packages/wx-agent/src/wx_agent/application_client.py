@@ -16,6 +16,8 @@ import stat
 import subprocess
 from typing import Callable, Optional
 
+from .macos_sender_driver import Refused, validate_text
+
 
 APP_ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,39}\Z")
 LOCAL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
@@ -160,9 +162,14 @@ class ApplicationClient:
 
     def send_text(self, conversation_id: str, request_id: str, text: str) -> dict:
         full_id = self.full_request_id(request_id)
+        self._entry(conversation_id)
+        try:
+            validate_text(text)
+        except (Refused, UnicodeError) as exc:
+            # This is a definite input refusal before a subprocess or intent.
+            # Runtime failures after submission retain their unknown semantics.
+            raise ApplicationError("invalid_text", full_id) from exc
         entry = self._fence(conversation_id, full_id)
-        if not isinstance(text, str):
-            raise ApplicationError("invalid_text", full_id)
         value = self._json([str(self.wx_agent), "conversations", "--config", str(self.conversation_config),
                             "send", "--id", conversation_id, "--request-id", full_id,
                             "--text-stdin", "--owner", entry["owner"],
