@@ -1253,7 +1253,12 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
                 "targetKind": config.get("conversation_kind", "group"), "expectedPID": config["expected_pid"],
                 "expectedWindowID": window_id, "expectedFrame": frame,
                 "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
-    if (_read_artifact(ui / (tid + "-focus.focus-group.job.json")) != expected
+    actual_focus = _read_artifact(ui / (tid + "-focus.focus-group.job.json"))
+    if "allowCurrentHeader" in actual_focus:
+        if type(actual_focus["allowCurrentHeader"]) is not bool:
+            raise Refused("original focus opt-in flag differs")
+        expected["allowCurrentHeader"] = actual_focus["allowCurrentHeader"]
+    if (actual_focus != expected
             or set(focused) != {"id", "ok", "error", "permissions"}
             or focused.get("id") != tid + "-focus" or focused.get("ok") is not False
             or focused.get("error") not in (FOCUS_SEARCH_REJECTION_ERROR, FOCUS_POPUP_ABSENT_ERROR)
@@ -1825,7 +1830,7 @@ def focus_only(config):
         tid = "focus-" + uuid.uuid4().hex
         inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
         window_id, frame = inspect_ok(inspected, config)
-        command = {"targetGroup": config["target_group"],
+        command = {"targetGroup": config["target_group"], "allowCurrentHeader": True,
                    "targetKind": config.get("conversation_kind", "group"),
                    "expectedPID": config["expected_pid"],
                    "expectedWindowID": window_id, "expectedFrame": frame,
@@ -1902,7 +1907,7 @@ def run(request, config):
             report["stage"] = "inspected"
             private_update(report_path, report)
             focus_id = tid + "-focus"
-            focus_command = {"targetGroup": config["target_group"],
+            focus_command = {"targetGroup": config["target_group"], "allowCurrentHeader": True,
                              "targetKind": config.get("conversation_kind", "group"),
                              "expectedPID": config["expected_pid"],
                              "expectedWindowID": window_id, "expectedFrame": frame,

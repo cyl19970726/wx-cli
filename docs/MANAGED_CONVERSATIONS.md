@@ -192,7 +192,7 @@ Rust 持有共享 executor/sender 锁，在第二次 CAS 后先保存受控恢�
 
 视觉标题仅规范 Unicode 空白，其余字符、标点、分类和群成员数要求不放宽。操作前元数据查询覆盖空白等价的所有候选，跨群/私聊重名一并拒绝；存储身份、目标及事务字段保持原字节，不用 OCR 文本替换真实绑定。
 
-连续向同一聊天发件时，原生助手先在同 PID/窗口/frame/前台且没有额外弹窗的条件下，两次间隔至少 120 毫秒采集并验证精确标题和类型。群标题仍要求成员数，私聊保持独立标题规则。成功保存明确的 `current-header`、`group-header` / `private-header` 与 `headerConfirmations=2` 证据，不伪装为搜索结果分类；两次不匹配则走原完整搜索。prepare/submit 仍核对同一新鲜 focus 引用、目标、类型和草稿，不能凭上一次已发送就省去当前核验。
+连续向同一聊天发件时，支持新证据合同的 sender 用 `allowCurrentHeader=true` 显式选择：原生助手在同 PID/窗口/frame/前台且没有额外弹窗的条件下，两次间隔至少 120 毫秒采集并验证精确标题和类型。省略或为 false 的旧调用方仍走原搜索合同。群标题仍要求成员数，私聊保持独立标题规则。成功保存明确的 `current-header`、`group-header` / `private-header` 与 `headerConfirmations=2` 证据，不伪装为搜索结果分类；两次不匹配则走原完整搜索。prepare/submit 仍核对同一新鲜 focus 引用、目标、类型和草稿，不能凭上一次已发送就省去当前核验。
 
 以下入口用于操作员在完整只读证据下退役**原调度阻塞**。它们不重试、不清空或替换草稿，不把原 outbox/attempt/client report 改为成功、未发送或可重发，也不自动解除暂停。先核对安装版本、原 dispatch ID、原 attempt 1、当前绑定/owner/control 和私有原生文件；源码、合成检查或一次失败归档都不能证明现场已启用修复。
 

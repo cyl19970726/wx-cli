@@ -103,6 +103,9 @@ import ImageIO
         precondition(VisualParameters.exactGroupTitle("合成测试群 (12)", target: "合成测试群"))
         precondition(VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
             kind: .group, headerConfirmations: 2))
+        precondition(!VisualParameters.shouldUseCurrentHeader(nil))
+        precondition(!VisualParameters.shouldUseCurrentHeader(false))
+        precondition(VisualParameters.shouldUseCurrentHeader(true))
         precondition(VisualParameters.acceptsFocusSource("current-header", category: .privateHeader,
             kind: .private, headerConfirmations: 2))
         precondition(!VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,

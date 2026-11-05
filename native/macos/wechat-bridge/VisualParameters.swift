@@ -105,6 +105,8 @@ struct FocusPollDiagnostic: Codable {
 }
 
 enum VisualParameters {
+    static func shouldUseCurrentHeader(_ requested: Bool?) -> Bool { requested == true }
+
     static func acceptsFocusSource(_ source: String, category: SearchCategory, kind: TargetKind,
                                    headerConfirmations: Int?) -> Bool {
         guard category.accepts(kind) else { return false }

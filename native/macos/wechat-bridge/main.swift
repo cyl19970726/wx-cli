@@ -17,6 +17,7 @@ private struct Command: Decodable {
     let body: String?
     let media: ImageMedia?
     let targetGroup: String?
+    let allowCurrentHeader: Bool?
     let targetKind: TargetKind?
     let focusEvidenceID: String?
     let expectedDraft: String?
@@ -740,6 +741,7 @@ private struct FocusInputs {
     let expectedFrame: RectInput
     let listRect: RectInput
     let searchPoint: PointInput
+    let allowCurrentHeader: Bool
 }
 
 private func focusInputs(_ command: Command) throws -> FocusInputs {
@@ -763,7 +765,8 @@ private func focusInputs(_ command: Command) throws -> FocusInputs {
     }
     return FocusInputs(id: command.id, targetGroup: group, targetKind: kind, expectedPID: pid,
                        expectedWindowID: windowID, expectedFrame: frame,
-                       listRect: list, searchPoint: search)
+                       listRect: list, searchPoint: search,
+                       allowCurrentHeader: VisualParameters.shouldUseCurrentHeader(command.allowCurrentHeader))
 }
 
 private func freshFocus(_ input: FocusInputs, step: String,
@@ -1002,7 +1005,7 @@ private func runFocus(_ command: Command) async throws -> [String: Any] {
     let input = try focusInputs(command)
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(input.id).focus-attempted.json"))
     let (_, initial, _) = try await freshFocus(input, step: "focus-initial", activateTarget: true)
-    if try await headerContainsTarget(initial, target: input.targetGroup, kind: input.targetKind) {
+    if input.allowCurrentHeader, try await headerContainsTarget(initial, target: input.targetGroup, kind: input.targetKind) {
         try await Task.sleep(nanoseconds: 120_000_000)
         let (_, confirmed, _) = try await freshFocus(input, step: "current-header-confirmed")
         if try await headerContainsTarget(confirmed, target: input.targetGroup, kind: input.targetKind) {
