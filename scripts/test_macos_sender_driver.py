@@ -312,6 +312,25 @@ class SenderTests(unittest.TestCase):
         self.assertFalse(driver.titles_overlap("Alex", "Alex Team"))
         self.assertEqual(driver.title_query("Alex (2)（３）"), "Alex")
 
+    def test_visual_whitespace_aliases_cannot_bypass_metadata_collision_guard(self):
+        target = "咸蛋AI - AI落地企业"
+        alias = "咸蛋 AI- AI落地企业"
+        self.assertTrue(driver.titles_overlap(target, alias))
+        self.assertFalse(driver.titles_overlap(target, "咸蛋AI－AI落地企业"))
+        self.assertFalse(driver.titles_overlap(target, "咸蛋AI-AI落地企业二"))
+        self.assertEqual(driver.visual_title_query(target), "咸")
+        self.assertEqual(driver.visual_title_query("A l e x (2)"), "A")
+        config = dict(self.config, target_name=target, target_group=target, conversation_kind="group",
+                      binding=self.binding, wx_cli="/private/wx-cli", channel_state_dir="/private/state")
+        candidate = {"talker": self.binding["talker"], "name": target, "kind": "group"}
+        for kind in ("group", "private"):
+            with self.subTest(kind=kind), mock.patch.object(driver, "call", return_value=json.dumps({
+                    "match_kind": "partial", "matches": [candidate, dict(candidate, name=alias,
+                    kind=kind, talker="other-identity")]})) as call, self.assertRaises(driver.Refused):
+                driver.verify_target(config, driver.time.monotonic() + 3)
+            argv = call.call_args[0][0]
+            self.assertEqual(argv[argv.index("--name") + 1], "咸")
+
     def test_shared_desktop_lock_refuses_other_conversation_before_ui(self):
         with tempfile.TemporaryDirectory() as root:
             ui = Path(root)

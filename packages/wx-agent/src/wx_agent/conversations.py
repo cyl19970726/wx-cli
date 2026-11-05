@@ -184,7 +184,7 @@ def fresh(settings, id, entry=None, unique_name=False):
         require(all(current[key] == entry.get(key) for key in ("conversation_id", "talker", "kind", "name")),
                 "identity_drift", "conversation identity or display name changed; select it again")
     if unique_name:
-        names = find(settings, name=sender.title_query(current["name"]),
+        names = find(settings, name=sender.visual_title_query(current["name"]),
                      kind="all", all_matches=True)["matches"]
         require(any(item["conversation_id"] == id and item["name"] == current["name"] for item in names),
                 "identity_drift", "selected display name is absent from fresh metadata")

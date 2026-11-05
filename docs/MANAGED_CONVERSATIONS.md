@@ -175,6 +175,23 @@ wx-cli outbox --state-dir /ABS/private/channel reconcile-image-event \
 
 ## 已知原生拒绝的独立归档合同
 
+### 首次文字搜索未选中结果的受控恢复
+
+原 attempt 1 若在 `inspected` 阶段结束，原生错误精确为 `Search popup had no unique category-eligible exact target within six seconds`，可由维护方在修好目标定位后请求一次同 key 的 attempt 2。它不适用于已点击搜索结果的标题拒绝、一般超时、其他 focus 错误、图片或已进入 prepare/submit 的请求。
+
+```sh
+wx-cli coordinator --state-dir /ABS/private/ui dispatch recover-unsent \
+  --dispatch-id ORIGINAL_DISPATCH_ID --request-id ORIGINAL_REQUEST \
+  --expected-attempt 1 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对完整首次搜索终态、无选中/prepare/submit及修复后的桌面定位'
+```
+
+协调器要求原 dispatch 为 `unknown/indeterminate`、surface 已暂停且空闲、原 owner/epoch 仍 active/authorized。只能调用该 channel 注册的 driver；独立 `--focus-recovery-capabilities` / `--focus-recovery-preflight` 验证原 text、目标类型、PID/窗口、inspect/focus 终态、完整搜索截图、从未选中的有界 poll、无 prepare/submit、无后续 attempt 或存活 helper，并在慢检查后重核文件摘要。当前助手和桌面须另行通过实时预检，不能把旧截图权限当作新签名的授权证明。
+
+Rust 持有共享 executor/sender 锁，在第二次 CAS 后先保存受控恢复 reservation 和审查记录，再以原 immutable intent 新增 attempt 2。原 request/publisher/正文、dispatch、owner/epoch、attempt 1 和原失败文件均保留。新 attempt 仍先 inspect/focus/验证草稿，再允许一次 submit；原生回合或进程未知时不自动重试第三次。恢复结束仍保留 surface 暂停；仅在原结果明确并经正常桌面审查后才能 `review` 后续业务。进程中断保留 reservation，不会重排这个原请求。
+
+视觉标题仅规范 Unicode 空白，其余字符、标点、分类和群成员数要求不放宽。操作前元数据查询覆盖空白等价的所有候选，跨群/私聊重名一并拒绝；存储身份、目标及事务字段保持原字节，不用 OCR 文本替换真实绑定。
+
 以下入口用于操作员在完整只读证据下退役**原调度阻塞**。它们不重试、不清空或替换草稿，不把原 outbox/attempt/client report 改为成功、未发送或可重发，也不自动解除暂停。先核对安装版本、原 dispatch ID、原 attempt 1、当前绑定/owner/control 和私有原生文件；源码、合成检查或一次失败归档都不能证明现场已启用修复。
 
 两条命令均由注册 driver 提供独立 capability/preflight，Rust 持有原 `executor.lock` 与 `sender.lock`，核对当前/已结束的原 attempt、规范私有文件、冻结内容和 SHA，并在慢证明后重复核查，以数据库 CAS 结束同一 dispatch。缺失、链接文件、越界/过大文件、身份/正文/媒体/校准冲突、后续 attempt、迟到观察、提交后痕迹或活跃 helper 均拒绝。证明期间只读，不启动 GUI、复制、发送或原生助手。

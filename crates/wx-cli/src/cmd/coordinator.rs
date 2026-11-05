@@ -219,6 +219,21 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// One reviewed first TEXT search failure, same dispatch, while retaining pause.
+    RecoverUnsent {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Retire only the original known IMAGE Copy rejection; never authorize a retry.
     ArchiveImageCopyRejection {
         #[arg(long)]
@@ -1368,7 +1383,256 @@ const FOCUS_ARCHIVE_REPORT_ERROR: &str =
     "focus failed before message preparation: target group header mismatch";
 const FOCUS_ARCHIVE_NATIVE_ERROR: &str = "Selected chat header is not exact target and kind";
 
-// This is an archival proof only. A focus failure has no recovery/retry path.
+const FOCUS_RECOVERY_NATIVE_ERROR: &str =
+    "Search popup had no unique category-eligible exact target within six seconds";
+
+/// Capture the exact authority and original outbox before any recovery probe.
+/// Re-reading this projection is the CAS fence after the potentially slow proof.
+fn focus_recovery_context(
+    db: &Connection,
+    id: i64,
+    request: &str,
+    owner: &str,
+    epoch: i64,
+) -> Result<(Binding, Value), Box<dyn Error>> {
+    let (conversation, channel, dispatch_epoch, status, result, operation, saved_request):
+        (String, String, i64, String, Option<String>, String, String) = db.query_row(
+        "SELECT conversation_id,channel_id,epoch,status,result,operation,request_id FROM dispatch WHERE id=?1",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+    let (paused, active, surface_epoch): (Option<String>, Option<i64>, i64) = db.query_row(
+        "SELECT paused_reason,active_dispatch,epoch FROM surface WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let live: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch WHERE status='claimed')",
+        [],
+        |r| r.get(0),
+    )?;
+    let b = binding(db, &conversation)?;
+    verify_binding(&b)?;
+    if paused.is_none()
+        || active.is_some()
+        || live
+        || status != "unknown"
+        || result.as_deref() != Some("indeterminate")
+        || operation != "send"
+        || saved_request != request
+        || channel != b.channel_id
+        || dispatch_epoch != epoch
+        || b.epoch != epoch
+        || b.owner != owner
+        || b.control != "active"
+        || b.reply_policy != "authorized"
+        || super::outgoing::managed_root(&b.state)?.as_deref()
+            != db.path().and_then(|p| Path::new(p).parent())
+    {
+        return Err(invalid(
+            "focus recovery requires original authorized epoch and paused idle unknown dispatch",
+        ));
+    }
+    let item = intent(&b, request)?;
+    let original = super::outgoing::intent_view(&b.state, request)?;
+    let attempts = original["attempts"]
+        .as_array()
+        .ok_or_else(|| invalid("missing attempts"))?;
+    if item.content_kind != "text"
+        || item.status != "indeterminate"
+        || item.attempts != 1
+        || item.owner.as_deref() != Some(owner)
+        || item.epoch != Some(epoch)
+        || item.expires_at.is_some_and(|t| t <= now())
+        || attempts.len() != 1
+        || attempts[0]["attempt_number"] != 1
+        || attempts[0]["status"] != "indeterminate"
+        || !attempts[0]["finished_at"].is_i64()
+        || !attempts[0]["recovery_from_attempt"].is_null()
+        || original["result_evidence"] != attempts[0]["result_evidence"]
+        || !original["receipt_evidence"].is_null()
+        || original.get("late_observation").is_some()
+    {
+        return Err(invalid(
+            "focus recovery requires a finished unrecovered first text attempt",
+        ));
+    }
+    let snapshot = json!({"conversation":conversation,"channel":channel,"session":b.session_id,
+        "state":b.state,"owner":owner,"epoch":epoch,"surface_epoch":surface_epoch,
+        "paused":paused,"original":original});
+    Ok((b, snapshot))
+}
+
+fn focus_recovery_artifacts(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let identity = format!("{}\0{}", b.channel_id, request);
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(identity.as_bytes()))[..48]
+    );
+    let snapshot = focus_archive_snapshot(root, &tid, &format!("{tid}-a2"))?;
+    if snapshot
+        .iter()
+        .any(|(name, _)| name.contains("before-click"))
+    {
+        return Err(invalid(
+            "focus recovery cannot follow a search result click",
+        ));
+    }
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if original["result_evidence"] != report_path.to_string_lossy().as_ref() {
+        return Err(invalid(
+            "focus recovery report is not the canonical original",
+        ));
+    }
+    let report: Value = serde_json::from_slice(&image_rejection_read(&report_path, 65536)?)?;
+    let allowed = [
+        "id",
+        "request_id",
+        "attempt_number",
+        "channel_id",
+        "session_id",
+        "status",
+        "stage",
+        "error",
+        "started_at",
+        "elapsed_seconds",
+    ];
+    if report
+        .as_object()
+        .is_none_or(|o| o.keys().any(|k| !allowed.contains(&k.as_str())))
+        || report["id"] != tid
+        || report["request_id"] != request
+        || report["attempt_number"] != 1
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || report["stage"] != "inspected"
+        || report["error"] != "focus failed before message preparation: helper rejected action"
+    {
+        return Err(invalid(
+            "focus recovery report is not the exact before-prepare search failure",
+        ));
+    }
+    let native: Value = serde_json::from_slice(&image_rejection_read(
+        &root.join(format!("{tid}-focus.result.json")),
+        65536,
+    )?)?;
+    if native
+        != json!({"id":format!("{tid}-focus"),"ok":false,"error":FOCUS_RECOVERY_NATIVE_ERROR,
+        "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+    {
+        return Err(invalid(
+            "focus recovery native result does not prove the exact search failure",
+        ));
+    }
+    Ok(snapshot)
+}
+
+fn recover_unsent(
+    root: &Path,
+    id: i64,
+    request: &str,
+    expected_attempt: i64,
+    owner: &str,
+    epoch: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let root = &root.canonicalize()?;
+    check_id(request)?;
+    check_id(owner)?;
+    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "focus recovery requires attempt 1 and a bounded audit reason",
+        ));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; focus recovery remains unattempted"));
+        }
+        locks.push(lock);
+    }
+    let sender_fd = locks[1].as_raw_fd();
+    let mut db = open(root, true)?;
+    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch)?;
+    let artifacts = focus_recovery_artifacts(root, &b, request, &snapshot["original"])?;
+    let driver = b.state.join("conversation-sender");
+    let meta = fs::symlink_metadata(&driver)?;
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.nlink() != 1
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid(
+            "registered sender driver is not private and executable",
+        ));
+    }
+    super::outgoing::focus_recovery_preflight(&b.state, request, &driver, sender_fd)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch)?;
+    if latest != snapshot
+        || focus_recovery_artifacts(root, &b, request, &snapshot["original"])? != artifacts
+    {
+        return Err(invalid(
+            "focus recovery authority or proof changed during preflight",
+        ));
+    }
+    let claim_token = token()?;
+    let changed = tx.execute("UPDATE dispatch SET status='claimed',result='reviewed_focus_recovery',token=?2,worker='reviewed-focus-recovery',lease_until=?3,updated_at=?4 WHERE id=?1 AND status='unknown' AND result='indeterminate' AND epoch=?5",
+        params![id,claim_token,now()+120,now(),epoch])?;
+    if changed != 1 {
+        return Err(invalid("stale focus recovery dispatch claim"));
+    }
+    tx.execute("UPDATE surface SET active_dispatch=?1,epoch=epoch+1 WHERE singleton=1 AND active_dispatch IS NULL AND paused_reason IS NOT NULL",[id])?;
+    tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+        params![format!("focus_recovery dispatch={id} request={request} owner={owner} epoch={epoch} attempt=1->2: {reason}"),now()])?;
+    // Durable recovery reservation and audit precede attempt 2 and all effects.
+    tx.commit()?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // No control writer may commit between admission, attempt and driver result.
+    // A crash retains the committed reservation; it never requeues the request.
+    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dispatch d JOIN surface s ON s.active_dispatch=d.id JOIN binding b ON b.conversation_id=d.conversation_id WHERE d.id=?1 AND d.request_id=?2 AND d.status='claimed' AND d.result='reviewed_focus_recovery' AND d.token=?3 AND d.epoch=?4 AND b.epoch=?4 AND b.owner=?5 AND b.control='active' AND b.reply_policy='authorized' AND s.paused_reason IS NOT NULL)",
+        params![id,request,claim_token,epoch,owner],|r|r.get(0))?;
+    if !valid {
+        return Err(invalid("reviewed focus recovery reservation changed"));
+    }
+    let current = binding(&tx, snapshot["conversation"].as_str().unwrap())?;
+    verify_binding(&current)?;
+    if current.state != b.state
+        || current.channel_id != b.channel_id
+        || current.session_id != b.session_id
+        || focus_recovery_artifacts(root, &b, request, &snapshot["original"])? != artifacts
+    {
+        return Err(invalid(
+            "focus recovery binding or evidence changed before attempt",
+        ));
+    }
+    let attempt =
+        super::outgoing::claim_managed_focus_recovery(&b.state, request, &snapshot["original"])?;
+    super::outgoing::execute_managed_focus_recovery(&b.state, &driver, attempt, sender_fd)?;
+    tx.commit()?;
+    let mut completed = dispatch_complete(root, id, &claim_token, None)?;
+    completed["surface_paused"] = json!(true);
+    completed["attempt_number"] = json!(2);
+    completed["recovery_from_attempt"] = json!(1);
+    Ok(completed)
+}
+
+// Shared bounded artifact snapshot; admission and native failure checks remain
+// separate for the archive-only and first-search-recovery commands.
 fn focus_archive_snapshot(
     root: &Path,
     tid: &str,
@@ -3234,6 +3498,22 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 dispatch_id,
                 reason,
             } => restore_queued(root, dispatch_id, &reason)?,
+            DispatchAction::RecoverUnsent {
+                dispatch_id,
+                request_id,
+                expected_attempt,
+                owner,
+                expected_epoch,
+                reason,
+            } => recover_unsent(
+                root,
+                dispatch_id,
+                &request_id,
+                expected_attempt,
+                &owner,
+                expected_epoch,
+                &reason,
+            )?,
             DispatchAction::ArchiveImageCopyRejection {
                 dispatch_id,
                 expected_attempt,

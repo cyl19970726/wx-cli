@@ -240,18 +240,25 @@ enum VisualParameters {
         return exactHeaderTitle(candidate.text, target: target, kind: kind)
     }
 
+    // Vision may insert or omit whitespace within a rendered title. This is
+    // visual-only: keep all other scalars and frozen transaction identities intact.
+    private static func visualTitleWithoutWhitespace(_ value: String) -> String {
+        String(String.UnicodeScalarView(value.unicodeScalars.filter { !$0.properties.isWhitespace }))
+    }
+
     static func exactHeaderTitle(_ value: String, target: String, kind: TargetKind) -> Bool {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if kind == .private { return trimmed == target }
-        let pattern = "^" + NSRegularExpression.escapedPattern(for: target) +
+        let visualValue = visualTitleWithoutWhitespace(value)
+        let visualTarget = visualTitleWithoutWhitespace(target)
+        if kind == .private { return visualValue.utf8.elementsEqual(visualTarget.utf8) }
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: visualTarget) +
             "(?:\\s*\\([0-9０-９]+\\)|\\s*（[0-9０-９]+）)$"
-        return trimmed.range(of: pattern, options: .regularExpression) != nil
+        return visualValue.range(of: pattern, options: .regularExpression) != nil
     }
 
     static func exactGroupTitle(_ value: String, target: String) -> Bool {
-        let pattern = "^" + NSRegularExpression.escapedPattern(for: target) +
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: visualTitleWithoutWhitespace(target)) +
             "(?:\\s*\\([0-9０-９]+\\)|\\s*（[0-9０-９]+）)?$"
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return visualTitleWithoutWhitespace(value)
             .range(of: pattern, options: .regularExpression) != nil
     }
 

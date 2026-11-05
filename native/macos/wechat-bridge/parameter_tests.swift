@@ -5,6 +5,7 @@ import ImageIO
 
 @main struct ParameterTests {
     static func main() {
+        visualTitleWhitespaceChecks()
         emptyComposerChecks()
         imageMediaChecks()
         sendButtonContextChecks()
@@ -580,6 +581,82 @@ import ImageIO
         refused(ImageMedia(path: path.path,
                            sha256: MediaSupport.digest(try! Data(contentsOf: path)),
                            mimeType: "image/png", sizeBytes: 8))
+    }
+
+    static func visualTitleWhitespaceChecks() {
+        let target = "咸蛋AI - AI落地企业"
+        let observed = "咸蛋 AI- AI落地企业"
+        let heading = SearchOCRCandidate(text: "群聊",
+            bounds: CGRect(x: 15, y: 55, width: 60, height: 18))
+        let row = SearchOCRCandidate(text: observed,
+            bounds: CGRect(x: 65, y: 83, width: 230, height: 18))
+        let size = CGSize(width: 320, height: 300)
+        precondition(VisualParameters.exactGroupTitle(observed, target: target),
+            "Visual titles must tolerate only whitespace insertion/deletion")
+        precondition(VisualParameters.exactGroupTitle(target, target: observed))
+        precondition(VisualParameters.uniqueSearchResult([heading, row], target: target,
+            kind: .group, popupSize: size) == SearchSelection(row: row, category: .groupChats))
+        let title = HeaderOCRCandidate(text: observed + " (12)",
+            bounds: CGRect(x: 315, y: 19, width: 280, height: 16))
+        precondition(VisualParameters.uniqueHeaderTitle([title], target: target, kind: .group,
+            imageWidth: 880, imageHeight: 640))
+        let duplicate = SearchOCRCandidate(text: target,
+            bounds: row.bounds.offsetBy(dx: 0, dy: 35))
+        precondition(VisualParameters.uniqueSearchResult([heading, row, duplicate], target: target,
+            kind: .group, popupSize: size) == nil)
+        precondition(!VisualParameters.uniqueHeaderTitle([title, title], target: target, kind: .group,
+            imageWidth: 880, imageHeight: 640))
+        let groupRows = [GroupOCRCandidate(text: observed, x: 180, y: 100),
+                         GroupOCRCandidate(text: target, x: 180, y: 140)]
+        precondition(VisualParameters.uniqueExactGroup(groupRows, target: target, minimumY: 55) == nil)
+        precondition(VisualParameters.uniqueSearchResult([heading, row], target: target,
+            kind: .private, popupSize: size) == nil)
+        for section in ["Contacts", "Search the Web", "Chat history", "Unrecognized section"] {
+            let otherHeading = SearchOCRCandidate(text: section, bounds: heading.bounds)
+            precondition(VisualParameters.uniqueSearchResult([otherHeading, row], target: target,
+                kind: .group, popupSize: size) == nil)
+        }
+        let contactHeading = SearchOCRCandidate(text: "Contacts", bounds: heading.bounds)
+        let groupHeading = SearchOCRCandidate(text: "群聊", bounds: heading.bounds.offsetBy(dx: 0, dy: 75))
+        let groupRow = SearchOCRCandidate(text: target, bounds: row.bounds.offsetBy(dx: 0, dy: 75))
+        for kind in [TargetKind.group, .private] {
+            precondition(VisualParameters.uniqueSearchResult([contactHeading, row, groupHeading, groupRow],
+                target: target, kind: kind, popupSize: size) == nil)
+        }
+        // Cover Unicode White_Space, including nonbreaking and ideographic spaces.
+        for code: UInt32 in [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680,
+                            0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+                            0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000] {
+            let space = String(UnicodeScalar(code)!)
+            let spaced = "咸蛋" + space + "AI-" + space + "AI落地企业"
+            precondition(VisualParameters.exactGroupTitle(spaced, target: target))
+            precondition(VisualParameters.exactGroupTitle(target, target: spaced))
+            precondition(VisualParameters.exactHeaderTitle(spaced + "（１２）", target: target, kind: .group))
+            precondition(VisualParameters.exactHeaderTitle(spaced, target: target, kind: .private))
+        }
+        for altered in ["咸蛋AI – AI落地企业", "咸蛋AI AI落地企业", "咸蛋AI - AI落地企亚",
+                        "咸蛋ai - AI落地企业", "咸蛋AI - AI落地企业二", "前咸蛋AI - AI落地企业",
+                        "咸蛋\u{200B}AI - AI落地企业", "咸蛋\u{FEFF}AI - AI落地企业"] {
+            precondition(!VisualParameters.exactGroupTitle(altered, target: target))
+            precondition(!VisualParameters.exactHeaderTitle(altered + " (12)", target: target, kind: .group))
+            precondition(!VisualParameters.exactHeaderTitle(altered, target: target, kind: .private))
+        }
+        precondition(!VisualParameters.exactHeaderTitle(observed, target: target, kind: .group))
+        precondition(VisualParameters.exactHeaderTitle(observed, target: target, kind: .private))
+        for suffix in [" (12)", "（１２）"] {
+            precondition(!VisualParameters.exactHeaderTitle(observed + suffix, target: target, kind: .private))
+            precondition(VisualParameters.exactHeaderTitle(observed + suffix,
+                target: target + suffix, kind: .private))
+            precondition(!VisualParameters.exactHeaderTitle(observed + suffix,
+                target: target + " (13)", kind: .private))
+        }
+        for suffix in [" ()", " (abc)", " [12]", " (12）", " (12) extra", " (12)(3)"] {
+            precondition(!VisualParameters.exactGroupTitle(observed + suffix, target: target))
+            precondition(!VisualParameters.exactHeaderTitle(observed + suffix, target: target, kind: .group))
+        }
+        precondition(!VisualParameters.sameTransactionText(text: "text", draft: "draft", group: target,
+            otherText: "text", otherDraft: "draft", otherGroup: observed))
+        print("Visual title whitespace and identity boundary checks passed")
     }
 
     static func imageCopyReplacementChecks(loaded: LoadedImage, png: Data) {

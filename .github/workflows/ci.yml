@@ -37,6 +37,7 @@ jobs:
           scripts.test_application_integration scripts.test_gateway_integration
           scripts.test_plugin_integration scripts.test_plugin_adversarial
           scripts.test_queue_snapshot_integration
+          scripts.test_managed_focus_recovery
           scripts.test_image_observation
       - name: Sender contract against compiled CLI events
         env:
