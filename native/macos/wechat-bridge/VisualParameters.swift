@@ -219,10 +219,10 @@ enum VisualParameters {
     }
 
     // Calibrated against the 880x640 WeChat window. The title sits near y=27;
-    // the message pane starts below y=50 (a sender was observed at y=75).
+    // keep the title band above body text observed at y=49.67034.
     static func headerTitleRect(imageWidth: Int, imageHeight: Int) -> CGRect? {
         guard imageWidth == 880, imageHeight == 640 else { return nil }
-        return CGRect(x: 300, y: 8, width: 420, height: 42)
+        return CGRect(x: 300, y: 8, width: 420, height: 36)
     }
 
     // OCR includes pixels below the title band so crossing text has an observable full box.

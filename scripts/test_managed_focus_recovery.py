@@ -13,6 +13,11 @@ from scripts import test_multi_conversation as fixtures
 
 
 class ManagedFocusRecoveryTests(unittest.TestCase):
+    recovery_command = "recover-unsent"
+    capability_mode = "--focus-recovery-capabilities"
+    proof_mode = "--focus-recovery-preflight"
+    audit_label = "focus_recovery"
+    review_reason = "reviewed synthetic first search failure"
     setUpClass = classmethod(fixtures.MultiConversationTests.setUpClass.__func__)
     cli = fixtures.MultiConversationTests.cli
     coordinator = fixtures.MultiConversationTests.coordinator
@@ -131,9 +136,9 @@ print(json.dumps(result))
     def recover(self, okay=True, **overrides):
         args = dict(dispatch_id=self.parent["dispatch_id"], request_id=self.request,
                     expected_attempt=1, owner="owner_group", expected_epoch=1,
-                    reason="reviewed synthetic first search failure")
+                    reason=self.review_reason)
         args.update(overrides)
-        command = ["dispatch", "recover-unsent"]
+        command = ["dispatch", self.recovery_command]
         for key, value in args.items():
             command.extend(("--" + key.replace("_", "-"), value))
         return self.coordinator(*command, okay=okay)
@@ -162,15 +167,15 @@ print(json.dumps(result))
         self.assertEqual(current["attempts"][0], self.original["attempts"][0])
         self.assertEqual(current["attempts"][1]["recovery_from_attempt"], 1)
         self.assertEqual(current["attempt_number"], 2)
-        self.assertEqual(self.calls(), ['--focus-recovery-capabilities', '--focus-recovery-preflight',
+        self.assertEqual(self.calls(), [self.capability_mode, self.proof_mode,
                                         '--dispatch-preflight', 'execute'])
         self.assertEqual(self.coordinator("dispatch", "status")["paused_reason"], self.pause)
         self.recover(okay=False)
         self.assertEqual(self.calls().count('execute'), 1)
         with sqlite3.connect(self.scheduler) as db:
-            audit = db.execute("SELECT reason FROM surface_review WHERE reason LIKE 'focus_recovery %'").fetchone()[0]
+            audit = db.execute("SELECT reason FROM surface_review WHERE reason LIKE ?", (self.audit_label + " %",)).fetchone()[0]
             self.assertIn("attempt=1->2", audit)
-            self.assertIn("reviewed synthetic first search failure", audit)
+            self.assertIn(self.review_reason, audit)
             self.assertEqual(db.execute("SELECT epoch FROM binding WHERE owner='owner_group'").fetchone()[0], 1)
 
     def test_bad_explicit_identity_attempt_and_arbitrary_driver_have_no_probe(self):
@@ -222,7 +227,7 @@ print(json.dumps(result))
                 self.unchanged()
                 self.assertNotIn('execute', self.calls())
                 with sqlite3.connect(self.scheduler) as db:
-                    self.assertEqual(db.execute("SELECT COUNT(*) FROM surface_review WHERE reason LIKE 'focus_recovery %'").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM surface_review WHERE reason LIKE ?", (self.audit_label + " %",)).fetchone()[0], 0)
 
     def test_unpaused_active_other_dispatch_and_control_are_rejected(self):
         changes = (

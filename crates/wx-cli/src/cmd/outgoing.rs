@@ -512,18 +512,49 @@ pub(super) fn focus_recovery_preflight(
     driver: &Path,
     lock_fd: i32,
 ) -> Result<(), Box<dyn Error>> {
+    reviewed_recovery_preflight(state, request, driver, lock_fd, false)
+}
+
+pub(super) fn prepare_header_recovery_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    reviewed_recovery_preflight(state, request, driver, lock_fd, true)
+}
+
+fn reviewed_recovery_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+    prepare_header: bool,
+) -> Result<(), Box<dyn Error>> {
     validate_driver(driver)?;
+    let (capability_mode, proof_mode, expected_capability, expected_proof) = if prepare_header {
+        (
+            "--prepare-header-recovery-capabilities",
+            "--prepare-header-recovery-preflight",
+            json!({"protocol_version":1,"prepare_header_recovery_protocol_version":1,"first_text_no_submit_only":true}),
+            json!({"protocol_version":1,"prepare_header_recovery_protocol_version":1,"unsent_proven":true}),
+        )
+    } else {
+        (
+            "--focus-recovery-capabilities",
+            "--focus-recovery-preflight",
+            json!({"protocol_version":1,"focus_recovery_protocol_version":1,"first_text_before_prepare_only":true}),
+            json!({"protocol_version":1,"focus_recovery_protocol_version":1,"unsent_proven":true}),
+        )
+    };
     let capability = invoke_recovery_probe(
         driver,
-        "--focus-recovery-capabilities",
+        capability_mode,
         None,
         Duration::from_secs(20),
         Some(lock_fd),
     )?;
-    if capability
-        != json!({"protocol_version":1,"focus_recovery_protocol_version":1,
-                           "first_text_before_prepare_only":true})
-    {
+    if capability != expected_capability {
         return Err(invalid("driver lacks first text focus recovery capability").into());
     }
     let binding = load_binding(state)?;
@@ -531,14 +562,12 @@ pub(super) fn focus_recovery_preflight(
     let payload = driver_input(&binding, &candidate, Some(1))?;
     let proof = invoke_recovery_probe(
         driver,
-        "--focus-recovery-preflight",
+        proof_mode,
         Some(&payload),
         Duration::from_secs(25),
         Some(lock_fd),
     )?;
-    if proof
-        != json!({"protocol_version":1,"focus_recovery_protocol_version":1,"unsent_proven":true})
-    {
+    if proof != expected_proof {
         return Err(invalid("driver did not prove first text focus failure unsent").into());
     }
     let (ready, _) =

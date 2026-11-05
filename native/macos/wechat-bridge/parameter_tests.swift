@@ -5,6 +5,7 @@ import ImageIO
 
 @main struct ParameterTests {
     static func main() {
+        headerBandCalibrationChecks()
         visualTitleWhitespaceChecks()
         emptyComposerChecks()
         imageMediaChecks()
@@ -245,7 +246,7 @@ import ImageIO
         let sender = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 320, y: 68, width: 90, height: 15))
         let privateTitle = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 315, y: 19, width: 100, height: 16))
         precondition(VisualParameters.headerTitleRect(imageWidth: 880, imageHeight: 640) ==
-                     CGRect(x: 300, y: 8, width: 420, height: 42))
+                     CGRect(x: 300, y: 8, width: 420, height: 36))
         precondition(VisualParameters.headerOCRRect(imageWidth: 880, imageHeight: 640) ==
                      CGRect(x: 300, y: 0, width: 420, height: 90))
         precondition(VisualParameters.headerTitleRect(imageWidth: 879, imageHeight: 640) == nil)
@@ -266,7 +267,7 @@ import ImageIO
         precondition(!VisualParameters.uniqueHeaderTitle([privateTitle], target: "Synthetic Peer", kind: .private,
                                                          imageWidth: 880, imageHeight: 639))
         let crossingBoundary = HeaderOCRCandidate(text: "Synthetic Peer",
-            bounds: CGRect(x: 315, y: 43, width: 100, height: 14))
+            bounds: CGRect(x: 315, y: 37, width: 100, height: 14))
         let clippedLeftEdge = HeaderOCRCandidate(text: "Synthetic Peer",
             bounds: CGRect(x: 300, y: 19, width: 100, height: 16))
         let clippedTopEdge = HeaderOCRCandidate(text: "Synthetic Peer",
@@ -282,7 +283,7 @@ import ImageIO
         // Vision normalizes pixel boundaries; conversion back to pixels can
         // turn exact edge contact into a fraction-of-a-millionth overlap.
         let lowerEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
-            bounds: CGRect(x: 570, y: 49.9999998, width: 36, height: 12))
+            bounds: CGRect(x: 570, y: 43.9999998, width: 36, height: 12))
         precondition(VisualParameters.uniqueHeaderTitle([privateTitle, lowerEdgeContact],
             target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
         precondition(VisualParameters.uniqueHeaderTitle([title, lowerEdgeContact],
@@ -290,7 +291,7 @@ import ImageIO
         precondition(!VisualParameters.uniqueHeaderTitle([lowerEdgeContact],
             target: "Unrelated line", kind: .private, imageWidth: 880, imageHeight: 640))
         let realOverlap = HeaderOCRCandidate(text: "Unrelated line",
-            bounds: CGRect(x: 570, y: 49.999, width: 36, height: 12))
+            bounds: CGRect(x: 570, y: 43.999, width: 36, height: 12))
         precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, realOverlap],
             target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
         let sideEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
@@ -348,6 +349,30 @@ import ImageIO
         } catch {}
         precondition(board.string(forType: .string) == "external")
         print("Parameter checks and named-pasteboard restoration checks passed")
+    }
+
+    static func headerBandCalibrationChecks() {
+        // Saved p06 Vision geometry, with synthetic text in place of private identities.
+        let exactTitle = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 314, y: 20, width: 156, height: 18))
+        let bodyRow = HeaderOCRCandidate(text: "Unrelated body row",
+            bounds: CGRect(x: 443.9355, y: 49.67034, width: 100, height: 14.6593))
+        precondition(VisualParameters.uniqueHeaderTitle([exactTitle, bodyRow],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640),
+            "saved p06 title y20..38 plus body y49.67034 must be unambiguous")
+        let crossingRow = HeaderOCRCandidate(text: "Unrelated crossing row",
+            bounds: CGRect(x: 443.9355, y: 43.75, width: 100, height: 14.6593))
+        precondition(!VisualParameters.uniqueHeaderTitle([exactTitle, crossingRow],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let insetTitle = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 303, y: 11, width: 414, height: 30))
+        precondition(VisualParameters.uniqueHeaderTitle([insetTitle],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let clippedBottom = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 314, y: 24, width: 156, height: 18))
+        precondition(!VisualParameters.uniqueHeaderTitle([clippedBottom],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        print("Header band regression: saved p06 body accepted; y43.75 crossing rejected")
     }
 
     static func emptyComposerChecks() {

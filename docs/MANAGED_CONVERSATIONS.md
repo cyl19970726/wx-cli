@@ -196,6 +196,21 @@ Rust 持有共享 executor/sender 锁，在第二次 CAS 后先保存受控恢�
 
 以下入口用于操作员在完整只读证据下退役**原调度阻塞**。它们不重试、不清空或替换草稿，不把原 outbox/attempt/client report 改为成功、未发送或可重发，也不自动解除暂停。先核对安装版本、原 dispatch ID、原 attempt 1、当前绑定/owner/control 和私有原生文件；源码、合成检查或一次失败归档都不能证明现场已启用修复。
 
+### 首次文字准备阶段的标题边界拒绝
+
+`dispatch recover-prepare-header` 与上述搜索恢复分开准入，仅处理第一次文字 prepare 在 `new-draft-before-click` 停止的精确组合：client 为 `group_focused/indeterminate`、错误为 `target group header mismatch`；原生 prepare 终态错误为 `Fresh chat header is not exact target and kind`，state 仍为 `prepare-attempted`。须有完整 inspect、两次确认的 current-header 群类型证据、原 job/state/正文与十份阶段截图，且没有新草稿后续选择/复制、prepared、submit job/result/marker 或存活 helper。
+
+```sh
+wx-cli coordinator --state-dir /ABS/private/ui dispatch recover-prepare-header \
+  --dispatch-id ORIGINAL_DISPATCH_ID --request-id ORIGINAL_REQUEST \
+  --expected-attempt 1 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对特定 prepare 标题拒绝及全部无 submit 证据，原草稿须逐字匹配'
+```
+
+driver 使用独立的 `--prepare-header-recovery-capabilities` / `--prepare-header-recovery-preflight`；协调器仍持有双锁、固定原身份/owner/epoch、重核冻结意图与证据，在同一原请求保留 attempt 1 并只新增 attempt 2。当前可能留下本请求的草稿：恢复证明只允许在内存中把这一次新 prepare 的 `expectedDraft` 设为原冻结正文；原生须先 Copy 并逐字确认才可替换为同一内容，空稿或用户改稿均拒绝。持久 sender 配置和原文件不改，不能清空未知草稿或换 key。恢复后保留暂停，实际结果明确后另走正常桌面审查。
+
+此案例的标题核验带按 880×640 的现有界面收窄至 y8..44，OCR 外带仍覆盖 y0..90，真正越界、重复标题及正文假冒标题仍拒绝；不通过增大容差忽略与标题区域实际重叠的候选。这个接口不是对其他 prepare 错误或已提交请求的通用重试。
+
 两条命令均由注册 driver 提供独立 capability/preflight，Rust 持有原 `executor.lock` 与 `sender.lock`，核对当前/已结束的原 attempt、规范私有文件、冻结内容和 SHA，并在慢证明后重复核查，以数据库 CAS 结束同一 dispatch。缺失、链接文件、越界/过大文件、身份/正文/媒体/校准冲突、后续 attempt、迟到观察、提交后痕迹或活跃 helper 均拒绝。证明期间只读，不启动 GUI、复制、发送或原生助手。
 
 ### 图片 Copy 计数拒绝

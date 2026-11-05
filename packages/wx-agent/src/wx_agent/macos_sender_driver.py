@@ -530,6 +530,9 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
     report = _read_artifact(report_path)
     if recovery_from == 1 and attempt_number == 2 and report.get("stage") == "inspected":
         return _prove_first_search_unsent(request, config, old_tid, report, deadline, persist)
+    if (recovery_from == 1 and attempt_number == 2 and report.get("stage") == "group_focused"
+            and _read_artifact(prep_result_path).get("error") == PREPARE_HEADER_REJECTION_ERROR):
+        return _prove_prepare_header_unsent(request, config, old_tid, report, deadline, persist)
     if report.get("stage") == "started":
         return _prove_empty_inspect_unsent(request, config, recovery_from, attempt_number,
                                            old_tid, report, deadline, persist)
@@ -1194,6 +1197,93 @@ TEXT_BUTTON_REJECTION_ERROR = "Expected exactly one visible Send label in lower 
 FOCUS_HEADER_REJECTION_ERROR = "Selected chat header is not exact target and kind"
 FOCUS_SEARCH_REJECTION_ERROR = "Search popup had no unique category-eligible exact target within six seconds"
 FOCUS_POPUP_ABSENT_ERROR = "Search popup not enumerated by ScreenCaptureKit within six seconds"
+PREPARE_HEADER_REJECTION_ERROR = "Fresh chat header is not exact target and kind"
+
+
+def _prove_prepare_header_unsent(request, config, tid, report, deadline, persist=False):
+    """A first text paste stopped before new-draft selection and any submit."""
+    request_ok(request, config, 2)
+    if (type(request.get("attempt_number")) is not int or request["attempt_number"] != 2
+            or type(request.get("recovery_from_attempt")) is not int or request["recovery_from_attempt"] != 1
+            or request.get("protocol_version") != 1 or request.get("media") is not None
+            or config.get("expected_draft", "") != "" or config.get("expected_draft_media") is not None):
+        raise Refused("prepare header recovery requires first text paste from empty draft")
+    ui = config["ui_dir"]; focus_id = tid + "-focus"
+    required = {tid + suffix for suffix in (".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-evidence.json", "-focus.focus-attempted.json",
+        "-focus.focus-initial.png", "-focus.current-header-confirmed.png", ".prepare-visual.job.json",
+        ".prepare-visual.result.json", ".visual-state.json")}
+    required.update(tid + "." + step + ".png" for step in ("prepare-start", "old-draft-before-click",
+        "old-draft-before-select", "old-draft-before-copy", "old-draft-copy-ready", "old-draft-empty-check",
+        "replace-draft-before-paste", "new-draft-before-click"))
+    current_name = tid + "-a2.client-result.json"
+    if _exists(ui / current_name):
+        current = _read_artifact(ui / current_name)
+        if (not persist or set(current) != {"id", "attempt_number", "request_id", "stage", "status", "channel_id",
+                "session_id", "started_at", "recovery_from_attempt"} or current.get("id") != tid + "-a2"
+                or current.get("stage") != "started" or current.get("status") != "indeterminate"
+                or current.get("attempt_number") != 2 or current.get("recovery_from_attempt") != 1
+                or any(current.get(k) != request[k] for k in ("request_id", "channel_id", "session_id"))):
+            raise Refused("current prepare recovery report differs or already has effects")
+    optional = {current_name} if persist else set()
+    before = _rejection_artifact_snapshot(ui, tid, required, optional)
+    if (report.get("id") != tid or report.get("stage") != "group_focused" or report.get("status") != "indeterminate"
+            or report.get("error") != "target group header mismatch" or report.get("attempt_number") != 1
+            or any(report.get(k) != request[k] for k in ("request_id", "channel_id", "session_id"))
+            or report.get("target_kind") != config.get("conversation_kind", "group")
+            or report.get("focus_evidence_id") != focus_id or report.get("focus_category") != "group-header"
+            or config.get("conversation_kind", "group") != "group"
+            or any(k in report for k in ("event_cursor", "observation", "recovery_from_attempt", "media_prepared",
+                       "media_submitted", "ui_submit_seconds", "submit_action_seconds", "verification_seconds"))):
+        raise Refused("original prepare header report differs")
+    inspected = _read_artifact(ui / (tid + "-inspect.result.json"))
+    if (_read_artifact(ui / (tid + "-inspect.inspect.job.json")) != {"id": tid + "-inspect", "action": "inspect"}
+            or inspected.get("id") != tid + "-inspect" or inspected.get("action") != "inspect" or inspected.get("ok") is not True):
+        raise Refused("original prepare header inspect differs")
+    window, frame = inspect_ok(inspected, config)
+    expected_focus = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+        "allowCurrentHeader": True, "targetKind": "group", "expectedPID": config["expected_pid"],
+        "expectedWindowID": window, "expectedFrame": frame,
+        "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
+    focus = _read_artifact(ui / (focus_id + ".result.json"))
+    if (_read_artifact(ui / (focus_id + ".focus-group.job.json")) != expected_focus
+            or focus.get("id") != focus_id or focus.get("action") != "focus-group" or focus.get("ok") is not True
+            or not _permissions_ok(focus.get("permissions")) or focus.get("source") != "current-header"
+            or (ui / (focus_id + ".focus-attempted.json")).stat().st_size != 0):
+        raise Refused("original prepare header focus differs")
+    focus_result_ok(focus, config, focus_id, window, frame)
+    expected_job = dict(_prepare_command(request, config, window, frame, focus_id), id=tid, action="prepare-visual")
+    job = _read_artifact(ui / (tid + ".prepare-visual.job.json"))
+    rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+    expected_result = {"id": tid, "ok": False, "error": PREPARE_HEADER_REJECTION_ERROR,
+        "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}}
+    expected_state = dict(expected_job, stage="prepare-attempted");expected_state.pop("action")
+    if (job != expected_job or rejected != expected_result
+            or _read_artifact(ui / (tid + ".visual-state.json")) != expected_state):
+        raise Refused("original prepare header job/state/text differs")
+    if _helper_is_live(tid, deadline):
+        raise Refused("prepare header helper is still live")
+    _guard_helper(config, deadline, clear=False);status(config, deadline)
+    if _rejection_artifact_snapshot(ui, tid, required, optional) != before:
+        raise Refused("prepare header evidence changed during proof")
+    proof = {"request_id": request["request_id"], "from_attempt": 1, "attempt_number": 2,
+        "transaction_id": tid, "prior_focus_mode": "prepare-header-before-new-copy",
+        "recovery_draft_sha256": hashlib.sha256(request["text"].encode()).hexdigest(),
+        "target_name": config["target_name"], "target_kind": "group",
+        "artifact_sha256": {k: v[0] for k, v in before.items()}}
+    if not persist:return proof
+    proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+    path = ui / (tid + ".recovery-proof-to-2.json");private_create(path, proof)
+    return str(path)
+
+
+def prepare_header_recovery_preflight(request, config):
+    tid = request_ok(request, config, 2)
+    if not tid.endswith("-a2"):raise Refused("prepare recovery attempt differs")
+    with recovery_sender_lock(config["ui_dir"] / "sender.lock"):
+        _prove_prepare_header_unsent(request, config, tid[:-3],
+            _read_artifact(config["ui_dir"] / (tid[:-3] + ".client-result.json")), time.monotonic() + BUDGET)
+    return {"protocol_version": 1, "prepare_header_recovery_protocol_version": 1, "unsent_proven": True}
 
 
 def _prove_first_search_unsent(request, config, tid, report, deadline, persist=False):
@@ -1900,6 +1990,13 @@ def run(request, config):
         try:
             if request.get("recovery_from_attempt") is not None:
                 report["recovery_proof"] = prove_unsent(request, config, attempt_number, deadline)
+                proof = _read_artifact(Path(report["recovery_proof"]))
+                if proof.get("prior_focus_mode") == "prepare-header-before-new-copy":
+                    expected_sha = hashlib.sha256(request["text"].encode()).hexdigest()
+                    if proof.get("recovery_draft_sha256") != expected_sha:
+                        raise Refused("known recovery draft differs from original text")
+                    config = dict(config, expected_draft=request["text"])
+                    report["known_recovery_draft_sha256"] = expected_sha
                 private_update(report_path, report)
             verify_target(config, deadline)
             inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
@@ -2038,6 +2135,21 @@ def main(argv=None):
         print(json.dumps({"protocol_version": 1, "focus_recovery_protocol_version": 1,
                           "first_text_before_prepare_only": True}, separators=(",", ":")))
         return 0
+    if argv == ["--prepare-header-recovery-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "prepare_header_recovery_protocol_version": 1,
+                          "first_text_no_submit_only": True}, separators=(",", ":")))
+        return 0
+    if argv == ["--prepare-header-recovery-preflight"]:
+        result = {"protocol_version": 1, "prepare_header_recovery_protocol_version": 1, "unsent_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:raise Refused("WX_SENDER_CONFIG required")
+            result = prepare_header_recovery_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["unsent_proven"] else 1
     if argv == ["--focus-recovery-preflight"]:
         result = {"protocol_version": 1, "focus_recovery_protocol_version": 1, "unsent_proven": False}
         try:

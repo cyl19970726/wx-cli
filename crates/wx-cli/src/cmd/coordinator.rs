@@ -234,6 +234,21 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// One reviewed first TEXT prepare-header rejection, without any submit, retaining pause.
+    RecoverPrepareHeader {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Retire only the original known IMAGE Copy rejection; never authorize a retry.
     ArchiveImageCopyRejection {
         #[arg(long)]
@@ -1534,15 +1549,151 @@ fn focus_recovery_artifacts(
     Ok(snapshot)
 }
 
-fn recover_unsent(
+fn prepare_header_recovery_artifacts(
     root: &Path,
-    id: i64,
+    b: &Binding,
     request: &str,
+    original: &Value,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let snapshot = text_rejection_snapshot(root, &tid, true)?;
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if original["result_evidence"] != report_path.to_string_lossy().as_ref() {
+        return Err(invalid(
+            "prepare-header recovery report is not the canonical original",
+        ));
+    }
+    let report: Value = serde_json::from_slice(&image_rejection_read(&report_path, 65536)?)?;
+    let allowed = [
+        "id",
+        "request_id",
+        "attempt_number",
+        "channel_id",
+        "session_id",
+        "status",
+        "stage",
+        "error",
+        "started_at",
+        "elapsed_seconds",
+        "target_kind",
+        "focus_evidence_id",
+        "focus_category",
+    ];
+    if report.as_object().is_none_or(|o| {
+        o.keys().any(|k| !allowed.contains(&k.as_str()))
+            || allowed
+                .iter()
+                .any(|k| *k != "elapsed_seconds" && !o.contains_key(*k))
+    }) || report["id"] != tid
+        || report["request_id"] != request
+        || report["attempt_number"] != 1
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || report["error"] != "target group header mismatch"
+        || report["target_kind"] != "group"
+        || report["focus_evidence_id"] != format!("{tid}-focus")
+        || report["focus_category"] != "group-header"
+    {
+        return Err(invalid(
+            "prepare-header recovery report is not the exact prepare rejection",
+        ));
+    }
+    let native: Value = serde_json::from_slice(&image_rejection_read(
+        &root.join(format!("{tid}.prepare-visual.result.json")),
+        65536,
+    )?)?;
+    if native
+        != json!({"id":tid,"ok":false,
+        "error":"Fresh chat header is not exact target and kind",
+        "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+    {
+        return Err(invalid("prepare-header recovery native result differs"));
+    }
+    let state: Value = serde_json::from_slice(&image_rejection_read(
+        &root.join(format!("{tid}.visual-state.json")),
+        65536,
+    )?)?;
+    if state["id"] != tid || state["stage"] != "prepare-attempted" {
+        return Err(invalid(
+            "prepare-header recovery requires original prepare-attempted state",
+        ));
+    }
+    Ok(snapshot.into_iter().collect())
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryKind {
+    FocusSearch,
+    PrepareHeader,
+}
+impl RecoveryKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FocusSearch => "focus_recovery",
+            Self::PrepareHeader => "prepare_header_recovery",
+        }
+    }
+    fn artifacts(
+        self,
+        root: &Path,
+        binding: &Binding,
+        request: &str,
+        original: &Value,
+    ) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+        match self {
+            Self::FocusSearch => focus_recovery_artifacts(root, binding, request, original),
+            Self::PrepareHeader => {
+                prepare_header_recovery_artifacts(root, binding, request, original)
+            }
+        }
+    }
+    fn preflight(
+        self,
+        state: &Path,
+        request: &str,
+        driver: &Path,
+        fd: i32,
+    ) -> Result<(), Box<dyn Error>> {
+        match self {
+            Self::FocusSearch => {
+                super::outgoing::focus_recovery_preflight(state, request, driver, fd)
+            }
+            Self::PrepareHeader => {
+                super::outgoing::prepare_header_recovery_preflight(state, request, driver, fd)
+            }
+        }
+    }
+}
+
+struct RecoveryReview<'a> {
+    id: i64,
+    request: &'a str,
     expected_attempt: i64,
-    owner: &str,
+    owner: &'a str,
     epoch: i64,
-    reason: &str,
+    reason: &'a str,
+}
+
+fn recover_reviewed(
+    root: &Path,
+    kind: RecoveryKind,
+    review: RecoveryReview<'_>,
 ) -> Result<Value, Box<dyn Error>> {
+    let RecoveryReview {
+        id,
+        request,
+        expected_attempt,
+        owner,
+        epoch,
+        reason,
+    } = review;
     let root = &root.canonicalize()?;
     check_id(request)?;
     check_id(owner)?;
@@ -1571,7 +1722,7 @@ fn recover_unsent(
     let sender_fd = locks[1].as_raw_fd();
     let mut db = open(root, true)?;
     let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch)?;
-    let artifacts = focus_recovery_artifacts(root, &b, request, &snapshot["original"])?;
+    let artifacts = kind.artifacts(root, &b, request, &snapshot["original"])?;
     let driver = b.state.join("conversation-sender");
     let meta = fs::symlink_metadata(&driver)?;
     if !meta.is_file()
@@ -1583,32 +1734,33 @@ fn recover_unsent(
             "registered sender driver is not private and executable",
         ));
     }
-    super::outgoing::focus_recovery_preflight(&b.state, request, &driver, sender_fd)?;
+    kind.preflight(&b.state, request, &driver, sender_fd)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch)?;
-    if latest != snapshot
-        || focus_recovery_artifacts(root, &b, request, &snapshot["original"])? != artifacts
+    if latest != snapshot || kind.artifacts(root, &b, request, &snapshot["original"])? != artifacts
     {
         return Err(invalid(
             "focus recovery authority or proof changed during preflight",
         ));
     }
     let claim_token = token()?;
-    let changed = tx.execute("UPDATE dispatch SET status='claimed',result='reviewed_focus_recovery',token=?2,worker='reviewed-focus-recovery',lease_until=?3,updated_at=?4 WHERE id=?1 AND status='unknown' AND result='indeterminate' AND epoch=?5",
-        params![id,claim_token,now()+120,now(),epoch])?;
+    let purpose = format!("reviewed_{}", kind.label());
+    let worker = format!("reviewed-{}", kind.label().replace('_', "-"));
+    let changed = tx.execute("UPDATE dispatch SET status='claimed',result=?6,token=?2,worker=?7,lease_until=?3,updated_at=?4 WHERE id=?1 AND status='unknown' AND result='indeterminate' AND epoch=?5",
+        params![id,claim_token,now()+120,now(),epoch,purpose,worker])?;
     if changed != 1 {
         return Err(invalid("stale focus recovery dispatch claim"));
     }
     tx.execute("UPDATE surface SET active_dispatch=?1,epoch=epoch+1 WHERE singleton=1 AND active_dispatch IS NULL AND paused_reason IS NOT NULL",[id])?;
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
-        params![format!("focus_recovery dispatch={id} request={request} owner={owner} epoch={epoch} attempt=1->2: {reason}"),now()])?;
+        params![format!("{} dispatch={id} request={request} owner={owner} epoch={epoch} attempt=1->2: {reason}", kind.label()),now()])?;
     // Durable recovery reservation and audit precede attempt 2 and all effects.
     tx.commit()?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // No control writer may commit between admission, attempt and driver result.
     // A crash retains the committed reservation; it never requeues the request.
-    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dispatch d JOIN surface s ON s.active_dispatch=d.id JOIN binding b ON b.conversation_id=d.conversation_id WHERE d.id=?1 AND d.request_id=?2 AND d.status='claimed' AND d.result='reviewed_focus_recovery' AND d.token=?3 AND d.epoch=?4 AND b.epoch=?4 AND b.owner=?5 AND b.control='active' AND b.reply_policy='authorized' AND s.paused_reason IS NOT NULL)",
-        params![id,request,claim_token,epoch,owner],|r|r.get(0))?;
+    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dispatch d JOIN surface s ON s.active_dispatch=d.id JOIN binding b ON b.conversation_id=d.conversation_id WHERE d.id=?1 AND d.request_id=?2 AND d.status='claimed' AND d.result=?6 AND d.token=?3 AND d.epoch=?4 AND b.epoch=?4 AND b.owner=?5 AND b.control='active' AND b.reply_policy='authorized' AND s.paused_reason IS NOT NULL)",
+        params![id,request,claim_token,epoch,owner,purpose],|r|r.get(0))?;
     if !valid {
         return Err(invalid("reviewed focus recovery reservation changed"));
     }
@@ -1617,7 +1769,7 @@ fn recover_unsent(
     if current.state != b.state
         || current.channel_id != b.channel_id
         || current.session_id != b.session_id
-        || focus_recovery_artifacts(root, &b, request, &snapshot["original"])? != artifacts
+        || kind.artifacts(root, &b, request, &snapshot["original"])? != artifacts
     {
         return Err(invalid(
             "focus recovery binding or evidence changed before attempt",
@@ -2407,7 +2559,15 @@ fn text_button_rejection_snapshot(
     root: &Path,
     tid: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
-    let required = [
+    text_rejection_snapshot(root, tid, false)
+}
+
+fn text_rejection_snapshot(
+    root: &Path,
+    tid: &str,
+    prepare_header_only: bool,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    let mut required = vec![
         ".client-result.json",
         "-inspect.inspect.job.json",
         "-inspect.result.json",
@@ -2417,9 +2577,24 @@ fn text_button_rejection_snapshot(
         ".prepare-visual.job.json",
         ".prepare-visual.result.json",
         ".visual-state.json",
-        ".submit-visual.job.json",
-        ".submit-visual.result.json",
     ];
+    if prepare_header_only {
+        required.extend([
+            "-focus.focus-attempted.json",
+            "-focus.focus-initial.png",
+            "-focus.current-header-confirmed.png",
+            ".prepare-start.png",
+            ".old-draft-before-click.png",
+            ".old-draft-before-select.png",
+            ".old-draft-before-copy.png",
+            ".old-draft-copy-ready.png",
+            ".old-draft-empty-check.png",
+            ".replace-draft-before-paste.png",
+            ".new-draft-before-click.png",
+        ]);
+    } else {
+        required.extend([".submit-visual.job.json", ".submit-visual.result.json"]);
+    }
     let focus = [
         "focus-attempted.json",
         "focus-polls.json",
@@ -2458,13 +2633,31 @@ fn text_button_rejection_snapshot(
         "before-submit",
     ];
     let mut allowed = std::collections::BTreeSet::new();
-    for suffix in required {
+    for suffix in &required {
         allowed.insert(format!("{tid}{suffix}"));
     }
     for suffix in focus {
         allowed.insert(format!("{tid}-focus.{suffix}"));
     }
+    if prepare_header_only {
+        allowed.insert(format!("{tid}-focus.current-header-confirmed.png"));
+    }
     for suffix in visual {
+        if prepare_header_only
+            && matches!(
+                suffix,
+                "new-draft-before-select"
+                    | "new-draft-before-copy"
+                    | "new-draft-copy-ready"
+                    | "submit-draft-before-click"
+                    | "submit-draft-before-select"
+                    | "submit-draft-before-copy"
+                    | "submit-draft-copy-ready"
+                    | "before-submit"
+            )
+        {
+            continue;
+        }
         allowed.insert(format!("{tid}.{suffix}.png"));
     }
     let mut snapshot = std::collections::BTreeMap::new();
@@ -3508,14 +3701,36 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 owner,
                 expected_epoch,
                 reason,
-            } => recover_unsent(
+            } => recover_reviewed(
                 root,
+                RecoveryKind::FocusSearch,
+                RecoveryReview {
+                    id: dispatch_id,
+                    request: &request_id,
+                    expected_attempt,
+                    owner: &owner,
+                    epoch: expected_epoch,
+                    reason: &reason,
+                },
+            )?,
+            DispatchAction::RecoverPrepareHeader {
                 dispatch_id,
-                &request_id,
+                request_id,
                 expected_attempt,
-                &owner,
+                owner,
                 expected_epoch,
-                &reason,
+                reason,
+            } => recover_reviewed(
+                root,
+                RecoveryKind::PrepareHeader,
+                RecoveryReview {
+                    id: dispatch_id,
+                    request: &request_id,
+                    expected_attempt,
+                    owner: &owner,
+                    epoch: expected_epoch,
+                    reason: &reason,
+                },
             )?,
             DispatchAction::ArchiveImageCopyRejection {
                 dispatch_id,
