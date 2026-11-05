@@ -331,6 +331,26 @@ class SenderTests(unittest.TestCase):
             argv = call.call_args[0][0]
             self.assertEqual(argv[argv.index("--name") + 1], "咸")
 
+    def test_current_header_proof_requires_two_matching_kind_confirmations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ui=Path(directory);ui.chmod(0o700)
+            frame={"x":0,"y":0,"width":880,"height":640}
+            config={"ui_dir":ui,"target_group":"Synthetic Group","conversation_kind":"group","expected_pid":42}
+            focus='current-header-proof'
+            result={"focused":True,"alreadySelected":True,"source":"current-header","targetKind":"group",
+                    "category":"group-header","focusEvidenceID":focus,"headerConfirmations":2}
+            evidence={"id":focus,"targetGroup":"Synthetic Group","targetKind":"group","expectedPID":42,
+                "expectedWindowID":21,"expectedFrame":frame,"source":"current-header","category":"group-header",
+                "selectedAt":1.0,"headerConfirmations":2}
+            sender_file=ui/(focus+'.focus-evidence.json');driver.private_create(sender_file,evidence)
+            self.assertEqual(driver.focus_result_ok(result,config,focus,21,frame)['source'],'current-header')
+            for mutation in ({"headerConfirmations":1},{"category":"group-chats"},{"source":"search"},
+                             {"alreadySelected":False},{"targetKind":"private"}):
+                with self.subTest(mutation=mutation),self.assertRaises(driver.Uncertain):
+                    driver.focus_result_ok(dict(result,**mutation),config,focus,21,frame)
+            driver.private_update(sender_file,dict(evidence,headerConfirmations=1))
+            with self.assertRaises(driver.Refused):driver.focus_result_ok(result,config,focus,21,frame)
+
     def test_shared_desktop_lock_refuses_other_conversation_before_ui(self):
         with tempfile.TemporaryDirectory() as root:
             ui = Path(root)

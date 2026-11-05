@@ -1383,8 +1383,10 @@ const FOCUS_ARCHIVE_REPORT_ERROR: &str =
     "focus failed before message preparation: target group header mismatch";
 const FOCUS_ARCHIVE_NATIVE_ERROR: &str = "Selected chat header is not exact target and kind";
 
-const FOCUS_RECOVERY_NATIVE_ERROR: &str =
-    "Search popup had no unique category-eligible exact target within six seconds";
+const FOCUS_RECOVERY_NATIVE_ERRORS: [&str; 2] = [
+    "Search popup had no unique category-eligible exact target within six seconds",
+    "Search popup not enumerated by ScreenCaptureKit within six seconds",
+];
 
 /// Capture the exact authority and original outbox before any recovery probe.
 /// Re-reading this projection is the CAS fence after the potentially slow proof.
@@ -1520,10 +1522,11 @@ fn focus_recovery_artifacts(
         &root.join(format!("{tid}-focus.result.json")),
         65536,
     )?)?;
-    if native
-        != json!({"id":format!("{tid}-focus"),"ok":false,"error":FOCUS_RECOVERY_NATIVE_ERROR,
-        "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
-    {
+    if !FOCUS_RECOVERY_NATIVE_ERRORS.iter().any(|error| {
+        native
+            == json!({"id":format!("{tid}-focus"),"ok":false,"error":error,
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+    }) {
         return Err(invalid(
             "focus recovery native result does not prove the exact search failure",
         ));

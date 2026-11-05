@@ -67,10 +67,13 @@ enum SearchCategory: String, Codable {
     case contacts
     case groupChats = "group-chats"
     case mostUsed = "most-used"
+    case groupHeader = "group-header"
+    case privateHeader = "private-header"
 
     func accepts(_ kind: TargetKind) -> Bool {
         self == .mostUsed || (self == .contacts && kind == .private) ||
-            (self == .groupChats && kind == .group)
+            (self == .groupChats && kind == .group) ||
+            (self == .groupHeader && kind == .group) || (self == .privateHeader && kind == .private)
     }
 }
 
@@ -102,6 +105,16 @@ struct FocusPollDiagnostic: Codable {
 }
 
 enum VisualParameters {
+    static func acceptsFocusSource(_ source: String, category: SearchCategory, kind: TargetKind,
+                                   headerConfirmations: Int?) -> Bool {
+        guard category.accepts(kind) else { return false }
+        if source == "search" {
+            return [.contacts, .groupChats, .mostUsed].contains(category) && headerConfirmations == nil
+        }
+        return source == "current-header" && headerConfirmations == 2 &&
+            ((kind == .group && category == .groupHeader) || (kind == .private && category == .privateHeader))
+    }
+
     static func sendButtonCrop(at point: CGPoint, imageWidth: Int, imageHeight: Int) -> CGRect? {
         guard point.x.isFinite, point.y.isFinite else { return nil }
         let crop = CGRect(x: point.x - 34, y: point.y - 17, width: 68, height: 34)

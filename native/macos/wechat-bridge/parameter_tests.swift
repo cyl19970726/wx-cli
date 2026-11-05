@@ -101,6 +101,20 @@ import ImageIO
                                                            otherText: "你好", otherDraft: "wxx", otherGroup: "其他群"))
         precondition(VisualParameters.exactGroupTitle("  合成测试群（１２） ", target: "合成测试群"))
         precondition(VisualParameters.exactGroupTitle("合成测试群 (12)", target: "合成测试群"))
+        precondition(VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
+            kind: .group, headerConfirmations: 2))
+        precondition(VisualParameters.acceptsFocusSource("current-header", category: .privateHeader,
+            kind: .private, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
+            kind: .private, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
+            kind: .group, headerConfirmations: 1))
+        precondition(!VisualParameters.acceptsFocusSource("current-header", category: .mostUsed,
+            kind: .group, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("search", category: .groupHeader,
+            kind: .group, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("search", category: .groupChats,
+            kind: .group, headerConfirmations: 2))
         precondition(!VisualParameters.exactGroupTitle("合成测试群二", target: "合成测试群"))
         let oneRow = GroupOCRCandidate(text: "合成测试群", x: 180, y: 100)
         let anotherRow = GroupOCRCandidate(text: "其他群", x: 180, y: 150)

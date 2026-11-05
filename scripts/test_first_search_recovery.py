@@ -89,5 +89,26 @@ class FirstSearchRecoveryTests(unittest.TestCase):
             with mock.patch.object(sender,"_helper_is_live",side_effect=changed),mock.patch.object(sender,"status"),self.assertRaises(sender.Refused):
                 sender.focus_recovery_preflight(request,config)
 
+    def test_absent_popup_is_a_separate_exact_first_search_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request,config,tid=self.fixture(directory);ui=Path(directory)
+            p=ui/(tid+'-focus.result.json');v=sender.private_read(p);v['error']=sender.FOCUS_POPUP_ABSENT_ERROR;sender.private_update(p,v)
+            p=ui/(tid+'-focus.focus-polls.json');polls=sender.private_read(p)
+            for poll in polls:
+                poll.update(windowCount=1,popupPresent=False,windows=poll['windows'][:1])
+            sender.private_update(p,polls)
+            for suffix in ('focus-search-result-popup.png','focus-search-result-confirm.png'):
+                (ui/(tid+'-focus.'+suffix)).unlink()
+            self.assertTrue(self.proof(request,config)['unsent_proven'])
+            polls[-1].update(windowCount=2,popupPresent=True,windows=[polls[-1]['windows'][0],
+                {'id':22,'x':148,'y':135,'width':368,'height':194}]);sender.private_update(p,polls)
+            with self.assertRaises(sender.Refused):self.proof(request,config)
+
+    def test_unknown_search_failure_never_inherits_absent_popup_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request,config,tid=self.fixture(directory)
+            p=Path(directory)/(tid+'-focus.result.json');v=sender.private_read(p);v['error']='search timed out';sender.private_update(p,v)
+            with self.assertRaises(sender.Refused):self.proof(request,config)
+
 
 if __name__ == "__main__": unittest.main()

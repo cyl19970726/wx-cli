@@ -439,6 +439,14 @@ def category_matches_kind(category, kind):
                  (category == "group-chats" and kind == "group")))
 
 
+def focus_source_matches(source, category, kind, confirmations=None):
+    if source == "search":
+        return confirmations is None and category_matches_kind(category, kind)
+    return (source == "current-header" and type(confirmations) is int and confirmations == 2
+            and ((kind == "group" and category == "group-header")
+                 or (kind == "private" and category == "private-header")))
+
+
 def _exists(path):
     return path.exists() or path.is_symlink()
 
@@ -478,21 +486,24 @@ def _prepare_command(request, config, window_id=None, frame=None, focus_id=None)
 def focus_result_ok(result, config, focus_id, window_id, frame):
     kind = config.get("conversation_kind", "group")
     category = result.get("category")
-    if (result.get("focused") is not True or result.get("alreadySelected") is not False
-            or result.get("source") != "search" or result.get("targetKind") != kind
+    source = result.get("source")
+    if (result.get("focused") is not True
+            or result.get("alreadySelected") is not (source == "current-header")
+            or result.get("targetKind") != kind
             or result.get("focusEvidenceID") != focus_id
-            or not category_matches_kind(category, kind)):
+            or not focus_source_matches(source, category, kind, result.get("headerConfirmations"))):
         raise Uncertain("kind-aware conversation focus not confirmed")
     evidence = _read_artifact(config["ui_dir"] / (focus_id + ".focus-evidence.json"))
     if (evidence.get("id") != focus_id or evidence.get("targetGroup") != config["target_group"]
             or evidence.get("targetKind") != kind or evidence.get("expectedPID") != config["expected_pid"]
             or evidence.get("expectedWindowID") != window_id or evidence.get("expectedFrame") != frame
-            or evidence.get("source") != "search" or evidence.get("category") != category
-            or not category_matches_kind(evidence.get("category"), kind)
+            or evidence.get("source") != source or evidence.get("category") != category
+            or evidence.get("headerConfirmations") != result.get("headerConfirmations")
+            or not focus_source_matches(source, category, kind, evidence.get("headerConfirmations"))
             or type(evidence.get("selectedAt")) not in (int, float)):
         raise Refused("native focus evidence differs from the requested conversation")
     return {"targetKind": kind, "focusEvidenceID": focus_id,
-            "source": "search", "category": category}
+            "source": source, "category": category}
 
 
 def prove_unsent(request, config, attempt_number, deadline, persist=True):
@@ -1182,6 +1193,7 @@ def image_rejection_preflight(request, config):
 TEXT_BUTTON_REJECTION_ERROR = "Expected exactly one visible Send label in lower conversation pane"
 FOCUS_HEADER_REJECTION_ERROR = "Selected chat header is not exact target and kind"
 FOCUS_SEARCH_REJECTION_ERROR = "Search popup had no unique category-eligible exact target within six seconds"
+FOCUS_POPUP_ABSENT_ERROR = "Search popup not enumerated by ScreenCaptureKit within six seconds"
 
 
 def _prove_first_search_unsent(request, config, tid, report, deadline, persist=False):
@@ -1193,6 +1205,8 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
         raise Refused("first search recovery requires the original text attempt 1")
     request_ok(request, config, 2)
     ui = config["ui_dir"]
+    focused = _read_artifact(ui / (tid + "-focus.result.json"))
+    absent_popup = focused.get("error") == FOCUS_POPUP_ABSENT_ERROR
     required = {tid + suffix for suffix in (
         ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
         "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-attempted.json",
@@ -1200,7 +1214,10 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
     required.update(tid + "-focus." + suffix for suffix in (
         "focus-initial.png", "before-search-click.png", "before-search-select.png",
         "before-search-paste.png", "before-search-copy.png", "search-copy-ready.png",
-        "focus-search-result-main.png", "focus-search-result-popup.png", "focus-search-result-confirm.png"))
+        "focus-search-result-main.png"))
+    if not absent_popup:
+        required.update(tid + "-focus." + suffix for suffix in (
+            "focus-search-result-popup.png", "focus-search-result-confirm.png"))
     current_name = tid + "-a2.client-result.json"
     if _exists(ui / current_name):
         if not persist:
@@ -1239,7 +1256,7 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
     if (_read_artifact(ui / (tid + "-focus.focus-group.job.json")) != expected
             or set(focused) != {"id", "ok", "error", "permissions"}
             or focused.get("id") != tid + "-focus" or focused.get("ok") is not False
-            or focused.get("error") != FOCUS_SEARCH_REJECTION_ERROR
+            or focused.get("error") not in (FOCUS_SEARCH_REJECTION_ERROR, FOCUS_POPUP_ABSENT_ERROR)
             or not _permissions_ok(focused.get("permissions"))
             or report.get("error") != "focus failed before message preparation: " + helper_reason(focused)
             or (ui / (tid + "-focus.focus-attempted.json")).stat().st_size != 0):
@@ -1259,6 +1276,8 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
                 or len(poll["windows"]) != poll["windowCount"]):
             raise Refused("original first search selected or changed windows")
         last = poll["elapsedMs"]
+        if absent_popup and (poll["popupPresent"] or poll["windowCount"] != 1):
+            raise Refused("original absent-popup search has contradictory popup evidence")
         main = poll["windows"][0]
         if (main.get("id") != window_id or any(type(main.get(k)) not in (int, float)
                 or not math.isfinite(main[k]) or abs(main[k] - frame[k]) > 3 for k in frame)):
@@ -1276,7 +1295,7 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
                     or popup["y"] + popup["height"] > frame["y"] + frame["height"] + 16):
                 raise Refused("original first search popup differs")
             saw_popup = True
-    if not saw_popup or last < 5000 or _helper_is_live(tid, deadline):
+    if (not absent_popup and not saw_popup) or last < 5000 or _helper_is_live(tid, deadline):
         raise Refused("original first search did not end without selection")
     _guard_helper(config, deadline, clear=False)
     status(config, deadline)
@@ -1286,7 +1305,8 @@ def _prove_first_search_unsent(request, config, tid, report, deadline, persist=F
              "transaction_id": tid, "text_sha256": hashlib.sha256(request["text"].encode()).hexdigest(),
              "target_name": config["target_name"], "target_kind": config.get("conversation_kind", "group"),
              "report_stage": "inspected", "report_status": "indeterminate", "result_error": focused["error"],
-             "prior_focus_mode": "first-search-no-selection", "artifact_sha256": {k: v[0] for k, v in before.items()}}
+             "prior_focus_mode": "first-search-popup-absent" if absent_popup else "first-search-no-selection",
+             "artifact_sha256": {k: v[0] for k, v in before.items()}}
     if not persist:
         return proof
     proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
@@ -1813,7 +1833,7 @@ def focus_only(config):
                    "searchPoint": config["search_point"]}
         result = bridge(config, tid, "focus-group", command, deadline, FOCUS_SECONDS)
         focus_proof = focus_result_ok(result, config, tid, window_id, frame)
-        return {"focused": True, "already_selected": False, "source": "search",
+        return {"focused": True, "already_selected": result.get("alreadySelected"), "source": focus_proof["source"],
                 "target_kind": config.get("conversation_kind", "group"), "focus_evidence_id": tid,
                 "category": focus_proof["category"]}
 

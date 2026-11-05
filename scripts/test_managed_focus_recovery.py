@@ -149,6 +149,9 @@ print(json.dumps(result))
         self.assertIsNone(surface["active_dispatch"])
 
     def test_success_keeps_identity_history_publisher_epoch_and_pause(self):
+        self.assert_success_keeps_identity_history_publisher_epoch_and_pause()
+
+    def assert_success_keeps_identity_history_publisher_epoch_and_pause(self):
         result = self.recover()
         self.assertEqual((result["status"], result["result"], result["surface_paused"]),
                          ("done", "ui_observed", True))
@@ -176,6 +179,37 @@ print(json.dumps(result))
                          dict(driver=str(self.driver))):
             with self.subTest(override=override):
                 self.recover(okay=False, **override)
+                self.unchanged()
+                self.assertEqual(self.calls(), [])
+
+    def test_not_enumerated_search_keeps_recovery_identity_and_single_attempt(self):
+        path = self.ui / (self.tid + '-focus.result.json')
+        native = json.loads(path.read_text())
+        native['error'] = 'Search popup not enumerated by ScreenCaptureKit within six seconds'
+        path.write_text(json.dumps(native))
+        (self.ui / (self.tid + '-focus.focus-polls.json')).write_text(json.dumps([
+            {'elapsedMs': 100, 'popupSelected': False, 'windowCount': 1},
+            {'elapsedMs': 6100, 'popupSelected': False, 'windowCount': 1},
+        ]))
+        # This fixture tests Rust admission; the registered proof driver remains
+        # synthetic. Error-specific screenshot/poll validation belongs to Python.
+        self.assert_success_keeps_identity_history_publisher_epoch_and_pause()
+
+    def test_other_native_errors_never_probe_or_change_history(self):
+        path = self.ui / (self.tid + '-focus.result.json')
+        native = json.loads(path.read_text())
+        for error in (
+            'Timed out waiting for focus',
+            'Search popup timed out within six seconds',
+            'Clipboard verification failed',
+            'Selected chat header is not exact target and kind',
+            'Search popup not enumerated by ScreenCaptureKit within seven seconds',
+            'Search popup not enumerated by ScreenCaptureKit within six seconds (timeout)',
+        ):
+            with self.subTest(error=error):
+                native['error'] = error
+                path.write_text(json.dumps(native))
+                self.recover(okay=False)
                 self.unchanged()
                 self.assertEqual(self.calls(), [])
 
