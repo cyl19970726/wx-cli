@@ -626,8 +626,8 @@ import ImageIO
     }
 
     static func visualTitleWhitespaceChecks() {
-        let target = "咸蛋AI - AI落地企业"
-        let observed = "咸蛋 AI- AI落地企业"
+        let target = "合成AI - AI业务示例"
+        let observed = "合成 AI- AI业务示例"
         let heading = SearchOCRCandidate(text: "群聊",
             bounds: CGRect(x: 15, y: 55, width: 60, height: 18))
         let row = SearchOCRCandidate(text: observed,
@@ -670,15 +670,15 @@ import ImageIO
                             0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
                             0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000] {
             let space = String(UnicodeScalar(code)!)
-            let spaced = "咸蛋" + space + "AI-" + space + "AI落地企业"
+            let spaced = "合成" + space + "AI-" + space + "AI业务示例"
             precondition(VisualParameters.exactGroupTitle(spaced, target: target))
             precondition(VisualParameters.exactGroupTitle(target, target: spaced))
             precondition(VisualParameters.exactHeaderTitle(spaced + "（１２）", target: target, kind: .group))
             precondition(VisualParameters.exactHeaderTitle(spaced, target: target, kind: .private))
         }
-        for altered in ["咸蛋AI – AI落地企业", "咸蛋AI AI落地企业", "咸蛋AI - AI落地企亚",
-                        "咸蛋ai - AI落地企业", "咸蛋AI - AI落地企业二", "前咸蛋AI - AI落地企业",
-                        "咸蛋\u{200B}AI - AI落地企业", "咸蛋\u{FEFF}AI - AI落地企业"] {
+        for altered in ["合成AI – AI业务示例", "合成AI AI业务示例", "合成AI - AI业务示错",
+                        "合成ai - AI业务示例", "合成AI - AI业务示例二", "前合成AI - AI业务示例",
+                        "合成\u{200B}AI - AI业务示例", "合成\u{FEFF}AI - AI业务示例"] {
             precondition(!VisualParameters.exactGroupTitle(altered, target: target))
             precondition(!VisualParameters.exactHeaderTitle(altered + " (12)", target: target, kind: .group))
             precondition(!VisualParameters.exactHeaderTitle(altered, target: target, kind: .private))

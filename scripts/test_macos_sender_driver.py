@@ -313,12 +313,12 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(driver.title_query("Alex (2)（３）"), "Alex")
 
     def test_visual_whitespace_aliases_cannot_bypass_metadata_collision_guard(self):
-        target = "咸蛋AI - AI落地企业"
-        alias = "咸蛋 AI- AI落地企业"
+        target = "合成AI - AI业务示例"
+        alias = "合成 AI- AI业务示例"
         self.assertTrue(driver.titles_overlap(target, alias))
-        self.assertFalse(driver.titles_overlap(target, "咸蛋AI－AI落地企业"))
-        self.assertFalse(driver.titles_overlap(target, "咸蛋AI-AI落地企业二"))
-        self.assertEqual(driver.visual_title_query(target), "咸")
+        self.assertFalse(driver.titles_overlap(target, "合成AI－AI业务示例"))
+        self.assertFalse(driver.titles_overlap(target, "合成AI-AI业务示例二"))
+        self.assertEqual(driver.visual_title_query(target), "合")
         self.assertEqual(driver.visual_title_query("A l e x (2)"), "A")
         config = dict(self.config, target_name=target, target_group=target, conversation_kind="group",
                       binding=self.binding, wx_cli="/private/wx-cli", channel_state_dir="/private/state")
@@ -329,7 +329,7 @@ class SenderTests(unittest.TestCase):
                     kind=kind, talker="other-identity")]})) as call, self.assertRaises(driver.Refused):
                 driver.verify_target(config, driver.time.monotonic() + 3)
             argv = call.call_args[0][0]
-            self.assertEqual(argv[argv.index("--name") + 1], "咸")
+            self.assertEqual(argv[argv.index("--name") + 1], "合")
 
     def test_current_header_proof_requires_two_matching_kind_confirmations(self):
         with tempfile.TemporaryDirectory() as directory:
