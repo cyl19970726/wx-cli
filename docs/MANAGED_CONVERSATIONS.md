@@ -83,6 +83,22 @@ wx-agent dispatch --config /ABS/private/conversations.json review \
 
 该命令还必须通过新鲜 helper/桌面 preflight，只恢复其他合格项，不重放未知项。托管模式暂不支持 narrow `recover-unsent`，不能通过旧入口或更换 ID绕过；历史未托管恢复仍按原严格证据合同。
 
+### 已提交文字的后续源记录对账
+
+如果原生已经确认单次提交，但严格出站核验超时，先同步原 channel，再检查原消息的完整内容和源 ID；不得重新发送。解析修复可能追加同一源消息的 `message_updated`。确认本账号出站、完整正文和原尝试时间窗后，可显式对账原意图：
+
+```sh
+wx-cli channel --state-dir /ABS/private/channel sync
+wx-cli outbox --state-dir /ABS/private/channel reconcile-text-event \
+  --request-id ORIGINAL_REQUEST_ID --expected-attempt 1 \
+  --cursor EXACT_LATEST_SOURCE_CURSOR --expected-epoch CURRENT_EPOCH \
+  --reason '已核对原生单次提交和原时间窗内的完整出站文字'
+```
+
+命令只接受托管原 attempt 1 的 `indeterminate/submit_clicked`，正向核对原 prepare、submit、提交标记、已提交状态及冻结正文。源消息须首次记录于原发送基线之后，在原尝试时间窗内只有一个匹配的源消息 ID；所选游标必须是该 ID 的最新修订。属于同一 ID 的解析更正不算重复消息，另一个 ID 的同文消息会拒绝对账。缺少原提交、内容/身份不符、旧消息、歧义、后续 attempt、owner/epoch 变化或共享桌面锁忙均拒绝。
+
+成功会追加不可变 `outgoing_observation`，把原意图的当前状态和原 dispatch 更正为 `ui_observed`；原 attempt、其 `indeterminate` 结果和所有旧证据保持不变。命令不调用驱动、不领取新 attempt、不发送、也不解除桌面暂停；跨文件中断后，用同一参数续接即可。完成后仍按上面的 `review --confirm-desktop-safe` 单独核查当前窗口和草稿。`ui_observed` 仅为本地源证据，不能写成独立收件确认。
+
 `dispatch abandon-unsent` 只归档**已证明提交前停止**的原调度阻塞，不发送，也不把 outbox 的 `indeterminate` 改成成功、可重试或可恢复。先核对原 dispatch ID、attempt 和私有原生报告，再由已安装版本的 Rust 与注册 driver 在共享 executor/sender 锁下执行完整只读证明：
 
 ```sh

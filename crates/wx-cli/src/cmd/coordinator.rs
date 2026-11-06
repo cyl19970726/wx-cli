@@ -612,7 +612,7 @@ pub(crate) fn validate_owner(
 /// may only reconcile evidence; this grants no desktop/send authority. Outbox is
 /// committed first so a crash can only leave an unknown dispatch to finish.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn with_image_observation_authority<F>(
+pub(super) fn with_observation_authority<F>(
     root: &Path,
     state: &Path,
     request: &str,

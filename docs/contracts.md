@@ -47,6 +47,12 @@ Codex 适配器匿名化成员标签，并只把笔记文案加入提示，不�
 
 驱动协议 `protocol_version:1`，stdin 包含 request_id、channel_id、session_id、account、talker、text。stdout 返回 status 与非空 evidence。退出码 0 不是送达证明，调用者必须检查 status。运行器不会用替换 ID 绕过不明状态。
 
+### 已提交文字的正向对账
+
+`outbox reconcile-text-event` 不发送，只对原托管 attempt 1 的正向提交证据和唯一匹配源消息作后续对账。源 ID 必须首次出现在原发送基线之后、时间落在原尝试窗口内，当前最新修订必须保持同一原始身份并逐字匹配冻结正文和本账号发送者。原 prepare/submit job、成功结果、状态和提交标记须完整一致；重复源 ID、旧消息、不同正文/身份或后续 attempt 拒绝。解析更正可以引用同一源 ID 的最新 `message_updated`，不把该修订解释为又发了一条。
+
+成功追加不可变 `outgoing_observation` 并更新原意图的当前 `ui_observed` 投影及原 dispatch；原 attempt 的 `indeterminate`、原报告和旧事件仍保留。沿用共享 executor/sender 锁、原 owner/epoch 检查和 outbox 先于 coordinator 的提交顺序；中断后只能续接同一参数。该操作不调用 driver、不增加 attempt、不承认独立收件、不解除桌面暂停。操作示例和独立桌面审查见[托管指南](MANAGED_CONVERSATIONS.md#已提交文字的后续源记录对账)。
+
 ### 显式恢复已证实未提交的尝试
 
 常规 `failed`、`indeterminate` 或未知结果仍必须停止，不能自动重试、换 request ID 或重新创建相同意图。只有操作者确认原尝试未提交，且受保护的原生证据能证明这一点时，才允许显式 `recover-unsent`。准备阶段只接受 `Cannot snapshot a clipboard item` 和 `Copied composer text does not exactly match expected draft`。另有一个更早的 inspect-only 特例：原报告必须精确记录 attempt 1、相同 request ID、`stage=started`、`status=failed` 和 `error=WeChat process or window changed`；同一 transaction ID 下只能有该报告、inspect job 和 inspect result 三份产物。inspect job 与 result 的 ID/action 必须匹配，result 的 `ok=true`、正数且等于当前配置的 PID、精确空 `windows=[]`、三项权限全 true、`onConsole=true` 且未锁定必须同时成立。此时未进入 focus/prepare/submit；任何对应产物、其他同 ID 产物、存活 helper 或已存在恢复证明都拒绝。只读 preflight 不容许下一 attempt 的任何产物；锁内复验只容许驱动刚创建、ID/请求/attempt/恢复来源/started 状态均精确匹配的下一 attempt 报告。图片、其他错误、模糊状态或仅凭人工猜测不能恢复。已提交、出现任何 submit 阶段证据、`ui_observed`、收件确认或 P3 错误目标发送均不能走此恢复路径，也不能重放。
