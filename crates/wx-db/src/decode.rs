@@ -226,11 +226,11 @@ pub fn decode_message_for_test(
 
 /// Parse group-sender info from decoded text.
 ///
-/// In group chats, the decoded text often starts with a `"sender:\n"` prefix.
-/// This function splits on `":\n"` to extract the sender and the remaining content.
+/// Group content may start with a `"sender:\n"` wire prefix. Accept a canonical
+/// wxid token, or an exact nonempty legacy username resolved from Name2Id.
+/// Ordinary prose before the same delimiter is body text, not a sender.
 ///
-/// Returns `(sender, content)` tuple. If `is_group` is false or no `":\n"` separator
-/// is found, returns `(fallback_sender, decoded_text)` unchanged.
+/// Private content and group content without a recognized prefix are unchanged.
 pub(crate) fn parse_group_sender(
     is_group: bool,
     decoded_text: String,
@@ -238,13 +238,18 @@ pub(crate) fn parse_group_sender(
 ) -> (String, String) {
     if is_group {
         if let Some((sender_prefix, rest)) = decoded_text.split_once(":\n") {
-            (sender_prefix.to_string(), rest.to_string())
-        } else {
-            (fallback_sender, decoded_text)
+            let canonical_wxid = sender_prefix.strip_prefix("wxid_").is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            });
+            if canonical_wxid || (!sender_prefix.is_empty() && sender_prefix == fallback_sender) {
+                return (sender_prefix.to_string(), rest.to_string());
+            }
         }
-    } else {
-        (fallback_sender, decoded_text)
     }
+    (fallback_sender, decoded_text)
 }
 
 /// Parse message content into a typed MessageContent enum variant.
@@ -317,6 +322,22 @@ mod tests {
     }
 
     #[test]
+    fn group_outgoing_colon_newline_preserves_database_sender_and_full_body() {
+        let body = "Please check the current offers:\n\n1. https://example.test/item-a\n2. https://example.test/item-b\n\nSetup questions:\nPower and network ✅".to_string();
+        let (sender, content) = parse_group_sender(true, body.clone(), "wxid_me".to_string());
+        assert_eq!(sender, "wxid_me");
+        assert_eq!(content, body);
+    }
+
+    #[test]
+    fn group_prose_mentioning_a_wxid_is_literal_body() {
+        let body = "wxid_other is mentioned here:\nThis is literal body text.".to_string();
+        let (sender, content) = parse_group_sender(true, body.clone(), "wxid_me".to_string());
+        assert_eq!(sender, "wxid_me");
+        assert_eq!(content, body);
+    }
+
+    #[test]
     fn group_with_sender_prefix() {
         let (sender, content) = parse_group_sender(
             true,
@@ -347,11 +368,52 @@ mod tests {
     }
 
     #[test]
-    fn group_only_colon_before_newline() {
+    fn group_empty_prefix_is_literal_body() {
         let (sender, content) =
             parse_group_sender(true, ":\nsome content".to_string(), "fallback".to_string());
-        assert_eq!(sender, "");
-        assert_eq!(content, "some content");
+        assert_eq!(sender, "fallback");
+        assert_eq!(content, ":\nsome content");
+    }
+
+    #[test]
+    fn group_label_without_database_identity_does_not_invent_a_sender() {
+        let body = "Summary:\nHello group".to_string();
+        let (sender, content) = parse_group_sender(true, body.clone(), String::new());
+        assert!(sender.is_empty());
+        assert_eq!(content, body);
+    }
+
+    #[test]
+    fn group_short_label_is_not_a_sender_prefix() {
+        let body = "Summary:\nCurrent offers".to_string();
+        let (sender, content) = parse_group_sender(true, body.clone(), "wxid_me".to_string());
+        assert_eq!(sender, "wxid_me");
+        assert_eq!(content, body);
+    }
+
+    #[test]
+    fn group_invalid_wxid_prefix_is_literal_body() {
+        for body in [
+            "wxid_:\nbody",
+            "wxid_has space:\nbody",
+            "wxid_a\nwxid_b:\nbody",
+        ] {
+            let (sender, content) =
+                parse_group_sender(true, body.to_string(), "wxid_me".to_string());
+            assert_eq!(sender, "wxid_me");
+            assert_eq!(content, body);
+        }
+    }
+
+    #[test]
+    fn group_legacy_username_prefix_matches_database_identity() {
+        let (sender, content) = parse_group_sender(
+            true,
+            "legacy_user:\nLabel:\nBody".to_string(),
+            "legacy_user".to_string(),
+        );
+        assert_eq!(sender, "legacy_user");
+        assert_eq!(content, "Label:\nBody");
     }
 
     #[test]
