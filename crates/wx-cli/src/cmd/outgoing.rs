@@ -504,6 +504,135 @@ pub(super) fn check_recovery_preflight(
     Ok(())
 }
 
+/// Separate from general recovery: only the coordinator can admit a reviewed
+/// first TEXT search failure. Both probes and execution inherit its sender lock.
+pub(super) fn focus_recovery_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    reviewed_recovery_preflight(state, request, driver, lock_fd, false)
+}
+
+pub(super) fn prepare_header_recovery_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    reviewed_recovery_preflight(state, request, driver, lock_fd, true)
+}
+
+fn reviewed_recovery_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+    prepare_header: bool,
+) -> Result<(), Box<dyn Error>> {
+    validate_driver(driver)?;
+    let (capability_mode, proof_mode, expected_capability, expected_proof) = if prepare_header {
+        (
+            "--prepare-header-recovery-capabilities",
+            "--prepare-header-recovery-preflight",
+            json!({"protocol_version":1,"prepare_header_recovery_protocol_version":1,"first_text_no_submit_only":true}),
+            json!({"protocol_version":1,"prepare_header_recovery_protocol_version":1,"unsent_proven":true}),
+        )
+    } else {
+        (
+            "--focus-recovery-capabilities",
+            "--focus-recovery-preflight",
+            json!({"protocol_version":1,"focus_recovery_protocol_version":1,"first_text_before_prepare_only":true}),
+            json!({"protocol_version":1,"focus_recovery_protocol_version":1,"unsent_proven":true}),
+        )
+    };
+    let capability = invoke_recovery_probe(
+        driver,
+        capability_mode,
+        None,
+        Duration::from_secs(20),
+        Some(lock_fd),
+    )?;
+    if capability != expected_capability {
+        return Err(invalid("driver lacks first text focus recovery capability").into());
+    }
+    let binding = load_binding(state)?;
+    let candidate = load_recovery_candidate(state, &binding, request, 1)?;
+    let payload = driver_input(&binding, &candidate, Some(1))?;
+    let proof = invoke_recovery_probe(
+        driver,
+        proof_mode,
+        Some(&payload),
+        Duration::from_secs(25),
+        Some(lock_fd),
+    )?;
+    if proof != expected_proof {
+        return Err(invalid("driver did not prove first text focus failure unsent").into());
+    }
+    let (ready, _) =
+        invoke_driver_mode(driver, b"{}", Duration::from_secs(20), Some(lock_fd), true);
+    if ready != AttemptResult::UiObserved {
+        return Err(invalid("desktop readiness refused; recovery remains unattempted").into());
+    }
+    Ok(())
+}
+
+/// Called only under coordinator authority and both shared locks. Compare the
+/// complete original journal projection inside the same transaction as attempt 2.
+pub(super) fn claim_managed_focus_recovery(
+    state: &Path,
+    request: &str,
+    original: &serde_json::Value,
+) -> Result<Attempt, Box<dyn Error>> {
+    let binding = load_binding(state)?;
+    let mut conn = open_journal(state)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = show_intent(&tx, &binding, request)?;
+    if current != *original
+        || current["status"] != "indeterminate"
+        || current["attempt_number"] != 1
+        || current.get("media").is_some()
+        || current["attempts"].as_array().map(Vec::len) != Some(1)
+    {
+        return Err(invalid("original focus recovery outbox changed").into());
+    }
+    let text = current["text"]
+        .as_str()
+        .ok_or_else(|| invalid("text missing"))?
+        .to_owned();
+    let timestamp = now()?;
+    tx.execute("UPDATE managed_control SET gate=1 WHERE singleton=1", [])?;
+    let changed = tx.execute(
+        "UPDATE outgoing_intent SET status='attempt_recorded',attempt_number=2,result_evidence=NULL,receipt_evidence=NULL,updated_at=?2 WHERE request_id=?1 AND content_kind='text' AND status='indeterminate' AND attempt_number=1",
+        params![request,timestamp],
+    )?;
+    if changed != 1 {
+        return Err(invalid("stale managed focus recovery claim").into());
+    }
+    tx.execute("INSERT INTO outgoing_attempt(request_id,attempt_number,status,recovery_from_attempt,recovery_prior_status,claimed_at) VALUES(?1,2,'attempt_recorded',1,'indeterminate',?2)", params![request,timestamp])?;
+    tx.execute("UPDATE managed_control SET gate=0 WHERE singleton=1", [])?;
+    tx.commit()?;
+    Ok(Attempt {
+        request_id: request.to_owned(),
+        attempt_number: 2,
+        text,
+        media: None,
+    })
+}
+
+pub(super) fn execute_managed_focus_recovery(
+    state: &Path,
+    driver: &Path,
+    attempt: Attempt,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let binding = load_binding(state)?;
+    let payload = driver_input(&binding, &attempt, Some(1))?;
+    let (result, evidence) = invoke_driver_locked(driver, &payload, DRIVER_TIMEOUT, Some(lock_fd));
+    record_result(state, &attempt.request_id, 2, result, &evidence)
+}
+
 pub(super) fn check_image_rejection_capabilities(
     driver: &Path,
     timeout: Duration,
@@ -1064,7 +1193,6 @@ pub(crate) fn enroll_managed(state_dir: &Path, root: &Path) -> Result<(), Box<dy
     Ok(())
 }
 
-#[cfg(test)]
 pub(crate) fn intent_view(
     state_dir: &Path,
     request_id: &str,

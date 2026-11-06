@@ -439,6 +439,14 @@ def category_matches_kind(category, kind):
                  (category == "group-chats" and kind == "group")))
 
 
+def focus_source_matches(source, category, kind, confirmations=None):
+    if source == "search":
+        return confirmations is None and category_matches_kind(category, kind)
+    return (source == "current-header" and type(confirmations) is int and confirmations == 2
+            and ((kind == "group" and category == "group-header")
+                 or (kind == "private" and category == "private-header")))
+
+
 def _exists(path):
     return path.exists() or path.is_symlink()
 
@@ -478,21 +486,24 @@ def _prepare_command(request, config, window_id=None, frame=None, focus_id=None)
 def focus_result_ok(result, config, focus_id, window_id, frame):
     kind = config.get("conversation_kind", "group")
     category = result.get("category")
-    if (result.get("focused") is not True or result.get("alreadySelected") is not False
-            or result.get("source") != "search" or result.get("targetKind") != kind
+    source = result.get("source")
+    if (result.get("focused") is not True
+            or result.get("alreadySelected") is not (source == "current-header")
+            or result.get("targetKind") != kind
             or result.get("focusEvidenceID") != focus_id
-            or not category_matches_kind(category, kind)):
+            or not focus_source_matches(source, category, kind, result.get("headerConfirmations"))):
         raise Uncertain("kind-aware conversation focus not confirmed")
     evidence = _read_artifact(config["ui_dir"] / (focus_id + ".focus-evidence.json"))
     if (evidence.get("id") != focus_id or evidence.get("targetGroup") != config["target_group"]
             or evidence.get("targetKind") != kind or evidence.get("expectedPID") != config["expected_pid"]
             or evidence.get("expectedWindowID") != window_id or evidence.get("expectedFrame") != frame
-            or evidence.get("source") != "search" or evidence.get("category") != category
-            or not category_matches_kind(evidence.get("category"), kind)
+            or evidence.get("source") != source or evidence.get("category") != category
+            or evidence.get("headerConfirmations") != result.get("headerConfirmations")
+            or not focus_source_matches(source, category, kind, evidence.get("headerConfirmations"))
             or type(evidence.get("selectedAt")) not in (int, float)):
         raise Refused("native focus evidence differs from the requested conversation")
     return {"targetKind": kind, "focusEvidenceID": focus_id,
-            "source": "search", "category": category}
+            "source": source, "category": category}
 
 
 def prove_unsent(request, config, attempt_number, deadline, persist=True):
@@ -517,6 +528,11 @@ def prove_unsent(request, config, attempt_number, deadline, persist=True):
         raise Refused("prior attempt has submit evidence")
 
     report = _read_artifact(report_path)
+    if recovery_from == 1 and attempt_number == 2 and report.get("stage") == "inspected":
+        return _prove_first_search_unsent(request, config, old_tid, report, deadline, persist)
+    if (recovery_from == 1 and attempt_number == 2 and report.get("stage") == "group_focused"
+            and _read_artifact(prep_result_path).get("error") == PREPARE_HEADER_REJECTION_ERROR):
+        return _prove_prepare_header_unsent(request, config, old_tid, report, deadline, persist)
     if report.get("stage") == "started":
         return _prove_empty_inspect_unsent(request, config, recovery_from, attempt_number,
                                            old_tid, report, deadline, persist)
@@ -1179,6 +1195,234 @@ def image_rejection_preflight(request, config):
 
 TEXT_BUTTON_REJECTION_ERROR = "Expected exactly one visible Send label in lower conversation pane"
 FOCUS_HEADER_REJECTION_ERROR = "Selected chat header is not exact target and kind"
+FOCUS_SEARCH_REJECTION_ERROR = "Search popup had no unique category-eligible exact target within six seconds"
+FOCUS_POPUP_ABSENT_ERROR = "Search popup not enumerated by ScreenCaptureKit within six seconds"
+PREPARE_HEADER_REJECTION_ERROR = "Fresh chat header is not exact target and kind"
+
+
+def _prove_prepare_header_unsent(request, config, tid, report, deadline, persist=False):
+    """A first text paste stopped before new-draft selection and any submit."""
+    request_ok(request, config, 2)
+    if (type(request.get("attempt_number")) is not int or request["attempt_number"] != 2
+            or type(request.get("recovery_from_attempt")) is not int or request["recovery_from_attempt"] != 1
+            or request.get("protocol_version") != 1 or request.get("media") is not None
+            or config.get("expected_draft", "") != "" or config.get("expected_draft_media") is not None):
+        raise Refused("prepare header recovery requires first text paste from empty draft")
+    ui = config["ui_dir"]; focus_id = tid + "-focus"
+    required = {tid + suffix for suffix in (".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-evidence.json", "-focus.focus-attempted.json",
+        "-focus.focus-initial.png", "-focus.current-header-confirmed.png", ".prepare-visual.job.json",
+        ".prepare-visual.result.json", ".visual-state.json")}
+    required.update(tid + "." + step + ".png" for step in ("prepare-start", "old-draft-before-click",
+        "old-draft-before-select", "old-draft-before-copy", "old-draft-copy-ready", "old-draft-empty-check",
+        "replace-draft-before-paste", "new-draft-before-click"))
+    current_name = tid + "-a2.client-result.json"
+    if _exists(ui / current_name):
+        current = _read_artifact(ui / current_name)
+        if (not persist or set(current) != {"id", "attempt_number", "request_id", "stage", "status", "channel_id",
+                "session_id", "started_at", "recovery_from_attempt"} or current.get("id") != tid + "-a2"
+                or current.get("stage") != "started" or current.get("status") != "indeterminate"
+                or current.get("attempt_number") != 2 or current.get("recovery_from_attempt") != 1
+                or any(current.get(k) != request[k] for k in ("request_id", "channel_id", "session_id"))):
+            raise Refused("current prepare recovery report differs or already has effects")
+    optional = {current_name} if persist else set()
+    before = _rejection_artifact_snapshot(ui, tid, required, optional)
+    if (report.get("id") != tid or report.get("stage") != "group_focused" or report.get("status") != "indeterminate"
+            or report.get("error") != "target group header mismatch" or report.get("attempt_number") != 1
+            or any(report.get(k) != request[k] for k in ("request_id", "channel_id", "session_id"))
+            or report.get("target_kind") != config.get("conversation_kind", "group")
+            or report.get("focus_evidence_id") != focus_id or report.get("focus_category") != "group-header"
+            or config.get("conversation_kind", "group") != "group"
+            or any(k in report for k in ("event_cursor", "observation", "recovery_from_attempt", "media_prepared",
+                       "media_submitted", "ui_submit_seconds", "submit_action_seconds", "verification_seconds"))):
+        raise Refused("original prepare header report differs")
+    inspected = _read_artifact(ui / (tid + "-inspect.result.json"))
+    if (_read_artifact(ui / (tid + "-inspect.inspect.job.json")) != {"id": tid + "-inspect", "action": "inspect"}
+            or inspected.get("id") != tid + "-inspect" or inspected.get("action") != "inspect" or inspected.get("ok") is not True):
+        raise Refused("original prepare header inspect differs")
+    window, frame = inspect_ok(inspected, config)
+    expected_focus = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+        "allowCurrentHeader": True, "targetKind": "group", "expectedPID": config["expected_pid"],
+        "expectedWindowID": window, "expectedFrame": frame,
+        "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
+    focus = _read_artifact(ui / (focus_id + ".result.json"))
+    if (_read_artifact(ui / (focus_id + ".focus-group.job.json")) != expected_focus
+            or focus.get("id") != focus_id or focus.get("action") != "focus-group" or focus.get("ok") is not True
+            or not _permissions_ok(focus.get("permissions")) or focus.get("source") != "current-header"
+            or (ui / (focus_id + ".focus-attempted.json")).stat().st_size != 0):
+        raise Refused("original prepare header focus differs")
+    focus_result_ok(focus, config, focus_id, window, frame)
+    expected_job = dict(_prepare_command(request, config, window, frame, focus_id), id=tid, action="prepare-visual")
+    job = _read_artifact(ui / (tid + ".prepare-visual.job.json"))
+    rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+    expected_result = {"id": tid, "ok": False, "error": PREPARE_HEADER_REJECTION_ERROR,
+        "permissions": {"accessibility": True, "screenRecording": True, "postEvents": True}}
+    expected_state = dict(expected_job, stage="prepare-attempted");expected_state.pop("action")
+    if (job != expected_job or rejected != expected_result
+            or _read_artifact(ui / (tid + ".visual-state.json")) != expected_state):
+        raise Refused("original prepare header job/state/text differs")
+    if _helper_is_live(tid, deadline):
+        raise Refused("prepare header helper is still live")
+    _guard_helper(config, deadline, clear=False);status(config, deadline)
+    if _rejection_artifact_snapshot(ui, tid, required, optional) != before:
+        raise Refused("prepare header evidence changed during proof")
+    proof = {"request_id": request["request_id"], "from_attempt": 1, "attempt_number": 2,
+        "transaction_id": tid, "prior_focus_mode": "prepare-header-before-new-copy",
+        "recovery_draft_sha256": hashlib.sha256(request["text"].encode()).hexdigest(),
+        "target_name": config["target_name"], "target_kind": "group",
+        "artifact_sha256": {k: v[0] for k, v in before.items()}}
+    if not persist:return proof
+    proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+    path = ui / (tid + ".recovery-proof-to-2.json");private_create(path, proof)
+    return str(path)
+
+
+def prepare_header_recovery_preflight(request, config):
+    tid = request_ok(request, config, 2)
+    if not tid.endswith("-a2"):raise Refused("prepare recovery attempt differs")
+    with recovery_sender_lock(config["ui_dir"] / "sender.lock"):
+        _prove_prepare_header_unsent(request, config, tid[:-3],
+            _read_artifact(config["ui_dir"] / (tid[:-3] + ".client-result.json")), time.monotonic() + BUDGET)
+    return {"protocol_version": 1, "prepare_header_recovery_protocol_version": 1, "unsent_proven": True}
+
+
+def _prove_first_search_unsent(request, config, tid, report, deadline, persist=False):
+    """Prove only attempt 1's terminal search-without-selection refusal."""
+    if (type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("attempt_number")) is not int or request["attempt_number"] != 2
+            or type(request.get("recovery_from_attempt")) is not int or request["recovery_from_attempt"] != 1 or request.get("media") is not None
+            or "target_name" not in config):
+        raise Refused("first search recovery requires the original text attempt 1")
+    request_ok(request, config, 2)
+    ui = config["ui_dir"]
+    focused = _read_artifact(ui / (tid + "-focus.result.json"))
+    absent_popup = focused.get("error") == FOCUS_POPUP_ABSENT_ERROR
+    required = {tid + suffix for suffix in (
+        ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-attempted.json",
+        "-focus.focus-polls.json")}
+    required.update(tid + "-focus." + suffix for suffix in (
+        "focus-initial.png", "before-search-click.png", "before-search-select.png",
+        "before-search-paste.png", "before-search-copy.png", "search-copy-ready.png",
+        "focus-search-result-main.png"))
+    if not absent_popup:
+        required.update(tid + "-focus." + suffix for suffix in (
+            "focus-search-result-popup.png", "focus-search-result-confirm.png"))
+    current_name = tid + "-a2.client-result.json"
+    if _exists(ui / current_name):
+        if not persist:
+            raise Refused("current recovery attempt already has a report")
+        current = _read_artifact(ui / current_name)
+        if (set(current) != {"id", "attempt_number", "request_id", "stage", "status", "channel_id",
+                             "session_id", "started_at", "recovery_from_attempt"}
+                or current.get("id") != tid + "-a2" or current.get("attempt_number") != 2
+                or current.get("recovery_from_attempt") != 1 or current.get("stage") != "started"
+                or current.get("status") != "indeterminate"
+                or any(current.get(k) != request[k] for k in ("request_id", "channel_id", "session_id"))):
+            raise Refused("current recovery report has effects or differs")
+    before = _rejection_artifact_snapshot(ui, tid, required, {current_name} if persist else set())
+    if (report.get("id") != tid or report.get("request_id") != request["request_id"]
+            or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
+            or any(report.get(k) != request[k] for k in ("channel_id", "session_id"))
+            or report.get("stage") != "inspected" or report.get("status") != "indeterminate"
+            or any(k in report for k in ("media_prepared", "media_submitted", "event_cursor", "observation",
+                       "focus_evidence_id", "focus_category", "recovery_from_attempt", "ui_submit_seconds",
+                       "submit_action_seconds", "verification_seconds"))):
+        raise Refused("original first search report differs")
+    inspected = _read_artifact(ui / (tid + "-inspect.result.json"))
+    inspect_job = _read_artifact(ui / (tid + "-inspect.inspect.job.json"))
+    if (inspect_job != {"id": tid + "-inspect", "action": "inspect"}
+            or inspected.get("id") != tid + "-inspect" or inspected.get("action") != "inspect"
+            or inspected.get("ok") is not True):
+        raise Refused("original first search inspect proof differs")
+    window_id, frame = inspect_ok(inspected, config)
+    if any(not math.isfinite(frame[k]) for k in ("x", "y", "width", "height")):
+        raise Refused("original first search frame differs")
+    focused = _read_artifact(ui / (tid + "-focus.result.json"))
+    expected = {"id": tid + "-focus", "action": "focus-group", "targetGroup": config["target_group"],
+                "targetKind": config.get("conversation_kind", "group"), "expectedPID": config["expected_pid"],
+                "expectedWindowID": window_id, "expectedFrame": frame,
+                "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
+    actual_focus = _read_artifact(ui / (tid + "-focus.focus-group.job.json"))
+    if "allowCurrentHeader" in actual_focus:
+        if type(actual_focus["allowCurrentHeader"]) is not bool:
+            raise Refused("original focus opt-in flag differs")
+        expected["allowCurrentHeader"] = actual_focus["allowCurrentHeader"]
+    if (actual_focus != expected
+            or set(focused) != {"id", "ok", "error", "permissions"}
+            or focused.get("id") != tid + "-focus" or focused.get("ok") is not False
+            or focused.get("error") not in (FOCUS_SEARCH_REJECTION_ERROR, FOCUS_POPUP_ABSENT_ERROR)
+            or not _permissions_ok(focused.get("permissions"))
+            or report.get("error") != "focus failed before message preparation: " + helper_reason(focused)
+            or (ui / (tid + "-focus.focus-attempted.json")).stat().st_size != 0):
+        raise Refused("original first search failure is not the approved no-selection case")
+    polls = private_read(ui / (tid + "-focus.focus-polls.json"))
+    if not isinstance(polls, list) or not 2 <= len(polls) <= 128:
+        raise Refused("original first search polls incomplete")
+    last = -1
+    saw_popup = False
+    for poll in polls:
+        if (not isinstance(poll, dict) or set(poll) != {"elapsedMs", "windowCount", "windows", "popupPresent", "popupSelected"}
+                or type(poll["elapsedMs"]) is not int or not last <= poll["elapsedMs"] <= 6500
+                or poll["elapsedMs"] < 0 or poll["popupSelected"] is not False
+                or type(poll["popupPresent"]) is not bool or not isinstance(poll["windows"], list)
+                or type(poll["windowCount"]) is not int
+                or poll["windowCount"] != (2 if poll["popupPresent"] else 1)
+                or len(poll["windows"]) != poll["windowCount"]):
+            raise Refused("original first search selected or changed windows")
+        last = poll["elapsedMs"]
+        if absent_popup and (poll["popupPresent"] or poll["windowCount"] != 1):
+            raise Refused("original absent-popup search has contradictory popup evidence")
+        main = poll["windows"][0]
+        if (main.get("id") != window_id or any(type(main.get(k)) not in (int, float)
+                or not math.isfinite(main[k]) or abs(main[k] - frame[k]) > 3 for k in frame)):
+            raise Refused("original first search main window differs")
+        if poll["popupPresent"]:
+            popup = poll["windows"][1]
+            if (type(popup.get("id")) is not int or popup["id"] <= 0 or popup["id"] == window_id
+                    or any(type(popup.get(k)) not in (int, float) or not math.isfinite(popup[k])
+                           for k in ("x", "y", "width", "height"))
+                    or not 300 <= popup["width"] <= min(500, frame["width"] * .6)
+                    or not 160 <= popup["height"] <= frame["height"]
+                    or not frame["x"] - 5 <= popup["x"] <= frame["x"] + config["search_point"]["x"] + 45
+                    or popup["x"] + popup["width"] > frame["x"] + frame["width"] * .65
+                    or not frame["y"] + config["search_point"]["y"] - 15 <= popup["y"] <= frame["y"] + config["search_point"]["y"] + 90
+                    or popup["y"] + popup["height"] > frame["y"] + frame["height"] + 16):
+                raise Refused("original first search popup differs")
+            saw_popup = True
+    if (not absent_popup and not saw_popup) or last < 5000 or _helper_is_live(tid, deadline):
+        raise Refused("original first search did not end without selection")
+    _guard_helper(config, deadline, clear=False)
+    status(config, deadline)
+    if _rejection_artifact_snapshot(ui, tid, required, {current_name} if persist else set()) != before:
+        raise Refused("original first search evidence changed during proof")
+    proof = {"request_id": request["request_id"], "from_attempt": 1, "attempt_number": 2,
+             "transaction_id": tid, "text_sha256": hashlib.sha256(request["text"].encode()).hexdigest(),
+             "target_name": config["target_name"], "target_kind": config.get("conversation_kind", "group"),
+             "report_stage": "inspected", "report_status": "indeterminate", "result_error": focused["error"],
+             "prior_focus_mode": "first-search-popup-absent" if absent_popup else "first-search-no-selection",
+             "artifact_sha256": {k: v[0] for k, v in before.items()}}
+    if not persist:
+        return proof
+    proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+    path = ui / (tid + ".recovery-proof-to-2.json")
+    private_create(path, proof)
+    return str(path)
+
+
+def focus_recovery_preflight(request, config):
+    """Only the first terminal search-no-selection failure can enter this protocol."""
+    tid = request_ok(request, config, 2)
+    if (request.get("attempt_number") != 2 or request.get("recovery_from_attempt") != 1
+            or request.get("protocol_version") != 1 or request.get("media") is not None
+            or not tid.endswith("-a2")):
+        raise Refused("first search recovery protocol differs")
+    original = tid[:-3]
+    with recovery_sender_lock(config["ui_dir"] / "sender.lock"):
+        _prove_first_search_unsent(request, config, original,
+            _read_artifact(config["ui_dir"] / (original + ".client-result.json")),
+            time.monotonic() + BUDGET, persist=False)
+    return {"protocol_version": 1, "focus_recovery_protocol_version": 1, "unsent_proven": True}
 
 
 def focus_abandon_preflight(request, config):
@@ -1408,8 +1652,18 @@ def title_matches(observed, target):
     # A private contact can itself be named "Alex (2)"; that must not be
     # mistaken for the group/member-count presentation of "Alex".
     return isinstance(observed, str) and re.fullmatch(
-        re.escape(target) + r"(?:\s*\([0-9０-９]+\)|\s*（[0-9０-９]+）)?",
-        observed.strip(), flags=re.IGNORECASE) is not None
+        re.escape("".join(target.split())) + r"(?:\([0-9０-９]+\)|（[0-9０-９]+）)?",
+        "".join(observed.split()), flags=re.IGNORECASE) is not None
+
+
+def visual_title_query(target):
+    # Any whitespace-equivalent title contains the same first nonspace
+    # character. Fetch all such metadata candidates before rejecting collisions.
+    # Querying the full raw name would miss a distinct whitespace variant.
+    compact = "".join(title_query(target).split())
+    if not compact:
+        raise Refused("empty visual target")
+    return compact[0]
 
 
 def title_query(target):
@@ -1432,7 +1686,7 @@ def verify_target(config, deadline):
     kind = config.get("conversation_kind", "group")
     raw = call([config["wx_cli"], "conversations", "find", "--state-dir",
                 config["channel_state_dir"], "--account", binding["account"],
-                "--source", binding["source"], "--name", title_query(name),
+                "--source", binding["source"], "--name", visual_title_query(name),
                 "--all-matches", "--kind", "all"], deadline)
     result = json.loads(raw)
     matches = result.get("matches")
@@ -1666,7 +1920,7 @@ def focus_only(config):
         tid = "focus-" + uuid.uuid4().hex
         inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
         window_id, frame = inspect_ok(inspected, config)
-        command = {"targetGroup": config["target_group"],
+        command = {"targetGroup": config["target_group"], "allowCurrentHeader": True,
                    "targetKind": config.get("conversation_kind", "group"),
                    "expectedPID": config["expected_pid"],
                    "expectedWindowID": window_id, "expectedFrame": frame,
@@ -1674,7 +1928,7 @@ def focus_only(config):
                    "searchPoint": config["search_point"]}
         result = bridge(config, tid, "focus-group", command, deadline, FOCUS_SECONDS)
         focus_proof = focus_result_ok(result, config, tid, window_id, frame)
-        return {"focused": True, "already_selected": False, "source": "search",
+        return {"focused": True, "already_selected": result.get("alreadySelected"), "source": focus_proof["source"],
                 "target_kind": config.get("conversation_kind", "group"), "focus_evidence_id": tid,
                 "category": focus_proof["category"]}
 
@@ -1736,6 +1990,13 @@ def run(request, config):
         try:
             if request.get("recovery_from_attempt") is not None:
                 report["recovery_proof"] = prove_unsent(request, config, attempt_number, deadline)
+                proof = _read_artifact(Path(report["recovery_proof"]))
+                if proof.get("prior_focus_mode") == "prepare-header-before-new-copy":
+                    expected_sha = hashlib.sha256(request["text"].encode()).hexdigest()
+                    if proof.get("recovery_draft_sha256") != expected_sha:
+                        raise Refused("known recovery draft differs from original text")
+                    config = dict(config, expected_draft=request["text"])
+                    report["known_recovery_draft_sha256"] = expected_sha
                 private_update(report_path, report)
             verify_target(config, deadline)
             inspected = bridge(config, tid + "-inspect", "inspect", {}, deadline, 6.0)
@@ -1743,7 +2004,7 @@ def run(request, config):
             report["stage"] = "inspected"
             private_update(report_path, report)
             focus_id = tid + "-focus"
-            focus_command = {"targetGroup": config["target_group"],
+            focus_command = {"targetGroup": config["target_group"], "allowCurrentHeader": True,
                              "targetKind": config.get("conversation_kind", "group"),
                              "expectedPID": config["expected_pid"],
                              "expectedWindowID": window_id, "expectedFrame": frame,
@@ -1870,6 +2131,39 @@ def main(argv=None):
         print(json.dumps({"protocol_version": 1, "recovery_protocol_version": 1,
                           "pre_submit_proof_required": True}, separators=(",", ":")))
         return 0
+    if argv == ["--focus-recovery-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "focus_recovery_protocol_version": 1,
+                          "first_text_before_prepare_only": True}, separators=(",", ":")))
+        return 0
+    if argv == ["--prepare-header-recovery-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "prepare_header_recovery_protocol_version": 1,
+                          "first_text_no_submit_only": True}, separators=(",", ":")))
+        return 0
+    if argv == ["--prepare-header-recovery-preflight"]:
+        result = {"protocol_version": 1, "prepare_header_recovery_protocol_version": 1, "unsent_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:raise Refused("WX_SENDER_CONFIG required")
+            result = prepare_header_recovery_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["unsent_proven"] else 1
+    if argv == ["--focus-recovery-preflight"]:
+        result = {"protocol_version": 1, "focus_recovery_protocol_version": 1, "unsent_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = focus_recovery_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["unsent_proven"] else 1
     recovery_preflight_mode = argv == ["--recovery-preflight"]
     abandon_preflight_mode = argv == ["--abandon-preflight"]
     focus_mode = argv == ["--focus-only"]

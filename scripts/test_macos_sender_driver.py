@@ -312,6 +312,45 @@ class SenderTests(unittest.TestCase):
         self.assertFalse(driver.titles_overlap("Alex", "Alex Team"))
         self.assertEqual(driver.title_query("Alex (2)（３）"), "Alex")
 
+    def test_visual_whitespace_aliases_cannot_bypass_metadata_collision_guard(self):
+        target = "合成AI - AI业务示例"
+        alias = "合成 AI- AI业务示例"
+        self.assertTrue(driver.titles_overlap(target, alias))
+        self.assertFalse(driver.titles_overlap(target, "合成AI－AI业务示例"))
+        self.assertFalse(driver.titles_overlap(target, "合成AI-AI业务示例二"))
+        self.assertEqual(driver.visual_title_query(target), "合")
+        self.assertEqual(driver.visual_title_query("A l e x (2)"), "A")
+        config = dict(self.config, target_name=target, target_group=target, conversation_kind="group",
+                      binding=self.binding, wx_cli="/private/wx-cli", channel_state_dir="/private/state")
+        candidate = {"talker": self.binding["talker"], "name": target, "kind": "group"}
+        for kind in ("group", "private"):
+            with self.subTest(kind=kind), mock.patch.object(driver, "call", return_value=json.dumps({
+                    "match_kind": "partial", "matches": [candidate, dict(candidate, name=alias,
+                    kind=kind, talker="other-identity")]})) as call, self.assertRaises(driver.Refused):
+                driver.verify_target(config, driver.time.monotonic() + 3)
+            argv = call.call_args[0][0]
+            self.assertEqual(argv[argv.index("--name") + 1], "合")
+
+    def test_current_header_proof_requires_two_matching_kind_confirmations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ui=Path(directory);ui.chmod(0o700)
+            frame={"x":0,"y":0,"width":880,"height":640}
+            config={"ui_dir":ui,"target_group":"Synthetic Group","conversation_kind":"group","expected_pid":42}
+            focus='current-header-proof'
+            result={"focused":True,"alreadySelected":True,"source":"current-header","targetKind":"group",
+                    "category":"group-header","focusEvidenceID":focus,"headerConfirmations":2}
+            evidence={"id":focus,"targetGroup":"Synthetic Group","targetKind":"group","expectedPID":42,
+                "expectedWindowID":21,"expectedFrame":frame,"source":"current-header","category":"group-header",
+                "selectedAt":1.0,"headerConfirmations":2}
+            sender_file=ui/(focus+'.focus-evidence.json');driver.private_create(sender_file,evidence)
+            self.assertEqual(driver.focus_result_ok(result,config,focus,21,frame)['source'],'current-header')
+            for mutation in ({"headerConfirmations":1},{"category":"group-chats"},{"source":"search"},
+                             {"alreadySelected":False},{"targetKind":"private"}):
+                with self.subTest(mutation=mutation),self.assertRaises(driver.Uncertain):
+                    driver.focus_result_ok(dict(result,**mutation),config,focus,21,frame)
+            driver.private_update(sender_file,dict(evidence,headerConfirmations=1))
+            with self.assertRaises(driver.Refused):driver.focus_result_ok(result,config,focus,21,frame)
+
     def test_shared_desktop_lock_refuses_other_conversation_before_ui(self):
         with tempfile.TemporaryDirectory() as root:
             ui = Path(root)

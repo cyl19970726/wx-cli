@@ -67,10 +67,13 @@ enum SearchCategory: String, Codable {
     case contacts
     case groupChats = "group-chats"
     case mostUsed = "most-used"
+    case groupHeader = "group-header"
+    case privateHeader = "private-header"
 
     func accepts(_ kind: TargetKind) -> Bool {
         self == .mostUsed || (self == .contacts && kind == .private) ||
-            (self == .groupChats && kind == .group)
+            (self == .groupChats && kind == .group) ||
+            (self == .groupHeader && kind == .group) || (self == .privateHeader && kind == .private)
     }
 }
 
@@ -102,6 +105,18 @@ struct FocusPollDiagnostic: Codable {
 }
 
 enum VisualParameters {
+    static func shouldUseCurrentHeader(_ requested: Bool?) -> Bool { requested == true }
+
+    static func acceptsFocusSource(_ source: String, category: SearchCategory, kind: TargetKind,
+                                   headerConfirmations: Int?) -> Bool {
+        guard category.accepts(kind) else { return false }
+        if source == "search" {
+            return [.contacts, .groupChats, .mostUsed].contains(category) && headerConfirmations == nil
+        }
+        return source == "current-header" && headerConfirmations == 2 &&
+            ((kind == .group && category == .groupHeader) || (kind == .private && category == .privateHeader))
+    }
+
     static func sendButtonCrop(at point: CGPoint, imageWidth: Int, imageHeight: Int) -> CGRect? {
         guard point.x.isFinite, point.y.isFinite else { return nil }
         let crop = CGRect(x: point.x - 34, y: point.y - 17, width: 68, height: 34)
@@ -204,10 +219,10 @@ enum VisualParameters {
     }
 
     // Calibrated against the 880x640 WeChat window. The title sits near y=27;
-    // the message pane starts below y=50 (a sender was observed at y=75).
+    // keep the title band above body text observed at y=49.67034.
     static func headerTitleRect(imageWidth: Int, imageHeight: Int) -> CGRect? {
         guard imageWidth == 880, imageHeight == 640 else { return nil }
-        return CGRect(x: 300, y: 8, width: 420, height: 42)
+        return CGRect(x: 300, y: 8, width: 420, height: 36)
     }
 
     // OCR includes pixels below the title band so crossing text has an observable full box.
@@ -240,18 +255,25 @@ enum VisualParameters {
         return exactHeaderTitle(candidate.text, target: target, kind: kind)
     }
 
+    // Vision may insert or omit whitespace within a rendered title. This is
+    // visual-only: keep all other scalars and frozen transaction identities intact.
+    private static func visualTitleWithoutWhitespace(_ value: String) -> String {
+        String(String.UnicodeScalarView(value.unicodeScalars.filter { !$0.properties.isWhitespace }))
+    }
+
     static func exactHeaderTitle(_ value: String, target: String, kind: TargetKind) -> Bool {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if kind == .private { return trimmed == target }
-        let pattern = "^" + NSRegularExpression.escapedPattern(for: target) +
+        let visualValue = visualTitleWithoutWhitespace(value)
+        let visualTarget = visualTitleWithoutWhitespace(target)
+        if kind == .private { return visualValue.utf8.elementsEqual(visualTarget.utf8) }
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: visualTarget) +
             "(?:\\s*\\([0-9０-９]+\\)|\\s*（[0-9０-９]+）)$"
-        return trimmed.range(of: pattern, options: .regularExpression) != nil
+        return visualValue.range(of: pattern, options: .regularExpression) != nil
     }
 
     static func exactGroupTitle(_ value: String, target: String) -> Bool {
-        let pattern = "^" + NSRegularExpression.escapedPattern(for: target) +
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: visualTitleWithoutWhitespace(target)) +
             "(?:\\s*\\([0-9０-９]+\\)|\\s*（[0-9０-９]+）)?$"
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return visualTitleWithoutWhitespace(value)
             .range(of: pattern, options: .regularExpression) != nil
     }
 

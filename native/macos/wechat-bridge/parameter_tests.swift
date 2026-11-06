@@ -5,6 +5,8 @@ import ImageIO
 
 @main struct ParameterTests {
     static func main() {
+        headerBandCalibrationChecks()
+        visualTitleWhitespaceChecks()
         emptyComposerChecks()
         imageMediaChecks()
         sendButtonContextChecks()
@@ -100,6 +102,23 @@ import ImageIO
                                                            otherText: "你好", otherDraft: "wxx", otherGroup: "其他群"))
         precondition(VisualParameters.exactGroupTitle("  合成测试群（１２） ", target: "合成测试群"))
         precondition(VisualParameters.exactGroupTitle("合成测试群 (12)", target: "合成测试群"))
+        precondition(VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
+            kind: .group, headerConfirmations: 2))
+        precondition(!VisualParameters.shouldUseCurrentHeader(nil))
+        precondition(!VisualParameters.shouldUseCurrentHeader(false))
+        precondition(VisualParameters.shouldUseCurrentHeader(true))
+        precondition(VisualParameters.acceptsFocusSource("current-header", category: .privateHeader,
+            kind: .private, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
+            kind: .private, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("current-header", category: .groupHeader,
+            kind: .group, headerConfirmations: 1))
+        precondition(!VisualParameters.acceptsFocusSource("current-header", category: .mostUsed,
+            kind: .group, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("search", category: .groupHeader,
+            kind: .group, headerConfirmations: 2))
+        precondition(!VisualParameters.acceptsFocusSource("search", category: .groupChats,
+            kind: .group, headerConfirmations: 2))
         precondition(!VisualParameters.exactGroupTitle("合成测试群二", target: "合成测试群"))
         let oneRow = GroupOCRCandidate(text: "合成测试群", x: 180, y: 100)
         let anotherRow = GroupOCRCandidate(text: "其他群", x: 180, y: 150)
@@ -227,7 +246,7 @@ import ImageIO
         let sender = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 320, y: 68, width: 90, height: 15))
         let privateTitle = HeaderOCRCandidate(text: "Synthetic Peer", bounds: CGRect(x: 315, y: 19, width: 100, height: 16))
         precondition(VisualParameters.headerTitleRect(imageWidth: 880, imageHeight: 640) ==
-                     CGRect(x: 300, y: 8, width: 420, height: 42))
+                     CGRect(x: 300, y: 8, width: 420, height: 36))
         precondition(VisualParameters.headerOCRRect(imageWidth: 880, imageHeight: 640) ==
                      CGRect(x: 300, y: 0, width: 420, height: 90))
         precondition(VisualParameters.headerTitleRect(imageWidth: 879, imageHeight: 640) == nil)
@@ -248,7 +267,7 @@ import ImageIO
         precondition(!VisualParameters.uniqueHeaderTitle([privateTitle], target: "Synthetic Peer", kind: .private,
                                                          imageWidth: 880, imageHeight: 639))
         let crossingBoundary = HeaderOCRCandidate(text: "Synthetic Peer",
-            bounds: CGRect(x: 315, y: 43, width: 100, height: 14))
+            bounds: CGRect(x: 315, y: 37, width: 100, height: 14))
         let clippedLeftEdge = HeaderOCRCandidate(text: "Synthetic Peer",
             bounds: CGRect(x: 300, y: 19, width: 100, height: 16))
         let clippedTopEdge = HeaderOCRCandidate(text: "Synthetic Peer",
@@ -264,7 +283,7 @@ import ImageIO
         // Vision normalizes pixel boundaries; conversion back to pixels can
         // turn exact edge contact into a fraction-of-a-millionth overlap.
         let lowerEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
-            bounds: CGRect(x: 570, y: 49.9999998, width: 36, height: 12))
+            bounds: CGRect(x: 570, y: 43.9999998, width: 36, height: 12))
         precondition(VisualParameters.uniqueHeaderTitle([privateTitle, lowerEdgeContact],
             target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
         precondition(VisualParameters.uniqueHeaderTitle([title, lowerEdgeContact],
@@ -272,7 +291,7 @@ import ImageIO
         precondition(!VisualParameters.uniqueHeaderTitle([lowerEdgeContact],
             target: "Unrelated line", kind: .private, imageWidth: 880, imageHeight: 640))
         let realOverlap = HeaderOCRCandidate(text: "Unrelated line",
-            bounds: CGRect(x: 570, y: 49.999, width: 36, height: 12))
+            bounds: CGRect(x: 570, y: 43.999, width: 36, height: 12))
         precondition(!VisualParameters.uniqueHeaderTitle([privateTitle, realOverlap],
             target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
         let sideEdgeContact = HeaderOCRCandidate(text: "Unrelated line",
@@ -330,6 +349,30 @@ import ImageIO
         } catch {}
         precondition(board.string(forType: .string) == "external")
         print("Parameter checks and named-pasteboard restoration checks passed")
+    }
+
+    static func headerBandCalibrationChecks() {
+        // Saved p06 Vision geometry, with synthetic text in place of private identities.
+        let exactTitle = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 314, y: 20, width: 156, height: 18))
+        let bodyRow = HeaderOCRCandidate(text: "Unrelated body row",
+            bounds: CGRect(x: 443.9355, y: 49.67034, width: 100, height: 14.6593))
+        precondition(VisualParameters.uniqueHeaderTitle([exactTitle, bodyRow],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640),
+            "saved p06 title y20..38 plus body y49.67034 must be unambiguous")
+        let crossingRow = HeaderOCRCandidate(text: "Unrelated crossing row",
+            bounds: CGRect(x: 443.9355, y: 43.75, width: 100, height: 14.6593))
+        precondition(!VisualParameters.uniqueHeaderTitle([exactTitle, crossingRow],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let insetTitle = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 303, y: 11, width: 414, height: 30))
+        precondition(VisualParameters.uniqueHeaderTitle([insetTitle],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        let clippedBottom = HeaderOCRCandidate(text: "Synthetic Peer",
+            bounds: CGRect(x: 314, y: 24, width: 156, height: 18))
+        precondition(!VisualParameters.uniqueHeaderTitle([clippedBottom],
+            target: "Synthetic Peer", kind: .private, imageWidth: 880, imageHeight: 640))
+        print("Header band regression: saved p06 body accepted; y43.75 crossing rejected")
     }
 
     static func emptyComposerChecks() {
@@ -580,6 +623,82 @@ import ImageIO
         refused(ImageMedia(path: path.path,
                            sha256: MediaSupport.digest(try! Data(contentsOf: path)),
                            mimeType: "image/png", sizeBytes: 8))
+    }
+
+    static func visualTitleWhitespaceChecks() {
+        let target = "合成AI - AI业务示例"
+        let observed = "合成 AI- AI业务示例"
+        let heading = SearchOCRCandidate(text: "群聊",
+            bounds: CGRect(x: 15, y: 55, width: 60, height: 18))
+        let row = SearchOCRCandidate(text: observed,
+            bounds: CGRect(x: 65, y: 83, width: 230, height: 18))
+        let size = CGSize(width: 320, height: 300)
+        precondition(VisualParameters.exactGroupTitle(observed, target: target),
+            "Visual titles must tolerate only whitespace insertion/deletion")
+        precondition(VisualParameters.exactGroupTitle(target, target: observed))
+        precondition(VisualParameters.uniqueSearchResult([heading, row], target: target,
+            kind: .group, popupSize: size) == SearchSelection(row: row, category: .groupChats))
+        let title = HeaderOCRCandidate(text: observed + " (12)",
+            bounds: CGRect(x: 315, y: 19, width: 280, height: 16))
+        precondition(VisualParameters.uniqueHeaderTitle([title], target: target, kind: .group,
+            imageWidth: 880, imageHeight: 640))
+        let duplicate = SearchOCRCandidate(text: target,
+            bounds: row.bounds.offsetBy(dx: 0, dy: 35))
+        precondition(VisualParameters.uniqueSearchResult([heading, row, duplicate], target: target,
+            kind: .group, popupSize: size) == nil)
+        precondition(!VisualParameters.uniqueHeaderTitle([title, title], target: target, kind: .group,
+            imageWidth: 880, imageHeight: 640))
+        let groupRows = [GroupOCRCandidate(text: observed, x: 180, y: 100),
+                         GroupOCRCandidate(text: target, x: 180, y: 140)]
+        precondition(VisualParameters.uniqueExactGroup(groupRows, target: target, minimumY: 55) == nil)
+        precondition(VisualParameters.uniqueSearchResult([heading, row], target: target,
+            kind: .private, popupSize: size) == nil)
+        for section in ["Contacts", "Search the Web", "Chat history", "Unrecognized section"] {
+            let otherHeading = SearchOCRCandidate(text: section, bounds: heading.bounds)
+            precondition(VisualParameters.uniqueSearchResult([otherHeading, row], target: target,
+                kind: .group, popupSize: size) == nil)
+        }
+        let contactHeading = SearchOCRCandidate(text: "Contacts", bounds: heading.bounds)
+        let groupHeading = SearchOCRCandidate(text: "群聊", bounds: heading.bounds.offsetBy(dx: 0, dy: 75))
+        let groupRow = SearchOCRCandidate(text: target, bounds: row.bounds.offsetBy(dx: 0, dy: 75))
+        for kind in [TargetKind.group, .private] {
+            precondition(VisualParameters.uniqueSearchResult([contactHeading, row, groupHeading, groupRow],
+                target: target, kind: kind, popupSize: size) == nil)
+        }
+        // Cover Unicode White_Space, including nonbreaking and ideographic spaces.
+        for code: UInt32 in [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680,
+                            0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+                            0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000] {
+            let space = String(UnicodeScalar(code)!)
+            let spaced = "合成" + space + "AI-" + space + "AI业务示例"
+            precondition(VisualParameters.exactGroupTitle(spaced, target: target))
+            precondition(VisualParameters.exactGroupTitle(target, target: spaced))
+            precondition(VisualParameters.exactHeaderTitle(spaced + "（１２）", target: target, kind: .group))
+            precondition(VisualParameters.exactHeaderTitle(spaced, target: target, kind: .private))
+        }
+        for altered in ["合成AI – AI业务示例", "合成AI AI业务示例", "合成AI - AI业务示错",
+                        "合成ai - AI业务示例", "合成AI - AI业务示例二", "前合成AI - AI业务示例",
+                        "合成\u{200B}AI - AI业务示例", "合成\u{FEFF}AI - AI业务示例"] {
+            precondition(!VisualParameters.exactGroupTitle(altered, target: target))
+            precondition(!VisualParameters.exactHeaderTitle(altered + " (12)", target: target, kind: .group))
+            precondition(!VisualParameters.exactHeaderTitle(altered, target: target, kind: .private))
+        }
+        precondition(!VisualParameters.exactHeaderTitle(observed, target: target, kind: .group))
+        precondition(VisualParameters.exactHeaderTitle(observed, target: target, kind: .private))
+        for suffix in [" (12)", "（１２）"] {
+            precondition(!VisualParameters.exactHeaderTitle(observed + suffix, target: target, kind: .private))
+            precondition(VisualParameters.exactHeaderTitle(observed + suffix,
+                target: target + suffix, kind: .private))
+            precondition(!VisualParameters.exactHeaderTitle(observed + suffix,
+                target: target + " (13)", kind: .private))
+        }
+        for suffix in [" ()", " (abc)", " [12]", " (12）", " (12) extra", " (12)(3)"] {
+            precondition(!VisualParameters.exactGroupTitle(observed + suffix, target: target))
+            precondition(!VisualParameters.exactHeaderTitle(observed + suffix, target: target, kind: .group))
+        }
+        precondition(!VisualParameters.sameTransactionText(text: "text", draft: "draft", group: target,
+            otherText: "text", otherDraft: "draft", otherGroup: observed))
+        print("Visual title whitespace and identity boundary checks passed")
     }
 
     static func imageCopyReplacementChecks(loaded: LoadedImage, png: Data) {

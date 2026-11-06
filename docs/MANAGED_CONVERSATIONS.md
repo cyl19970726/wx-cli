@@ -175,7 +175,41 @@ wx-cli outbox --state-dir /ABS/private/channel reconcile-image-event \
 
 ## 已知原生拒绝的独立归档合同
 
+### 首次文字搜索未选中结果的受控恢复
+
+原 attempt 1 若在 `inspected` 阶段结束，原生错误精确为 `Search popup had no unique category-eligible exact target within six seconds` 或 `Search popup not enumerated by ScreenCaptureKit within six seconds`，可由维护方在修好目标定位后请求一次同 key 的 attempt 2。前者要求完整 popup 截图及从未选中的 poll，后者要求所有 poll 都是唯一主窗口、无 popup、无选中，并使用它自己的完整终态文件集合；两种证明不混用。它不适用于已点击搜索结果的标题拒绝、一般超时、其他 focus 错误、图片或已进入 prepare/submit 的请求。
+
+```sh
+wx-cli coordinator --state-dir /ABS/private/ui dispatch recover-unsent \
+  --dispatch-id ORIGINAL_DISPATCH_ID --request-id ORIGINAL_REQUEST \
+  --expected-attempt 1 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对完整首次搜索终态、无选中/prepare/submit及修复后的桌面定位'
+```
+
+协调器要求原 dispatch 为 `unknown/indeterminate`、surface 已暂停且空闲、原 owner/epoch 仍 active/authorized。只能调用该 channel 注册的 driver；独立 `--focus-recovery-capabilities` / `--focus-recovery-preflight` 验证原 text、目标类型、PID/窗口、inspect/focus 终态、完整搜索截图、从未选中的有界 poll、无 prepare/submit、无后续 attempt 或存活 helper，并在慢检查后重核文件摘要。当前助手和桌面须另行通过实时预检，不能把旧截图权限当作新签名的授权证明。
+
+Rust 持有共享 executor/sender 锁，在第二次 CAS 后先保存受控恢复 reservation 和审查记录，再以原 immutable intent 新增 attempt 2。原 request/publisher/正文、dispatch、owner/epoch、attempt 1 和原失败文件均保留。新 attempt 仍先 inspect/focus/验证草稿，再允许一次 submit；原生回合或进程未知时不自动重试第三次。恢复结束仍保留 surface 暂停；仅在原结果明确并经正常桌面审查后才能 `review` 后续业务。进程中断保留 reservation，不会重排这个原请求。
+
+视觉标题仅规范 Unicode 空白，其余字符、标点、分类和群成员数要求不放宽。操作前元数据查询覆盖空白等价的所有候选，跨群/私聊重名一并拒绝；存储身份、目标及事务字段保持原字节，不用 OCR 文本替换真实绑定。
+
+连续向同一聊天发件时，支持新证据合同的 sender 用 `allowCurrentHeader=true` 显式选择：原生助手在同 PID/窗口/frame/前台且没有额外弹窗的条件下，两次间隔至少 120 毫秒采集并验证精确标题和类型。省略或为 false 的旧调用方仍走原搜索合同。群标题仍要求成员数，私聊保持独立标题规则。成功保存明确的 `current-header`、`group-header` / `private-header` 与 `headerConfirmations=2` 证据，不伪装为搜索结果分类；两次不匹配则走原完整搜索。prepare/submit 仍核对同一新鲜 focus 引用、目标、类型和草稿，不能凭上一次已发送就省去当前核验。
+
 以下入口用于操作员在完整只读证据下退役**原调度阻塞**。它们不重试、不清空或替换草稿，不把原 outbox/attempt/client report 改为成功、未发送或可重发，也不自动解除暂停。先核对安装版本、原 dispatch ID、原 attempt 1、当前绑定/owner/control 和私有原生文件；源码、合成检查或一次失败归档都不能证明现场已启用修复。
+
+### 首次文字准备阶段的标题边界拒绝
+
+`dispatch recover-prepare-header` 与上述搜索恢复分开准入，仅处理第一次文字 prepare 在 `new-draft-before-click` 停止的精确组合：client 为 `group_focused/indeterminate`、错误为 `target group header mismatch`；原生 prepare 终态错误为 `Fresh chat header is not exact target and kind`，state 仍为 `prepare-attempted`。须有完整 inspect、两次确认的 current-header 群类型证据、原 job/state/正文与十份阶段截图，且没有新草稿后续选择/复制、prepared、submit job/result/marker 或存活 helper。
+
+```sh
+wx-cli coordinator --state-dir /ABS/private/ui dispatch recover-prepare-header \
+  --dispatch-id ORIGINAL_DISPATCH_ID --request-id ORIGINAL_REQUEST \
+  --expected-attempt 1 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对特定 prepare 标题拒绝及全部无 submit 证据，原草稿须逐字匹配'
+```
+
+driver 使用独立的 `--prepare-header-recovery-capabilities` / `--prepare-header-recovery-preflight`；协调器仍持有双锁、固定原身份/owner/epoch、重核冻结意图与证据，在同一原请求保留 attempt 1 并只新增 attempt 2。当前可能留下本请求的草稿：恢复证明只允许在内存中把这一次新 prepare 的 `expectedDraft` 设为原冻结正文；原生须先 Copy 并逐字确认才可替换为同一内容，空稿或用户改稿均拒绝。持久 sender 配置和原文件不改，不能清空未知草稿或换 key。恢复后保留暂停，实际结果明确后另走正常桌面审查。
+
+此案例的标题核验带按 880×640 的现有界面收窄至 y8..44，OCR 外带仍覆盖 y0..90，真正越界、重复标题及正文假冒标题仍拒绝；不通过增大容差忽略与标题区域实际重叠的候选。这个接口不是对其他 prepare 错误或已提交请求的通用重试。
 
 两条命令均由注册 driver 提供独立 capability/preflight，Rust 持有原 `executor.lock` 与 `sender.lock`，核对当前/已结束的原 attempt、规范私有文件、冻结内容和 SHA，并在慢证明后重复核查，以数据库 CAS 结束同一 dispatch。缺失、链接文件、越界/过大文件、身份/正文/媒体/校准冲突、后续 attempt、迟到观察、提交后痕迹或活跃 helper 均拒绝。证明期间只读，不启动 GUI、复制、发送或原生助手。
 

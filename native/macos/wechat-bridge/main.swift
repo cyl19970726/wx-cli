@@ -17,6 +17,7 @@ private struct Command: Decodable {
     let body: String?
     let media: ImageMedia?
     let targetGroup: String?
+    let allowCurrentHeader: Bool?
     let targetKind: TargetKind?
     let focusEvidenceID: String?
     let expectedDraft: String?
@@ -272,6 +273,7 @@ private struct FocusEvidence: Codable {
     let source: String
     let category: SearchCategory
     let selectedAt: Date
+    var headerConfirmations: Int? = nil
 }
 
 private func focusEvidenceURL(_ id: String) -> URL {
@@ -282,8 +284,9 @@ private func requireFocusEvidence(_ state: VisualStage) throws {
     let evidence = try JSONDecoder().decode(FocusEvidence.self,
         from: Data(contentsOf: focusEvidenceURL(state.focusEvidenceID)))
     let age = Date().timeIntervalSince(evidence.selectedAt)
-    guard evidence.id == state.focusEvidenceID, evidence.source == "search",
-          evidence.category.accepts(state.targetKind),
+    guard evidence.id == state.focusEvidenceID,
+          VisualParameters.acceptsFocusSource(evidence.source, category: evidence.category,
+              kind: state.targetKind, headerConfirmations: evidence.headerConfirmations),
           evidence.targetGroup == state.targetGroup, evidence.targetKind == state.targetKind,
           evidence.expectedPID == state.expectedPID,
           evidence.expectedWindowID == state.expectedWindowID,
@@ -738,6 +741,7 @@ private struct FocusInputs {
     let expectedFrame: RectInput
     let listRect: RectInput
     let searchPoint: PointInput
+    let allowCurrentHeader: Bool
 }
 
 private func focusInputs(_ command: Command) throws -> FocusInputs {
@@ -761,7 +765,8 @@ private func focusInputs(_ command: Command) throws -> FocusInputs {
     }
     return FocusInputs(id: command.id, targetGroup: group, targetKind: kind, expectedPID: pid,
                        expectedWindowID: windowID, expectedFrame: frame,
-                       listRect: list, searchPoint: search)
+                       listRect: list, searchPoint: search,
+                       allowCurrentHeader: VisualParameters.shouldUseCurrentHeader(command.allowCurrentHeader))
 }
 
 private func freshFocus(_ input: FocusInputs, step: String,
@@ -999,7 +1004,22 @@ private func focusWindowDiagnostic(_ window: SCWindow) -> FocusWindowDiagnostic 
 private func runFocus(_ command: Command) async throws -> [String: Any] {
     let input = try focusInputs(command)
     try exclusiveMarker(outputDirectory.appendingPathComponent("\(input.id).focus-attempted.json"))
-    _ = try await freshFocus(input, step: "focus-initial", activateTarget: true)
+    let (_, initial, _) = try await freshFocus(input, step: "focus-initial", activateTarget: true)
+    if input.allowCurrentHeader, try await headerContainsTarget(initial, target: input.targetGroup, kind: input.targetKind) {
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let (_, confirmed, _) = try await freshFocus(input, step: "current-header-confirmed")
+        if try await headerContainsTarget(confirmed, target: input.targetGroup, kind: input.targetKind) {
+            let category: SearchCategory = input.targetKind == .group ? .groupHeader : .privateHeader
+            let evidence = FocusEvidence(id: input.id, targetGroup: input.targetGroup,
+                targetKind: input.targetKind, expectedPID: input.expectedPID,
+                expectedWindowID: input.expectedWindowID, expectedFrame: input.expectedFrame,
+                source: "current-header", category: category, selectedAt: Date(), headerConfirmations: 2)
+            try JSONEncoder().encode(evidence).write(to: focusEvidenceURL(input.id), options: .atomic)
+            return ["focused": true, "alreadySelected": true, "source": "current-header",
+                "category": category.rawValue, "targetKind": input.targetKind.rawValue,
+                "focusEvidenceID": input.id, "headerConfirmations": 2]
+        }
+    }
     try await pasteSearch(input)
     let searchStarted = ProcessInfo.processInfo.systemUptime
     var polls: [FocusPollDiagnostic] = []
