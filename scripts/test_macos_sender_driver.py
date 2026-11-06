@@ -5,6 +5,7 @@ import json
 import fcntl
 import hashlib
 import os
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -970,6 +971,28 @@ class SenderTests(unittest.TestCase):
             request = {"channel_id": binding["channel_id"], "session_id": binding["session_id"],
                        "account": binding["account"], "talker": GROUP, "text": text}
             self.assertTrue(driver.matching_event(event, request, "synthetic_self", 0))
+
+            # A real database sender must survive prose containing colon/newline.
+            # This tests decoding, event direction, and the sender's exact-body
+            # verification together, without a GUI action or patched event.
+            from scripts.test_local_channel import TABLE
+            body = "Check these offers:\n\n1. https://example.test/one\n2. https://example.test/two\n\nSetup:\nNetwork and power ✅"
+            with sqlite3.connect(source / "message/message_0.db") as db:
+                db.execute("INSERT INTO Name2Id VALUES (2, 'synthetic_self')")
+                db.execute(f"INSERT INTO [{TABLE}] VALUES (30, 100, 1, 2, 1700000030, ?, NULL, 0)",
+                           (body.encode(),))
+            # The fixture is a generated decrypted source. Supply its known
+            # self identity exactly as the encrypted account resolver would.
+            with sqlite3.connect(state / "channel.sqlite3") as db:
+                db.execute("UPDATE channel_binding SET self_wxid='synthetic_self' WHERE singleton=1")
+            cli("sync")
+            outgoing = cli("events", "--after", "3")[0]
+            self.assertEqual(outgoing["kind"], "message_observed")
+            self.assertEqual(outgoing["direction"], "outgoing")
+            self.assertEqual(outgoing["message"]["sender"], "synthetic_self")
+            self.assertEqual(outgoing["message"]["content"], {"Text": body})
+            request["text"] = body
+            self.assertTrue(driver.matching_event(outgoing, request, "synthetic_self", 3))
 
     def test_bounded_command_output(self):
         with self.assertRaises(driver.Refused):
