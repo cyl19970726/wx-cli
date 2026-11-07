@@ -2984,6 +2984,50 @@ pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Err
     surface_pause(root, Some(reason))?;
     Ok(())
 }
+
+fn nonparticipant_notification(message: &Value) -> Result<bool, Box<dyn Error>> {
+    // wx-db emits these two exact type/content pairs. Neither the sender nor
+    // the notification text can promote a participant message into this class.
+    let msg_type = message["msg_type"]
+        .as_u64()
+        .ok_or_else(|| invalid("source message type is malformed; watermark retained"))?;
+    let content = &message["content"];
+    let notification = match msg_type {
+        10000 => Some("System"),
+        10002 => Some("Revoke"),
+        _ => None,
+    };
+    if let Some(tag) = notification {
+        let valid = content
+            .as_object()
+            .filter(|value| value.len() == 1)
+            .and_then(|value| value.get(tag))
+            .and_then(Value::as_str)
+            .is_some();
+        if !valid {
+            return Err(invalid(
+                "source notification type/content mismatch; watermark retained",
+            ));
+        }
+        Ok(true)
+    } else {
+        // Unit variants such as Voice serialize as strings; only the two
+        // notification tags are prohibited on other message types.
+        if let Some(value) = content.as_object() {
+            if value.contains_key("System") || value.contains_key("Revoke") {
+                return Err(invalid(
+                    "source notification type/content mismatch; watermark retained",
+                ));
+            }
+        }
+        if matches!(content.as_str(), Some("System" | "Revoke")) {
+            return Err(invalid(
+                "source notification type/content mismatch; watermark retained",
+            ));
+        }
+        Ok(false)
+    }
+}
 fn surface_review(root: &Path, reason: &str) -> Result<Value, Box<dyn Error>> {
     if reason.trim().len() < 8 || reason.len() > 512 {
         return Err(invalid("review reason must be 8..512 bytes"));
@@ -3056,14 +3100,22 @@ fn inbox_reconcile(root: &Path, id: &str) -> Result<Value, Box<dyn Error>> {
     let mut batch_refs = Vec::<Value>::new();
     for (cursor, kind, server_id, raw) in events {
         let message: Value = serde_json::from_str(&raw)?;
-        let sender = message["sender"].as_str().unwrap_or("");
+        let sender = message["sender"]
+            .as_str()
+            .ok_or_else(|| invalid("source sender identity is malformed; watermark retained"))?;
+        if nonparticipant_notification(&message)? {
+            // Keep the source event in the authoritative journal. Continuing
+            // preserves a human batch across an intervening notification,
+            // while system-only ranges create no agent delivery or takeover.
+            continue;
+        }
         if sender.is_empty() {
             return Err(invalid(
                 "source sender identity is unresolved; watermark retained",
             ));
         }
         // Unknown direction is withheld rather than routed to an agent.
-        let incoming = !sender.is_empty() && sender != self_id;
+        let incoming = sender != self_id;
         if sender == self_id {
             match outgoing_origin(root, &b, &source, server_id)? {
                 OutgoingOrigin::Pending => {
