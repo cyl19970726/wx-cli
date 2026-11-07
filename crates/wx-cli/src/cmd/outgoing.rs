@@ -127,6 +127,19 @@ pub enum OutgoingAction {
         #[arg(long)]
         reason: String,
     },
+    /// Reconcile one original submitted text with positive late source evidence; never resend.
+    ReconcileTextEvent {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        cursor: i64,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Claim one queued intent and pass it to a local executable exactly once.
     Send {
         #[arg(long)]
@@ -266,6 +279,25 @@ pub fn run(state_dir: &Path, action: OutgoingAction) -> Result<(), Box<dyn Error
             reason,
         } => {
             let result = super::outgoing_observation::reconcile(
+                state_dir,
+                &binding,
+                &mut conn,
+                &request_id,
+                expected_attempt,
+                cursor,
+                expected_epoch,
+                &reason,
+            )?;
+            println!("{}", result);
+        }
+        OutgoingAction::ReconcileTextEvent {
+            request_id,
+            expected_attempt,
+            cursor,
+            expected_epoch,
+            reason,
+        } => {
+            let result = super::outgoing_observation::reconcile_text(
                 state_dir,
                 &binding,
                 &mut conn,

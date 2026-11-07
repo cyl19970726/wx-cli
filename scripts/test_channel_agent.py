@@ -24,7 +24,10 @@ a = sys.argv[1:]
 kind = a[0]
 cmd = a[3]
 def value(flag): return a[a.index(flag)+1]
-def save(): path.write_text(json.dumps(d))
+def save():
+    pending = path.with_name(path.name + '.' + str(os.getpid()) + '.tmp')
+    pending.write_text(json.dumps(d))
+    pending.replace(path)
 before = d.get('fail_before',{}).get(cmd,0)
 if before:
     d['fail_before'][cmd] = before - 1
@@ -80,17 +83,21 @@ import json, os, sys
 from pathlib import Path
 p = Path(os.environ['FAKE_CHANNEL_DATA'])
 d = json.loads(p.read_text()); d['agent_calls'] += 1
-p.write_text(json.dumps(d))
+def save():
+    pending = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp')
+    pending.write_text(json.dumps(d))
+    pending.replace(p)
+save()
 if d.get('agent_fail'): sys.exit(1)
 if d.get('agent_fail_count',0):
-    d['agent_fail_count'] -= 1; p.write_text(json.dumps(d)); sys.exit(1)
+    d['agent_fail_count'] -= 1; save(); sys.exit(1)
 if d.get('agent_sleep'):
     import time
     time.sleep(d['agent_sleep'])
 request = json.load(sys.stdin)
 assert request['version'] == 1
 d['last_request'] = request
-p.write_text(json.dumps(d))
+save()
 print(json.dumps({'text':d.get('agent_text','reply to '+str(request['event']['server_id']))}))
 '''
 
