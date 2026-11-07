@@ -82,6 +82,39 @@ class GatewayTests(unittest.TestCase):
         self.policy.write_text(json.dumps({"version": 1, "applications": {"app_a": self.grant}}))
         self.policy.chmod(0o600)
 
+    def test_complete_observed_reply_is_metadata_only_for_canonical_publisher_key(self):
+        key = "reply-" + CID + "-9"
+        self.shown.update(turn_state="recorded", thread_id="thread1", turn_id="native-turn", session_ref="codex:host:thread1")
+        self.client.status = lambda cid, rid: {"request_id": "app_a." + rid, "status": "ui_observed", "attempt_number": 1}
+        result = self.gateway.handle(self.envelope("complete_observed_reply", {
+            "conversation_id": CID, "delivery_id": 9, "token": "lease1", "request_id": key, "reason": "Exact original reply observed"}))
+        self.assertTrue(result["ok"], result)
+        args, body = self.calls[-1]
+        self.assertEqual(args[:2], ("inbox", "complete-observed-reply"))
+        self.assertIn("app_a." + key, args)
+        self.assertIsNone(body)
+        self.assertEqual(self.client.effects, [])
+
+    def test_complete_observed_reply_refuses_other_key_missing_turn_or_unobserved(self):
+        key = "reply-" + CID + "-9"
+        params = {"conversation_id": CID, "delivery_id": 9, "token": "lease1", "request_id": key, "reason": "Exact original reply observed"}
+        self.assertFalse(self.gateway.handle(self.envelope("complete_observed_reply", params))["ok"])
+        self.shown.update(turn_state="recorded", thread_id="thread1", turn_id="native-turn", session_ref="codex:host:thread1")
+        self.assertFalse(self.gateway.handle(self.envelope("complete_observed_reply", dict(params, request_id="another")))["ok"])
+        result = self.gateway.handle(self.envelope("complete_observed_reply", params))
+        self.assertEqual(result["error"]["code"], "reply_not_observed")
+        self.assertFalse(any(row[0][:2] == ("inbox", "complete-observed-reply") for row in self.calls))
+
+    def test_complete_observed_reply_requires_inbox_and_send_permissions(self):
+        params = {"conversation_id": CID, "delivery_id": 9, "token": "lease1", "request_id": "reply-" + CID + "-9", "reason": "Observed source proof"}
+        for permissions in (["inbox"], ["send"]):
+            self.grant["permissions"] = permissions
+            if "inbox" not in permissions:
+                self.grant["session_bindings"] = {}
+            self.save()
+            result = gateway.Gateway(self.policy).handle(self.envelope("complete_observed_reply", params))
+            self.assertEqual(result["error"]["code"], "permission_denied")
+
     def envelope(self, method, params, app="app_a", token=TOKEN):
         return {"protocol_version": 1, "id": "req-1", "application_id": app,
                 "token": token, "method": method, "params": params}
@@ -216,7 +249,7 @@ class GatewayTests(unittest.TestCase):
         self.policy.chmod(0o644)
         with self.assertRaises(gateway.GatewayError):
             gateway.Gateway(self.policy)
-        script = """import importlib.abc,sys\nclass Block(importlib.abc.MetaPathFinder):\n def find_spec(self,name,path=None,target=None):\n  if name in ('wx_agent.session_adapter','wx_agent.integrations.codex','wx_agent.codex_plugin'): raise AssertionError(name)\nsys.meta_path.insert(0,Block())\nimport wx_agent.gateway\nassert 'wx_agent.session_adapter' not in sys.modules\n"""
+        script = """import importlib.abc,sys\nclass Block(importlib.abc.MetaPathFinder):\n def find_spec(self,name,path=None,target=None):\n  if name in ('wx_agent.session_adapter','wx_agent.integrations.codex','wx_agent.session_routes'): raise AssertionError(name)\nsys.meta_path.insert(0,Block())\nimport wx_agent.gateway\nassert 'wx_agent.session_adapter' not in sys.modules\n"""
         done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
         self.assertEqual(done.returncode, 0, done.stderr)
 

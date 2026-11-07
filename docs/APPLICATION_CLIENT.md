@@ -84,6 +84,8 @@ wx-agent-gateway-client --config /ABS/private/app-client.json result --params-st
 
 当前应用客户端只提供文字通知和原结果查询，不提供图片发布方法或 HTTP 发送服务。图片及配文已在通道共享队列另有实机证据，不能据此推断应用网关有 `send_image` 接口。每个新业务项目仍须核对自身目标和凭据，做一次有界端到端验收；API 成功入队、`ui_observed` 与收件人确认分别记录。网络超时或结果未知时查询原 key，保留原记录，不换 key 重投。
 
+授权订阅的 queue snapshot 回复还使用元数据接口 `complete_observed_reply`：它同时要求 `inbox` 和 `send`、固定原 Session、原 lease/current epoch、规范 publisher 回复 key 及原 attempt 1 的正向出站记录。它只关联原请求并登记 `reply` 决定，不提交消息或执行 GUI。普通 `send/result` 应用不能调用它。完整配置和按需回复规则见[Session 插件](SESSION_PLUGIN.md#对询问我们的新消息按需回复)。
+
 ## 微信宿主持续运行发送执行器
 
 业务应用在自己的 Worker 中生成和提交日报；微信宿主另行运行唯一共享执行器，无需启动模型、收件处理或 Session 插件：

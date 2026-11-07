@@ -23,7 +23,7 @@ CORRELATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
 SCOPES = {"send", "result", "inbox"}
 METHOD_SCOPE = {"send_text": "send", "result": "result", **dict.fromkeys(
     ("binding", "inbox_status", "inbox_show", "inbox_claim", "transport_status", "reserve_turn",
-     "record_turn", "finish_turn", "events", "complete"), "inbox")}
+     "record_turn", "finish_turn", "events", "complete", "complete_observed_reply"), "inbox")}
 PARAMS = {
     "send_text": ({"conversation_id", "request_id", "text"}, set()),
     "result": ({"conversation_id", "request_id"}, set()),
@@ -38,6 +38,7 @@ PARAMS = {
     "events": ({"conversation_id", "delivery_id"}, {"after", "limit"}),
     "complete": ({"conversation_id", "delivery_id", "token", "decision"},
                  {"request_id", "text", "reason", "condition", "due_at"}),
+    "complete_observed_reply": ({"conversation_id", "delivery_id", "token", "request_id", "reason"}, set()),
 }
 
 
@@ -216,7 +217,7 @@ class Gateway:
             raise GatewayError("invalid_config") from exc
         if client.application_id != app_id or cid not in client.conversations:
             raise GatewayError("conversation_out_of_scope")
-        if method == "complete" and params.get("decision") == "reply" and "send" not in grant["permissions"]:
+        if (method == "complete_observed_reply" or method == "complete" and params.get("decision") == "reply") and "send" not in grant["permissions"]:
             raise GatewayError("permission_denied")
         if method == "send_text":
             _fields(params, {"conversation_id", "request_id", "text"})
@@ -284,7 +285,8 @@ class Gateway:
             if type(lease) is not int or not 30 <= lease <= 3600:
                 raise GatewayError("invalid_params")
             value = self._co(client, "inbox", "claim", "--conversation-id", cid, "--owner", binding["owner"],
-                             "--expected-epoch", binding["epoch"], "--lease-seconds", lease)
+                             "--expected-epoch", binding["epoch"], "--lease-seconds", lease,
+                             "--session-ref", pin["session_ref"])
             if value.get("status") == "claimed" and (value.get("conversation_id") != cid
                     or value.get("owner") != binding["owner"] or value.get("epoch") != binding["epoch"]):
                 raise GatewayError("result_unknown")
@@ -304,7 +306,7 @@ class Gateway:
             cursor = events[-1]["cursor"] if events else after
             return {"conversation_id": cid, "delivery_id": shown["delivery_id"],
                     "events": _safe(events), "next_cursor": cursor, "has_more": cursor < shown["cursor_end"]}
-        if method in ("reserve_turn", "complete"):
+        if method in ("reserve_turn", "complete", "complete_observed_reply"):
             token = params.get("token")
             if not isinstance(token, str) or not token or token != shown.get("token"):
                 raise GatewayError("delivery_out_of_scope")
@@ -312,6 +314,22 @@ class Gateway:
             _fields(params, {"conversation_id", "delivery_id", "token"})
             return self._co(client, "inbox", "reserve-turn", "--delivery-id", shown["delivery_id"],
                             "--token", token, "--session-ref", pin["session_ref"])
+        if method == "complete_observed_reply":
+            key = "reply-" + cid + "-" + str(shown["delivery_id"])
+            reason = params["reason"]
+            if (params["request_id"] != key or binding.get("reply_policy") != "authorized"
+                    or shown.get("turn_state") != "recorded" or shown.get("thread_id") != pin["thread_id"]
+                    or not shown.get("turn_id") or not isinstance(reason, str)
+                    or not reason.strip() or len(reason.encode()) > 512 or "\0" in reason):
+                raise GatewayError("invalid_params")
+            existing = client.status(cid, key)
+            if (existing.get("status") not in ("ui_observed", "recipient_confirmed")
+                    or existing.get("attempt_number") != 1
+                    or existing.get("request_id") != client.application_id + "." + key):
+                raise GatewayError("reply_not_observed")
+            return self._co(client, "inbox", "complete-observed-reply", "--delivery-id", shown["delivery_id"],
+                            "--token", token, "--publisher", client.application_id,
+                            "--request-id", existing["request_id"], "--reason", reason)
         if method == "complete":
             _fields(params, {"conversation_id", "delivery_id", "token", "decision"},
                     {"request_id", "text", "reason", "condition", "due_at"})

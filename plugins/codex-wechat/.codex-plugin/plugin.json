@@ -1,7 +1,6 @@
 {
   "name": "codex-wechat",
   "version": "0.1.0",
-  "description": "Project-scoped WeChat channel notifications for an existing Codex Session",
-  "skills": "./.agents/skills/",
-  "hooks": "./hooks/hooks.json"
+  "description": "Project-scoped WeChat queue snapshot guidance for an existing Codex Session",
+  "skills": "./.agents/skills/"
 }

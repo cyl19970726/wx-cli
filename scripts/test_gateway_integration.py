@@ -35,7 +35,7 @@ class GatewayIntegrationTests(unittest.TestCase):
             "import importlib.abc,sys\n"
             "class DenyProvider(importlib.abc.MetaPathFinder):\n"
             " def find_spec(self,name,path=None,target=None):\n"
-            "  if name in ('wx_agent.session_adapter','wx_agent.integrations.codex','wx_agent.codex_plugin'): raise AssertionError(name)\n"
+            "  if name in ('wx_agent.session_adapter','wx_agent.integrations.codex','wx_agent.session_routes'): raise AssertionError(name)\n"
             "sys.meta_path.insert(0,DenyProvider())\n"
             "from wx_agent.gateway import main\nraise SystemExit(main())\n")
         gateway_executable.chmod(0o700)

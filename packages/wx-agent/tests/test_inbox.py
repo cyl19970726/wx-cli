@@ -355,8 +355,10 @@ class RunHealthTests(unittest.TestCase):
         self.collector = self.Collector()
         self.health_states = []
 
-    def run_once(self, status_error=None, lock_error=None, push=None, lock_context=None):
+    def run_once(self, status_error=None, lock_error=None, push=None, lock_context=None, extra_args=()):
         def coordinator(_binary, _root, *args):
+            if args == ("status",):
+                return {"conversations": ["synthetic"]}
             self.assertEqual(args, ("dispatch", "status"))
             if status_error:
                 raise status_error
@@ -381,6 +383,7 @@ class RunHealthTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(inbox.signal, "signal"))
             stack.enter_context(mock.patch.object(inbox.ctl, "atomic_json", side_effect=record_health))
             args = ["--config", str(self.config), "run", "--once", "--seconds", "5"]
+            args += list(extra_args)
             if push is not None:
                 stack.enter_context(mock.patch.object(inbox.ctl, "read_json", return_value={"version": 1, "sessions": {}}))
                 stack.enter_context(mock.patch.object(inbox, "PushLoop", return_value=push))
@@ -402,6 +405,23 @@ class RunHealthTests(unittest.TestCase):
         self.assertEqual(health["cleanup_errors"], [])
         self.assertTrue(self.executor.terminated)
         self.assertEqual(self.health_states, ["running", "stopping", "stopped"])
+
+    def test_scoped_collector_owns_no_executor_and_never_terminates_shared_service(self):
+        self.assertEqual(self.run_once(extra_args=("--collector-only", "--id", "synthetic")), 0)
+        self.popen_mock.assert_not_called()
+        self.assertFalse(self.executor.terminated)
+        self.assertFalse(self.health()["executor_alive"])
+        self.assertTrue(self.health()["collector_only"])
+        self.assertEqual(self.health()["run_state"], "stopped")
+
+    def test_unregistered_collector_scope_refuses_before_process_start(self):
+        self.assertEqual(self.run_once(extra_args=("--collector-only", "--id", "other")), 1)
+        self.popen_mock.assert_not_called()
+        self.assertFalse((self.root / "inbox-health.json").exists())
+
+    def test_collector_only_cannot_also_own_a_managed_session(self):
+        self.assertEqual(self.run_once(extra_args=("--collector-only", "--session-config", str(self.root / "session.json"))), 1)
+        self.popen_mock.assert_not_called()
 
     def test_executor_timeout_keeps_stopping_health_and_reports_incomplete_shutdown(self):
         self.executor.timeout = True
@@ -503,6 +523,32 @@ class RunHealthTests(unittest.TestCase):
         self.assertEqual(health["push"]["active_sessions"], 2)
         self.assertIsInstance(health["push_observed_at"], float)
         self.assertEqual(health["run_state"], "stopped")
+
+
+class ScopedCollectionTests(unittest.TestCase):
+    def test_only_explicit_scope_is_synced(self):
+        calls = []
+        def coordinator(_binary, _root, *args):
+            if args == ("status",):
+                return {"conversations": ["one", "two", "three"]}
+            calls.append(args)
+            if args[:1] == ("status",):
+                return {"channel_state_dir": "/synthetic/" + args[-1]}
+            return {"conversation_id": args[-1], "created": 0}
+        with mock.patch.object(inbox.dispatch, "call", side_effect=coordinator), \
+                mock.patch.object(inbox.runner, "command", return_value='{"events_appended":0}') as command:
+            result = inbox.collect("/bin/false", "/synthetic/ui", conversation_ids=["two"])
+        self.assertEqual([r["conversation_id"] for r in result], ["two"])
+        self.assertEqual(command.call_args.args[0][3], "/synthetic/two")
+        self.assertFalse(any("one" in row or "three" in row for row in calls))
+
+    def test_unknown_or_duplicate_scope_never_reads_a_channel(self):
+        for ids in (["other"], ["two", "two"], []):
+            with mock.patch.object(inbox.dispatch, "call", return_value={"conversations": ["two"]}), \
+                    mock.patch.object(inbox.runner, "command") as command:
+                with self.assertRaises(inbox.dispatch.DispatchError):
+                    inbox.collect("/bin/false", "/synthetic/ui", conversation_ids=ids)
+            command.assert_not_called()
 
 
 if __name__ == "__main__":

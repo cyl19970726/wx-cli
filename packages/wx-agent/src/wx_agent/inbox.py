@@ -23,8 +23,13 @@ def __getattr__(name):
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
-def collect(binary, root, settle_seconds=0):
+def collect(binary, root, settle_seconds=0, conversation_ids=None):
     ids = dispatch.call(binary, root, "status")["conversations"]
+    if conversation_ids is not None:
+        if (not conversation_ids or len(set(conversation_ids)) != len(conversation_ids)
+                or not set(conversation_ids) <= set(ids)):
+            raise dispatch.DispatchError("collector requires explicit registered conversation scope")
+        ids = list(conversation_ids)
 
     def one(cid):
         started=time.monotonic()
@@ -89,6 +94,8 @@ def main(argv=None):
     run.add_argument("--once", action="store_true")
     run.add_argument("--seconds", type=float, default=3600)
     run.add_argument("--interval", type=float, default=2)
+    run.add_argument("--collector-only", action="store_true")
+    run.add_argument("--id", dest="conversation_ids", action="append")
     init = sub.add_parser("provision")
     init.add_argument("--session-config", type=Path, required=True)
     init.add_argument("--owner", required=True)
@@ -130,6 +137,12 @@ def main(argv=None):
         elif args.action == "run":
             if args.interval < 1 or not 0 < args.seconds <= 86400:
                 raise dispatch.DispatchError("use interval >=1 second and duration 1..86400 seconds")
+            if args.collector_only and args.session_config:
+                raise dispatch.DispatchError("collector-only does not own a Session transport")
+            if args.conversation_ids:
+                known = dispatch.call(binary, root, "status")["conversations"]
+                if len(set(args.conversation_ids)) != len(args.conversation_ids) or not set(args.conversation_ids) <= set(known):
+                    raise dispatch.DispatchError("collector requires explicit registered conversation scope")
             runner_lock = dispatch.exclusive(root,"inbox-runner.lock")
             runner_lock_fd = runner_lock.__enter__()
             runner_lock_held = True
@@ -139,11 +152,12 @@ def main(argv=None):
                 stopping.append(True)
             signal.signal(signal.SIGTERM,stop_after_current)
             signal.signal(signal.SIGINT,stop_after_current)
-            fd=os.open(root/"executor.log",os.O_CREAT|os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW,0o600)
-            ctl.private(root/"executor.log")
-            executor_log=os.fdopen(fd,"ab",buffering=0)
-            executor=subprocess.Popen([sys.executable,"-m","wx_agent.cli","dispatch","--config",str(args.config),
-                                       "run","--seconds",str(args.seconds)],stdout=executor_log,stderr=executor_log)
+            if not args.collector_only:
+                fd=os.open(root/"executor.log",os.O_CREAT|os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW,0o600)
+                ctl.private(root/"executor.log")
+                executor_log=os.fdopen(fd,"ab",buffering=0)
+                executor=subprocess.Popen([sys.executable,"-m","wx_agent.cli","dispatch","--config",str(args.config),
+                                           "run","--seconds",str(args.seconds)],stdout=executor_log,stderr=executor_log)
             if args.session_config:
                 sessions = ctl.read_json(args.session_config)
                 if sessions.get("version") != 1:
@@ -154,7 +168,7 @@ def main(argv=None):
                     binary, root, args.config, sessions["sessions"], args.codex)
             stop = time.monotonic() + args.seconds
             collector=ThreadPoolExecutor(max_workers=1)
-            collection=collector.submit(collect,binary,root,1)
+            collection=collector.submit(collect,binary,root,1,args.conversation_ids)
             last_collection=[]
             collected=False
             notified_once=False
@@ -168,8 +182,8 @@ def main(argv=None):
                     collected=True
                     collection=None
                     next_collection=time.monotonic()+args.interval
-                if collection is None and not args.once and time.monotonic()>=next_collection:
-                    collection=collector.submit(collect,binary,root,1)
+                if collection is None and not stopping and not args.once and time.monotonic()>=next_collection:
+                    collection=collector.submit(collect,binary,root,1,args.conversation_ids)
                 value = {"collection": last_collection,"collection_active":collection is not None}
                 if push:
                     value["push"] = push.tick(allow_new=collected and (not notified_once or not args.once))
@@ -177,7 +191,8 @@ def main(argv=None):
                     if collected:
                         notified_once=True
                 value["dispatch"] = dispatch.call(binary,root,"dispatch","status")
-                value["executor_alive"]=executor.poll() is None
+                value["executor_alive"]=executor is not None and executor.poll() is None
+                value["collector_only"]=args.collector_only
                 value["pid"]=os.getpid()
                 value["run_state"]="running"
                 last_health=value

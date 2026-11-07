@@ -20,6 +20,13 @@ use super::channel::load_binding;
 const DB_NAME: &str = "coordinator.sqlite3";
 type DispatchClaimRow = (String, String, String, String, i64, String, Option<i64>);
 type DeliveryCompletionRow = (String, String, i64, String, Option<i64>, Option<String>);
+type DeliveryDecisionDetails = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
 type DeliveryShowRow = (
     String,
     i64,
@@ -300,6 +307,19 @@ impl TurnEnd {
 
 #[derive(Debug, Subcommand)]
 pub enum InboxAction {
+    /// Explicitly grant one current conversation to a deliberately shared Session.
+    AuthorizeSharedSession {
+        #[arg(long)]
+        session_ref: String,
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     Reconcile {
         #[arg(long)]
         conversation_id: String,
@@ -314,6 +334,9 @@ pub enum InboxAction {
         /// Fence a subscriber's original generation before taking its lease.
         #[arg(long)]
         expected_epoch: Option<i64>,
+        /// Pin the intended notification Session before taking its shared slot.
+        #[arg(long)]
+        session_ref: Option<String>,
     },
     Complete {
         #[arg(long)]
@@ -332,6 +355,19 @@ pub enum InboxAction {
         condition: Option<String>,
         #[arg(long)]
         due_at: Option<i64>,
+    },
+    /// Link one canonical already observed publisher reply; never queue or send.
+    CompleteObservedReply {
+        #[arg(long)]
+        delivery_id: i64,
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        publisher: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        reason: String,
     },
     ReserveTurn {
         #[arg(long)]
@@ -537,18 +573,7 @@ fn open(root: &Path, create: bool) -> Result<Connection, Box<dyn Error>> {
         if !columns.iter().any(|x| x == "session_ref") {
             db.execute_batch("ALTER TABLE binding ADD COLUMN session_ref TEXT;")?;
         }
-        db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS dedicated_session_per_conversation ON binding(session_ref) WHERE session_ref IS NOT NULL;")?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS session_scope (
-          session_ref TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,
-          created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-        );
-        INSERT OR IGNORE INTO session_scope(session_ref,conversation_id) SELECT session_ref,conversation_id FROM binding WHERE session_ref IS NOT NULL;
-        CREATE TRIGGER IF NOT EXISTS session_scope_immutable BEFORE UPDATE ON session_scope BEGIN SELECT RAISE(ABORT,'Session conversation scope is immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS session_scope_retained BEFORE DELETE ON session_scope BEGIN SELECT RAISE(ABORT,'Session conversation scope history must be retained'); END;
-        CREATE TRIGGER IF NOT EXISTS dedicated_session_scope AFTER UPDATE OF session_ref ON binding WHEN NEW.session_ref IS NOT NULL BEGIN
-          INSERT OR IGNORE INTO session_scope(session_ref,conversation_id) VALUES(NEW.session_ref,NEW.conversation_id);
-          SELECT CASE WHEN (SELECT conversation_id FROM session_scope WHERE session_ref=NEW.session_ref)<>NEW.conversation_id THEN RAISE(ABORT,'Session belongs to another conversation') END;
-        END;")?;
+        super::shared_session_scope::ensure_schema(&db)?;
     }
     Ok(db)
 }
@@ -2959,6 +2984,50 @@ pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Err
     surface_pause(root, Some(reason))?;
     Ok(())
 }
+
+fn nonparticipant_notification(message: &Value) -> Result<bool, Box<dyn Error>> {
+    // wx-db emits these two exact type/content pairs. Neither the sender nor
+    // the notification text can promote a participant message into this class.
+    let msg_type = message["msg_type"]
+        .as_u64()
+        .ok_or_else(|| invalid("source message type is malformed; watermark retained"))?;
+    let content = &message["content"];
+    let notification = match msg_type {
+        10000 => Some("System"),
+        10002 => Some("Revoke"),
+        _ => None,
+    };
+    if let Some(tag) = notification {
+        let valid = content
+            .as_object()
+            .filter(|value| value.len() == 1)
+            .and_then(|value| value.get(tag))
+            .and_then(Value::as_str)
+            .is_some();
+        if !valid {
+            return Err(invalid(
+                "source notification type/content mismatch; watermark retained",
+            ));
+        }
+        Ok(true)
+    } else {
+        // Unit variants such as Voice serialize as strings; only the two
+        // notification tags are prohibited on other message types.
+        if let Some(value) = content.as_object() {
+            if value.contains_key("System") || value.contains_key("Revoke") {
+                return Err(invalid(
+                    "source notification type/content mismatch; watermark retained",
+                ));
+            }
+        }
+        if matches!(content.as_str(), Some("System" | "Revoke")) {
+            return Err(invalid(
+                "source notification type/content mismatch; watermark retained",
+            ));
+        }
+        Ok(false)
+    }
+}
 fn surface_review(root: &Path, reason: &str) -> Result<Value, Box<dyn Error>> {
     if reason.trim().len() < 8 || reason.len() > 512 {
         return Err(invalid("review reason must be 8..512 bytes"));
@@ -3031,14 +3100,22 @@ fn inbox_reconcile(root: &Path, id: &str) -> Result<Value, Box<dyn Error>> {
     let mut batch_refs = Vec::<Value>::new();
     for (cursor, kind, server_id, raw) in events {
         let message: Value = serde_json::from_str(&raw)?;
-        let sender = message["sender"].as_str().unwrap_or("");
+        let sender = message["sender"]
+            .as_str()
+            .ok_or_else(|| invalid("source sender identity is malformed; watermark retained"))?;
+        if nonparticipant_notification(&message)? {
+            // Keep the source event in the authoritative journal. Continuing
+            // preserves a human batch across an intervening notification,
+            // while system-only ranges create no agent delivery or takeover.
+            continue;
+        }
         if sender.is_empty() {
             return Err(invalid(
                 "source sender identity is unresolved; watermark retained",
             ));
         }
         // Unknown direction is withheld rather than routed to an agent.
-        let incoming = !sender.is_empty() && sender != self_id;
+        let incoming = sender != self_id;
         if sender == self_id {
             match outgoing_origin(root, &b, &source, server_id)? {
                 OutgoingOrigin::Pending => {
@@ -3238,12 +3315,24 @@ fn attachment_refs(db: &Connection, id: i64) -> Result<Value, Box<dyn Error>> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+#[cfg(test)]
 fn inbox_claim(
     root: &Path,
     id: &str,
     owner: &str,
     lease: i64,
     expected_epoch: Option<i64>,
+) -> Result<Value, Box<dyn Error>> {
+    inbox_claim_for_session(root, id, owner, lease, expected_epoch, None)
+}
+
+fn inbox_claim_for_session(
+    root: &Path,
+    id: &str,
+    owner: &str,
+    lease: i64,
+    expected_epoch: Option<i64>,
+    session: Option<&str>,
 ) -> Result<Value, Box<dyn Error>> {
     check_id(owner)?;
     if !(30..=3600).contains(&lease) {
@@ -3259,15 +3348,48 @@ fn inbox_claim(
     {
         return Err(invalid("owner or control state changed"));
     }
-    let row:Option<(i64,i64,i64,String,Option<i64>)>=tx.query_row("SELECT d.id,d.cursor_start,d.cursor_end,d.status,d.lease_until FROM delivery d WHERE d.conversation_id=?1 AND d.owner=?2 AND d.epoch=?3 AND d.turn_state IS NULL AND (d.status='pending' OR (d.status='claimed' AND d.lease_until<=?4)) AND NOT EXISTS (SELECT 1 FROM delivery earlier WHERE earlier.conversation_id=d.conversation_id AND earlier.id<d.id AND earlier.status IN ('pending','claimed')) ORDER BY d.id LIMIT 1",params![id,owner,b.epoch,now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-    let Some((delivery, start, end, _, _)) = row else {
+    if let Some(session) = session {
+        check_id(session)?;
+        if b.session_ref
+            .as_deref()
+            .is_some_and(|saved| saved != session)
+        {
+            return Err(invalid("notification Session binding changed"));
+        }
+        let shared = super::shared_session_scope::allowed(&tx, session, id, &b.owner, b.epoch)?;
+        let dedicated: Option<String> = tx
+            .query_row(
+                "SELECT conversation_id FROM session_scope WHERE session_ref=?1",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if !shared
+            && (super::shared_session_scope::has_history(&tx, session)?
+                || dedicated.as_deref().is_some_and(|old| old != id))
+        {
+            return Err(invalid("shared Session grant is absent or stale"));
+        }
+        let other: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM delivery WHERE session_ref=?1 AND conversation_id<>?2 AND (turn_state IN ('reserved','recorded') OR (status='claimed' AND turn_state IS NULL AND lease_until>?3)))",
+            params![session,id,now()],|r|r.get(0))?;
+        if other {
+            return Ok(json!({"status":"session_busy"}));
+        }
+    }
+    let row:Option<(i64,i64,i64,String,Option<i64>)>=tx.query_row("SELECT d.id,d.cursor_start,d.cursor_end,d.status,d.lease_until FROM delivery d WHERE d.conversation_id=?1 AND d.owner=?2 AND d.epoch=?3 AND d.turn_state IS NULL AND (d.status='pending' OR (d.status='claimed' AND (d.lease_until<=?4 OR (?5 IS NOT NULL AND d.session_ref=?5)))) AND NOT EXISTS (SELECT 1 FROM delivery earlier WHERE earlier.conversation_id=d.conversation_id AND earlier.id<d.id AND earlier.status IN ('pending','claimed')) ORDER BY d.id LIMIT 1",params![id,owner,b.epoch,now(),session],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    let Some((delivery, start, end, status, until)) = row else {
         return Ok(json!({"status":"empty"}));
     };
-    let token = token()?;
-    tx.execute(
-        "UPDATE delivery SET status='claimed',token=?2,lease_until=?3,updated_at=?4 WHERE id=?1",
-        params![delivery, token, now() + lease, now()],
-    )?;
+    let token = if status == "claimed" && until.unwrap_or(0) > now() && session.is_some() {
+        tx.query_row("SELECT token FROM delivery WHERE id=?1", [delivery], |r| {
+            r.get::<_, String>(0)
+        })?
+    } else {
+        let token = token()?;
+        tx.execute("UPDATE delivery SET status='claimed',token=?2,lease_until=?3,updated_at=?4,session_ref=?5 WHERE id=?1",
+            params![delivery, token, now() + lease, now(),session])?;
+        token
+    };
     tx.commit()?;
     let refs = attachment_refs(&db, delivery)?;
     Ok(
@@ -3280,6 +3402,18 @@ fn inbox_complete(
     id: i64,
     token: &str,
     input: DecisionInput<'_>,
+) -> Result<Value, Box<dyn Error>> {
+    inbox_complete_mode(root, id, token, input, None)
+}
+
+/// Observe-only completion is intentionally distinct from the original
+/// unattempted-intent contract, which existing callers continue to use.
+fn inbox_complete_mode(
+    root: &Path,
+    id: i64,
+    token: &str,
+    input: DecisionInput<'_>,
+    observed_publisher: Option<&str>,
 ) -> Result<Value, Box<dyn Error>> {
     let DecisionInput {
         decision,
@@ -3336,7 +3470,9 @@ fn inbox_complete(
         if b.reply_policy != "authorized" {
             return Err(invalid("reply policy does not authorize reply"));
         }
-        if !intent(&b, rid)?.ready_for(&b) {
+        if let Some(publisher) = observed_publisher {
+            observed_reply_intent(&b, &conversation, id, publisher, rid)?;
+        } else if !intent(&b, rid)?.ready_for(&b) {
             return Err(invalid("reply intent does not match owner epoch"));
         }
     }
@@ -3351,6 +3487,44 @@ fn inbox_complete(
     advance_processed(&tx, &conversation)?;
     tx.commit()?;
     Ok(json!({"delivery_id":id,"decision":decision.as_str(),"status":status,"request_id":request}))
+}
+
+fn observed_reply_intent(
+    b: &Binding,
+    conversation: &str,
+    delivery: i64,
+    publisher: &str,
+    request: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut bytes = publisher.bytes();
+    if delivery <= 0
+        || publisher.len() > 40
+        || !bytes.next().is_some_and(|c| c.is_ascii_alphabetic())
+        || !bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        || request != format!("{publisher}.reply-{conversation}-{delivery}")
+    {
+        return Err(invalid(
+            "observed reply requires canonical publisher and delivery key",
+        ));
+    }
+    let path = b.state.join("outgoing.sqlite3");
+    private(&path, false)?;
+    let out = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let matched: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND publisher_id=?4 AND managed_owner=?5 AND managed_epoch=?6 AND content_kind='text' AND length(text)>0 AND attempt_number=1 AND status IN ('ui_observed','recipient_confirmed'))",
+        params![request,b.channel_id,b.session_id,publisher,b.owner,b.epoch], |r|r.get(0))?;
+    let attempts: i64 = out.query_row(
+        "SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?1",
+        [request],
+        |r| r.get(0),
+    )?;
+    let positive: bool = out.query_row("SELECT EXISTS(SELECT 1 FROM outgoing_attempt a WHERE a.request_id=?1 AND a.attempt_number=1 AND a.finished_at IS NOT NULL AND a.finished_at>=a.claimed_at AND (a.status='ui_observed' OR (a.status='indeterminate' AND EXISTS(SELECT 1 FROM outgoing_observation o WHERE o.request_id=a.request_id AND o.attempt_number=1 AND o.channel_id=?2 AND o.session_id=?3))))",
+        params![request,b.channel_id,b.session_id],|r|r.get(0))?;
+    if !matched || attempts != 1 || !positive {
+        return Err(invalid(
+            "original publisher reply is not positively observed for this owner epoch",
+        ));
+    }
+    Ok(())
 }
 
 fn inbox_show(root: &Path, id: i64, owner: &str) -> Result<Value, Box<dyn Error>> {
@@ -3381,13 +3555,13 @@ fn inbox_show(root: &Path, id: i64, owner: &str) -> Result<Value, Box<dyn Error>
         return Err(invalid("delivery owner changed"));
     }
     let refs = attachment_refs(&db, id)?;
-    let saved: (Option<String>, Option<String>, Option<String>, Option<i64>) = db.query_row(
-        "SELECT draft_text,reason,resume_condition,due_at FROM delivery WHERE id=?1",
+    let saved: DeliveryDecisionDetails = db.query_row(
+        "SELECT draft_text,reason,resume_condition,due_at,decision_request_id FROM delivery WHERE id=?1",
         [id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,r.get(4)?)),
     )?;
     Ok(
-        json!({"delivery_id":id,"conversation_id":conversation,"cursor_start":start,"cursor_end":end,"owner":owner,"epoch":epoch,"status":status,"token":token,"transport_token":transport_token,"lease_until":until,"turn_state":turn_state,"session_ref":session_ref,"thread_id":thread_id,"turn_id":turn_id,"attachment_refs":refs,"channel_state_dir":b.state,"draft_text":saved.0,"reason":saved.1,"condition":saved.2,"due_at":saved.3}),
+        json!({"delivery_id":id,"conversation_id":conversation,"cursor_start":start,"cursor_end":end,"owner":owner,"epoch":epoch,"status":status,"token":token,"transport_token":transport_token,"lease_until":until,"turn_state":turn_state,"session_ref":session_ref,"thread_id":thread_id,"turn_id":turn_id,"attachment_refs":refs,"channel_state_dir":b.state,"draft_text":saved.0,"reason":saved.1,"condition":saved.2,"due_at":saved.3,"request_id":saved.4}),
     )
 }
 
@@ -3417,7 +3591,12 @@ fn turn_reserve(root: &Path, id: i64, token: &str, session: &str) -> Result<Valu
             |r| r.get(0),
         )
         .optional()?;
-    if scope.as_deref().is_some_and(|old| old != conversation) {
+    let shared =
+        super::shared_session_scope::allowed(&tx, session, &conversation, &b.owner, b.epoch)?;
+    if !shared
+        && (super::shared_session_scope::has_history(&tx, session)?
+            || scope.as_deref().is_some_and(|old| old != conversation))
+    {
         return Err(invalid(
             "Session conversation scope cannot be reused for another chat",
         ));
@@ -3749,18 +3928,40 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
             } => abandon_unsent(root, dispatch_id, &reason, expected_attempt)?,
         },
         CoordinatorAction::Inbox { action } => match action {
+            InboxAction::AuthorizeSharedSession {
+                session_ref,
+                conversation_id,
+                owner,
+                expected_epoch,
+                reason,
+            } => {
+                check_id(&session_ref)?;
+                check_id(&conversation_id)?;
+                check_id(&owner)?;
+                let mut db = open(root, true)?;
+                super::shared_session_scope::authorize(
+                    &mut db,
+                    &session_ref,
+                    &conversation_id,
+                    &owner,
+                    expected_epoch,
+                    &reason,
+                )?
+            }
             InboxAction::Reconcile { conversation_id } => inbox_reconcile(root, &conversation_id)?,
             InboxAction::Claim {
                 conversation_id,
                 owner,
                 lease_seconds,
                 expected_epoch,
-            } => inbox_claim(
+                session_ref,
+            } => inbox_claim_for_session(
                 root,
                 &conversation_id,
                 &owner,
                 lease_seconds,
                 expected_epoch,
+                session_ref.as_deref(),
             )?,
             InboxAction::Complete {
                 delivery_id,
@@ -3793,6 +3994,26 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                     },
                 )?
             }
+            InboxAction::CompleteObservedReply {
+                delivery_id,
+                token,
+                publisher,
+                request_id,
+                reason,
+            } => inbox_complete_mode(
+                root,
+                delivery_id,
+                &token,
+                DecisionInput {
+                    decision: Decision::Reply,
+                    request: Some(&request_id),
+                    draft: None,
+                    reason: Some(&reason),
+                    condition: None,
+                    due_at: None,
+                },
+                Some(&publisher),
+            )?,
             InboxAction::Resume {
                 delivery_id,
                 owner,

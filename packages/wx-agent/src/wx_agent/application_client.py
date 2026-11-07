@@ -9,6 +9,7 @@ the original key to ``status``, never the returned full ID.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -193,7 +194,8 @@ class ApplicationClient:
             raise ApplicationError("request_scope_drift", full_id)
         state = value.get("status")
         attempt = value.get("attempt_number")
-        if not isinstance(state, str) or type(attempt) is not int or attempt < 0:
+        if not isinstance(state, str) or type(attempt) is not int or attempt < 0 or not isinstance(value.get("text"), str):
             raise ResultUnknown("response_unknown", full_id)
         return {"application_id": self.application_id, "conversation_id": conversation_id,
-                "request_id": full_id, "status": state, "attempt_number": attempt}
+                "request_id": full_id, "status": state, "attempt_number": attempt,
+                "text_sha256": hashlib.sha256(value["text"].encode("utf-8")).hexdigest()}

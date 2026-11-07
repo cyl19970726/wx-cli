@@ -41,6 +41,10 @@ jobs:
           scripts.test_prepared_header_recovery
           scripts.test_image_observation
           scripts.test_text_observation
+          scripts.test_shared_session_scope
+          scripts.test_observed_reply_completion
+          scripts.test_business_reply_integration
+          scripts.test_system_inbox
       - name: Sender contract against compiled CLI events
         env:
           PYTHONPATH: packages/wx-agent/src

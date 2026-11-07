@@ -1,4 +1,4 @@
-"""Native-hook contract exercised against compiled Rust synthetic journals."""
+"""Session routing and transport fences through compiled synthetic Rust."""
 import json
 from pathlib import Path
 import socket
@@ -7,14 +7,14 @@ import subprocess
 import tempfile
 import unittest
 
-from wx_agent.codex_plugin import CodexPlugin, PluginError
+from wx_agent.session_routes import SessionBindings, PluginError
 from scripts.test_local_channel import GROUP, TABLE, fixture
 
 
 BINARY = Path(__file__).resolve().parents[1] / "target/debug/wx-cli"
 
 
-class NativePluginIntegrationTests(unittest.TestCase):
+class SessionRouteIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not BINARY.is_file():
@@ -27,7 +27,7 @@ class NativePluginIntegrationTests(unittest.TestCase):
         self.ui.mkdir(mode=0o700)
         self.source = self.root / "synthetic"; fixture(self.source)
         self.run_cli("channel", self.state, "bind", "--account", "synthetic", "--talker", GROUP,
-                     "--session", "native-hook-fixture", "--source", self.source)
+                     "--session", "session-route-fixture", "--source", self.source)
         with sqlite3.connect(self.state / "channel.sqlite3") as db:
             db.execute("UPDATE channel_binding SET self_wxid='synthetic_self'")
         self.run_cli("channel", self.state, "sync")
@@ -50,10 +50,17 @@ class NativePluginIntegrationTests(unittest.TestCase):
                                          owner="plugin-owner", expected_epoch=1, project=str(self.root), agent_host=socket.gethostname())])
         self.write(config, self.value)
         self.config = config
-        self.terminal = "unknown"
-        self.plugin = CodexPlugin(config, turn_reader=lambda *_: self.terminal)
-        self.event = dict(hook_event_name="UserPromptSubmit", session_id="original-native-session",
-                          cwd=str(self.root), turn_id="original-native-turn")
+        self.routes = SessionBindings(config)
+
+    def reserve_original_turn(self):
+        claim = self.co("inbox", "claim", "--conversation-id", self.cid,
+                        "--owner", "plugin-owner", "--expected-epoch", 1)
+        self.assertTrue(self.routes.reserve(self.routes.routes[0], claim))
+        current = self.delivery()
+        self.co("inbox", "record-turn", "--delivery-id", current["delivery_id"],
+                "--token", current["transport_token"], "--thread-id", "original-native-session",
+                "--turn-id", "synthetic-native-turn")
+        return self.delivery()
 
     @staticmethod
     def write(path, value):
@@ -71,43 +78,40 @@ class NativePluginIntegrationTests(unittest.TestCase):
     def delivery(self):
         return self.co("inbox", "show", "--delivery-id", 1, "--owner", "plugin-owner")
 
-    def test_original_native_callback_business_decision_and_terminal_receipt_are_separate(self):
-        self.co("inbox", "claim", "--conversation-id", self.cid, "--owner", "plugin-owner", "--expected-epoch", 0, success=False)
+    def test_business_decision_and_original_transport_completion_are_separate(self):
+        self.co("inbox", "claim", "--conversation-id", self.cid, "--owner", "plugin-owner",
+                "--expected-epoch", 0, success=False)
         self.assertEqual(self.delivery()["status"], "pending")
-        response = self.plugin.hook(self.event)
-        claim = self.delivery()
-        self.assertEqual((claim["thread_id"], claim["turn_id"], claim["turn_state"]),
-                         ("original-native-session", "original-native-turn", "recorded"))
-        self.assertNotIn(claim["token"], json.dumps(response))
-        self.assertEqual(self.plugin.hook(dict(self.event, hook_event_name="PostToolUse")), {})
-        self.co("inbox", "complete", "--delivery-id", 1, "--token", claim["token"], "--decision", "skip")
+        original = self.reserve_original_turn()
+        self.assertEqual((original["thread_id"], original["turn_id"], original["turn_state"]),
+                         ("original-native-session", "synthetic-native-turn", "recorded"))
+        self.co("inbox", "complete", "--delivery-id", original["delivery_id"],
+                "--token", original["token"], "--decision", "skip")
         self.assertEqual(self.delivery()["turn_state"], "recorded")
-        self.terminal = "completed"
-        self.plugin.reconcile(self.plugin.routes[0])
+        self.co("inbox", "finish-turn", "--delivery-id", original["delivery_id"],
+                "--token", original["transport_token"], "--status", "completed")
         final = self.delivery()
         self.assertEqual((final["status"], final["turn_state"]), ("skipped", "completed"))
         with sqlite3.connect(self.ui / "coordinator.sqlite3") as db:
             self.assertEqual(db.execute("SELECT count(*) FROM delivery").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT count(*) FROM dispatch").fetchone()[0], 0)
 
-    def test_takeover_fences_old_business_but_preserves_original_transport_for_handback(self):
-        self.plugin.hook(self.event)
-        original = self.delivery()
+    def test_takeover_preserves_old_transport_and_fences_current_route(self):
+        original = self.reserve_original_turn()
         self.co("takeover", "--conversation-id", self.cid, "--expected-epoch", 1)
-        self.co("inbox", "complete", "--delivery-id", 1, "--token", original["token"], "--decision", "skip", success=False)
-        self.co("handback", "--conversation-id", self.cid, "--expected-epoch", 2)
-        self.assertEqual(self.plugin.hook(dict(self.event, turn_id="different-turn")), {})
+        with self.assertRaisesRegex(PluginError, "binding_changed"):
+            self.routes.binding(self.routes.routes[0])
+        self.co("inbox", "complete", "--delivery-id", original["delivery_id"],
+                "--token", original["token"], "--decision", "skip", success=False)
         self.assertEqual((self.delivery()["epoch"], self.delivery()["turn_state"]), (1, "recorded"))
-        self.value["bindings"][0]["expected_epoch"] = 3
-        self.write(self.config, self.value)
-        self.terminal = "completed"
-        fresh = CodexPlugin(self.config, turn_reader=lambda *_: self.terminal)
-        fresh.reconcile(fresh.routes[0])
+        self.co("handback", "--conversation-id", self.cid, "--expected-epoch", 2)
+        self.co("inbox", "finish-turn", "--delivery-id", original["delivery_id"],
+                "--token", original["transport_token"], "--status", "completed")
         current = self.delivery()
         self.assertEqual((current["status"], current["epoch"], current["turn_state"]), ("pending", 3, None))
         with sqlite3.connect(self.ui / "coordinator.sqlite3") as db:
             history = db.execute("SELECT thread_id,turn_id,turn_state FROM delivery_turn_history").fetchall()
-        self.assertEqual(history, [("original-native-session", "original-native-turn", "completed")])
+        self.assertEqual(history, [("original-native-session", "synthetic-native-turn", "completed")])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 """The notification runner owns only its loop, lock and derived health."""
 from contextlib import contextmanager
+from contextlib import redirect_stderr
+import io
 import json
 from pathlib import Path
 import select
@@ -27,6 +29,29 @@ class Clock:
 
 
 class PluginRunnerTests(unittest.TestCase):
+    def test_default_cli_selects_queue_snapshot_without_hook_configuration(self):
+        from wx_agent.queued_snapshot import QueuedSnapshotPlugin
+        with mock.patch.object(plugin_runner, "run", return_value=0) as run:
+            self.assertEqual(plugin_runner.main(["--config", "/private/scoped.json"]), 0)
+        self.assertIs(run.call_args.kwargs["plugin_factory"], QueuedSnapshotPlugin)
+
+    def test_removed_adapter_is_rejected_before_starting_a_loop(self):
+        with mock.patch.object(plugin_runner, "run") as run, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                plugin_runner.main(["--config", "/private/scoped.json", "--adapter", "hooks"])
+        self.assertEqual(error.exception.code, 2)
+        run.assert_not_called()
+
+    def test_programmatic_default_uses_queue_snapshot(self):
+        host = mock.Mock()
+        host.notify_once.return_value = {"notifications": []}
+        with mock.patch("wx_agent.queued_snapshot.QueuedSnapshotPlugin", return_value=host) as factory:
+            self.assertEqual(plugin_runner.run(self.config, seconds=1, interval=1,
+                monotonic=lambda: self.clock.now, wall_time=lambda: 1000 + self.clock.now,
+                sleep=self.clock.sleep, install_signals=False), 0)
+        factory.assert_called_once_with(self.config)
+        host.close.assert_not_called()
+
     def test_queue_snapshot_cli_reuses_the_bounded_runner(self):
         from wx_agent.queued_snapshot import QueuedSnapshotPlugin
         with mock.patch.object(plugin_runner, "run", return_value=0) as run:
