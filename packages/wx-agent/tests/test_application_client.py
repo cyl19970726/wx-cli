@@ -1,5 +1,6 @@
 """Application scope and uncertain transport contracts, without a provider or GUI."""
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -89,6 +90,7 @@ class ApplicationClientTests(unittest.TestCase):
         shown = client.status(CID, "notice-001")
         self.assertEqual(shown["request_id"], sent["request_id"])
         self.assertNotIn("text", shown)
+        self.assertEqual(shown["text_sha256"], hashlib.sha256(b"first body").hexdigest())
         self.assertNotIn("result_evidence", shown)
 
     def test_scope_request_and_epoch_drift_refuse_before_send(self):

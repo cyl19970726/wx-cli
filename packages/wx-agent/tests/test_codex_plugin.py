@@ -208,6 +208,25 @@ class PluginTests(unittest.TestCase):
             self.plugin().hook(self.event())
         self.assertEqual(self.inbox.delivery["status"], "pending")
 
+    def test_shared_routes_require_explicit_queue_opt_in_and_same_native_identity(self):
+        original = json.loads(self.config.read_text())
+        second = dict(original["bindings"][0], conversation_id="b" * 32)
+        original["bindings"].append(second)
+        self.config.write_text(json.dumps(original))
+        with self.assertRaisesRegex(PluginError, "ambiguous_binding"):
+            self.plugin()
+        original["allow_shared_session"] = True
+        self.config.write_text(json.dumps(original))
+        with self.assertRaisesRegex(PluginError, "shared_session_requires_queue_transport"):
+            self.plugin()
+        shared = CodexPlugin(self.config, inbox=self.inbox, allow_shared_routes=True)
+        self.assertEqual(len(shared.routes), 2)
+        self.assertEqual(shared.routes[0].session_ref, shared.routes[1].session_ref)
+        second["agent_host"] = "different-host"
+        self.config.write_text(json.dumps(original))
+        with self.assertRaisesRegex(PluginError, "shared_session_identity_changed"):
+            CodexPlugin(self.config, inbox=self.inbox, allow_shared_routes=True)
+
     def test_session_start_only_advertises_pending_without_claim(self):
         event = self.event("SessionStart"); event.pop("turn_id")
         response = self.plugin().hook(event)

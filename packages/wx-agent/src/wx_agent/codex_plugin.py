@@ -169,11 +169,12 @@ def read_terminal_turn(codex, route, turn_id):
 
 
 class CodexPlugin:
-    def __init__(self, config_path, *, inbox=None, turn_reader=None, process_runner=None):
+    def __init__(self, config_path, *, inbox=None, turn_reader=None, process_runner=None,
+                 allow_shared_routes=False):
         self.config_path = canonical(str(config_path))
         value = ctl.read_json(self.config_path)
         required = {"version", "conversation_config", "wx_agent", "codex", "bindings"}
-        if not required <= set(value) or set(value) - required - {"remote", "remote_auth_token_env", "resume_queued", "gateway_config", "gateway_client"} or value["version"] != 1:
+        if not required <= set(value) or set(value) - required - {"remote", "remote_auth_token_env", "resume_queued", "gateway_config", "gateway_client", "allow_shared_session"} or value["version"] != 1:
             raise PluginError("invalid_config")
         self.channel_config = canonical(value["conversation_config"])
         self.wx_agent = canonical(value["wx_agent"], executable=True)
@@ -181,6 +182,9 @@ class CodexPlugin:
         self.remote = value.get("remote")
         self.token_env = value.get("remote_auth_token_env")
         self.resume_queued = value.get("resume_queued", False)
+        shared = value.get("allow_shared_session", False)
+        if type(shared) is not bool or (shared and not allow_shared_routes):
+            raise PluginError("shared_session_requires_queue_transport")
         if type(self.resume_queued) is not bool:
             raise PluginError("invalid_config")
         if self.remote is not None and (not isinstance(self.remote, str) or not self.remote.startswith(("unix://", "wss://", "ws://127.0.0.1:", "ws://localhost:"))):
@@ -200,10 +204,15 @@ class CodexPlugin:
                 raise PluginError("invalid_binding")
             if type(item["expected_epoch"]) is not int or item["expected_epoch"] < 0:
                 raise PluginError("invalid_binding")
-            if item["session_id"] in seen_sessions or item["conversation_id"] in seen_conversations:
+            if (not shared and item["session_id"] in seen_sessions) or item["conversation_id"] in seen_conversations:
                 raise PluginError("ambiguous_binding")
             seen_sessions.add(item["session_id"]); seen_conversations.add(item["conversation_id"])
             self.routes.append(Route(**dict(item, project=canonical(item["project"], directory=True))))
+        if shared:
+            for route in self.routes:
+                peers = [r for r in self.routes if r.session_id == route.session_id]
+                if any(r.project != route.project or r.agent_host != route.agent_host for r in peers):
+                    raise PluginError("shared_session_identity_changed")
         self.gateway_config = None
         self.gateway_client = None
         if ("gateway_config" in value) != ("gateway_client" in value):

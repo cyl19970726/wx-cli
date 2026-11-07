@@ -32,3 +32,4 @@ pub mod outgoing;
 mod outgoing_media;
 mod outgoing_observation;
 mod outgoing_verify;
+mod shared_session_scope;

@@ -18,7 +18,7 @@ from . import wechat_agent_ctl as ctl
 
 
 KNOWN_STATUSES = {"empty", "queued_for_host", "original_transport_pending",
-                  "notification_unknown", "requires_inspection"}
+                  "outgoing_reply_pending", "notification_unknown", "requires_inspection"}
 ATTENTION_STATUSES = {"notification_unknown", "requires_inspection"}
 
 

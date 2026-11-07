@@ -78,7 +78,7 @@ wx-agent-plugin-runner --config /ABS/private/plugin.json --seconds 3600 --interv
 
 ## 只读 Session 的 queue snapshot 模式
 
-有的桌面宿主能向原聊天排队，却不执行项目 Hook；其原 Session 也可能只有本地只读权限。此时由已授权的外层插件通过受限网关读取冻结 delivery，将完整事件分页保存为项目内的私有快照，再通过原生 `thread/queue/add` 通知同一个 Session。通知只有本地读取命令、引用和摘要；没有正文、lease 或凭据。Session 只读快照，并返回 `skip`、`defer` 或 `draft` 的严格 JSON 提案。该模式不支持 `reply`。
+有的桌面宿主能向原聊天排队，却不执行项目 Hook；其原 Session 也可能只有本地只读权限。此时由已授权的外层插件通过受限网关读取冻结 delivery，将完整事件分页保存为项目内的私有快照，再通过原生 `thread/queue/add` 通知同一个 Session。通知只有本地读取命令、引用和摘要；没有正文、lease 或凭据。默认 `observe` 模式只接受 `skip`、`defer` 或 `draft`。下面的授权回复是显式选项；安装插件不会启用它。
 
 启动 App 模式前，须让原聊天在其桌面宿主中正常加载。向未加载宿主排队只表示通知已持久化；本轮实测直到应用加载原聊天后才收到通知。插件不自行创建或独立 resume 该聊天；队列及 Rust reservation 保留，宿主恢复后核对原通知。
 
@@ -109,3 +109,48 @@ wx-agent-plugin-runner --adapter queue-snapshot \
 合法的 `defer` / `draft` 在终结并经 Rust 显式恢复后，沿用原 delivery ID、原 Session，生成新的 transport 引用；每轮的私有 note、快照和提交标记独立保留。升级前的在途 note 只有与当前 Rust transport 的引用精确匹配时才会采用。旧回合不能作为新一轮的收件或决定证明。
 
 排队或业务提交结果未知时保留原 reservation 与意图，停止重发；`reconcile` 核对原回合，并仅在全部证据成立时记录原决定和 transport。如果业务决定已经成功、仅 transport 结束失败，后续核对只补原 transport，不重复提交决定。该模式的合成检查和实际宿主验收也分别记录，不能用前者宣称后者通过。
+
+## 对询问我们的新消息按需回复
+
+先为确切目标及原 Session 配置网关 `inbox`、`send`、`result` 权限，并将该目标设为当前 owner/epoch 的 `push/authorized`。只发通知的应用仍保持原来的 `send/result`，不借用其他项目凭据。queue snapshot 的私有配置可增加：
+
+```json
+{
+  "reply_policy": "authorized",
+  "reply_not_before": 1700000000,
+  "reply_instructions": "只处理明确询问我们且属于当前业务的问题。闲聊跳过；事实不足或需要新的用户决定时延后。",
+  "proposal_mode": "reader-cli"
+}
+```
+
+示例时间为合成值；实际填写本次启用的 UTC 秒。软件只允许引用启用后、冻结范围内的最新入站文字或引用回复；完整历史仍保留供上下文核对，旧消息和本账号出站不能触发回复。Session 还须明确声明 `addressed_to_us=true`，说明理由并引用合格 `source_cursors`。这一步由原业务 Session 判断语义，不因收到一条群消息就必答；引用内容、群消息及附件都不能扩大操作授权。
+
+`reader-cli` 模式让 Session 在读完所有分段后，把语义决定交给本地 `propose --file … --ref …`。CLI 从原快照生成身份和摘要；Session 最终只输出 `WXCLI_PROPOSAL_READY`。外层核对该原回合中成功的规范工具命令、完整 stdout、快照摘要和完成时间。最终标记本身没有发送权，模型不需手抄长摘要。默认 `final-json` 路径及历史在途记录继续兼容。
+
+外层只为有效回复提案提交一次稳定的 `reply-{conversation_id}-{delivery_id}` 业务 key。提交标记先持久化；之后只查同一 key，排队或未知结果不会重发。只有原 attempt 1 已 `ui_observed` 或 `recipient_confirmed`，受限 `complete_observed_reply` 才会登记业务决定；该接口只关联已存在的正向发件记录，不入队、不发送。原生回合终结、业务决定、本地出站和独立收件仍是不同事实。
+
+## 一个原聊天明确接入多个群
+
+默认专属 Session 的单会话隔离不变。只有确需让同一个原聊天处理多个已授权目标时，base config 才设置 `allow_shared_session=true` 并列出这些目标；该选项只用于 queue snapshot，不能拿来启用旧 Hook 路径。每个目标还须分别得到当前 owner/epoch 的显式授权：
+
+```sh
+wx-cli coordinator --state-dir /ABS/private/ui inbox authorize-shared-session \
+  --session-ref codex:synthetic-host:original-thread \
+  --conversation-id CONVERSATION --owner CURRENT_OWNER --expected-epoch EPOCH \
+  --reason '用户明确选择同一原聊天处理这些目标'
+```
+
+各授权按代际留存，旧专属 scope 历史不删除。未授予的第三个目标或失效代际仍被拒绝；同一个实际 Session 引用和原生 thread ID 保持不变。Rust 原子协调同一 Session 的在途处理，通知器先续接在途回合，再处理最早待办，避免两群通知合并或一群持续占用。启用共享绑定期间须使用支持该授权的运行版本；旧可执行文件可能在写入时失败关闭，不能通过删除 scope 或状态回退。
+
+## 分开运行采集、通知与发送
+
+已有共享桌面执行器时，采集器只读取明确列出的会话，不另起执行器或模型宿主：
+
+```sh
+wx-agent inbox --config /ABS/private/conversations.json run --collector-only \
+  --id CONVERSATION_A --id CONVERSATION_B --seconds 3600 --interval 2
+wx-agent-plugin-runner --adapter queue-snapshot \
+  --config /ABS/private/queue-session.json --seconds 3600 --interval 2
+```
+
+第一条运行在微信宿主，第二条运行在原 Session 宿主。正常退出会等待当前采集或 API 周期结束，保留原待办、通知及发件状态。持续运行可由对应宿主的普通服务管理器管理；服务启动不解除业务应用的暂停，也不恢复历史批次。App 原聊天未加载时通知仍只排队，不能据进程存活宣称收件；自动冷唤醒继续单独验收。
