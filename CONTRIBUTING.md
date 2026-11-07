@@ -44,6 +44,6 @@ Upgrade an active deployment explicitly: inspect status/pending, stop cleanly, b
 
 ## Skills and diagrams
 
-The channel operation skill lives at `.agents/skills/wechat-group-agent/`. The optional Codex plugin's canonical skill is `plugins/codex-wechat/.agents/skills/wechat-inbox/`; its explicit project installer copies that bundle into the destination project's `.agents/skills/`. Do not create global links or register global plugins while developing either. The user's private machine-operation skill is separate and is not distributed in this public repository.
+The channel operation skill lives at `.agents/skills/wechat-group-agent/`. The Codex Session bundle's canonical Skill is `plugins/codex-wechat/.agents/skills/wechat-inbox/`; new installs write that Skill and a private record only in the explicit project, without writing `.codex/hooks.json`. The installer actions are `install`, `uninstall`, and `retire-hooks`; legacy retirement may change only unchanged Hook groups owned by its installation record. The legacy `--hooks-project` parser is retirement-only, not an installation option. Preserve project-local Skill governance. Do not create global links or register global plugins. The user's private machine-operation skill is separate and is not distributed in this public repository.
 
 Architecture diagram source and generated HTML are versioned together, with source references pinned to a code commit. Use Archify to regenerate and pass its checks; do not manually edit generated HTML. Tests cannot certify visual design or deployment claims.

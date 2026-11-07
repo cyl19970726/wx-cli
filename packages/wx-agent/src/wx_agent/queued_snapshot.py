@@ -18,7 +18,7 @@ import stat
 import sys
 import time
 
-from .codex_plugin import CodexPlugin, PluginError, canonical
+from .session_routes import SessionBindings, PluginError, canonical
 from .macos_sender_driver import Refused, validate_text
 from .queue_proposal import FINAL_MARKER as PROPOSAL_READY
 from .session_adapter import AppServer
@@ -381,7 +381,7 @@ class QueuedSnapshotPlugin:
             if not all(callable(getattr(queue_proposal, name, None)) for name in
                        ("bind_proposal", "proposal_prefix", "proposal_delimiter", "receipt_from_item")):
                 raise PluginError("proposal_binder_unavailable")
-        self.base = CodexPlugin(canonical(config["base_config"]), inbox=inbox, allow_shared_routes=True)
+        self.base = SessionBindings(canonical(config["base_config"]), inbox=inbox, allow_shared_routes=True)
         self.inbox = self.base.inbox
         # The scoped gateway is the production data/decision boundary. A synthetic
         # inbox may expose the same request interface without opening a transport.

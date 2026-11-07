@@ -23,7 +23,7 @@ flowchart LR
 
 微信系统通知可能没有发送者。只有类型与解析内容严格对应的系统通知或撤回通知，才按非参与者事件处理：日志保留，落在消息批次范围内时仍可作为上下文，但不会单独创建 Agent 待办、触发回复或判作人工发言。普通消息的发送者不明，或系统类型与内容不一致时，采集协调仍停止并保留游标；不能把无法识别的文字当系统通知跳过。
 
-Session 的模型、上下文、工具和忙闲状态由 Agent 宿主拥有。插件可以使用宿主支持的事件回调、消息队列或轮询入口；wx-cli 不规定某一种宿主，也不把 `thread/resume` 当成订阅协议。现有 Codex app-server 适配器是一种可选接入实验。
+Session 的模型、上下文、工具和忙闲状态由 Agent 宿主拥有。本项目级 Session 插件通过 queue-snapshot 通知同一个原 App-held Session；该路径不创建或恢复此 Session。自有宿主连接的 `integrations/codex.py` / `session_adapter.py` 托管适配仍是独立选项，不属于本次 Hook transport 退役。自动冷唤醒尚未实现。
 
 ## 普通应用也能向群发消息
 
@@ -48,7 +48,7 @@ wx-agent dispatch --config /ABS/private/conversations.json status
 | --- | --- | --- |
 | 微信身份与事件 | 核对稳定会话身份，增量采集，持久事件与附件引用 | 仅按获准的会话和事件范围读取 |
 | 订阅 | 保存流游标、持久待办、owner、处理租约和控制代际 | 将订阅映射到确切的本地或远端 Session |
-| 会话唤醒 | 提供可重读的通知/待办数据 | 使用宿主的通知机制；忙时等待，断线后续接 |
+| 会话通知 | 提供可重读的通知/待办数据 | 通过 queue-snapshot 通知原 Session；忙时等待，断线后续接 |
 | 业务处理 | 校验 lease/epoch，保存 skip、defer、draft、reply 及来源 | 组织上下文、调用工具、作出明确决定 |
 | 发送 | 冻结原意图，幂等入队，串行切换目标，保存 attempt 和结果 | 按授权提交意图并查询同一 request ID |
 | 未知与恢复 | 保留原事件、意图、attempt 和待办，拒绝失效写入 | 核对原通知/宿主回执；不换 Session 或请求 ID 绕过 |
@@ -63,7 +63,7 @@ Rust 保存权威消息和业务状态。插件只保存连接、宿主路由及
 
 同一业务原聊天明确处理多个群时，需要逐会话、逐 owner/epoch 的共享 Session 授权；默认专属会话隔离仍保留。通知器按原 Session 续接在途回合、再取最早待办；每个群仍有独立 source、租约、决定和发件记录。授权回复由原 Session 提供语义提案，本地 CLI 生成身份和摘要，外层核对实际原生工具回执，再向原共享队列提交一次意图。启用时刻之前的历史不会自动补答。配置及采集器独立运行方法见[Session 插件](SESSION_PLUGIN.md#对询问我们的新消息按需回复)。
 
-候选已将提供商编排移入 `integrations/codex.py`，`inbox.py` 只在明确选择旧受管适配时惰性加载它，旧 Python 和 CLI 入口继续兼容。项目级 Hook 插件通过原生回调取得实际 Session/turn，`notify` 仅用宿主队列递送元数据，回合终结只读核对历史。拆分的源码与安装包检查覆盖禁用 Codex 导入的采集运行；原专用 native TUI Session 的入站处理已有有界实机闭环，其他宿主场景分别验收。
+提供商编排位于 `integrations/codex.py`，`inbox.py` 仅在明确选择受管适配时惰性加载它。项目级 Session 插件使用 queue-snapshot 通知并核验原 App-held Session 回合；自有宿主的受管连接适配继续独立存在。历史 Hook 测试是日期化验收证据。
 
 ## 现有订阅入口可以独立使用
 
@@ -119,13 +119,13 @@ wx-agent inbox --config /ABS/private/conversations.json events \
 | 共享文字发送及切会话 | 新语料连续 30 条通过，用户确认两目标各 15 条 | 交替目标、每条一次 attempt、源事件及独立收件一致 |
 | 共享图片及配文队列 | 群图片后配文整批实机通过 | 精确源像素、各一次 attempt、用户确认图片和配文顺序 |
 | 现有 Codex 受管适配器 | 支持自行持有的原 thread；原私聊单回合读取四条入站并 skip | 原 Session 引用不变，原生及 Rust transport 完成 |
-| 项目级原 Session 插件 | 原专用 native TUI Hook 与已加载 App 的 queue snapshot 路径各有实证 | 精确回合关联、冻结事件读取、明确决定、原生与 Rust transport 均完成 |
+| 项目级原 Session 插件 | 使用 queue-snapshot 通知原 App-held Session | 一个真实测试群回复有用户收件回执；另外两个业务群由同一原 Session 读取四批旧历史，两群各两批并 `skip`，无 backfill |
 | 应用异机发送 | 两个应用各一次经受限鉴权 SSH 发送，用户独立确认 | 正确目标、内容及换行；越权、无 shell/PTY 探针通过 |
 | 异机只读 inbox API | 不同物理宿主的限定范围读取实测通过 | 正确入站可读、跨会话读取及发送均拒绝 |
 | 异机 Session 插件 | 已加载原 App Session 读取四条积压及三条新入站并 skip | 完整读取及终态核对；通知进程重启保留同一 reservation，未重复通知 |
 | 人工接管隔离 | 真实人工出站仅接管对应群，正常交还通过 | 测试私聊的 owner、epoch、control 不变，旧 outbox 与 Session 引用保留 |
 
-`codex queue` 退出成功仍只表示排队。Hook 模式以原生精确回调核对回合；queue snapshot 模式核对精确 client ID、完整读取、最终提案和带完成时间的原生终态，再分别记录业务决定及 Rust transport。[官方命令文档](https://learn.chatgpt.com/docs/developer-commands)与安装版本 help 只说明命令接口。
+`codex queue` 退出成功仍只表示排队。本项目级插件的 queue-snapshot adapter 核对精确 client ID、完整读取、最终提案和带完成时间的原生终态，再分别记录业务决定及 Rust transport。[官方命令文档](https://learn.chatgpt.com/docs/developer-commands)与安装版本 help 只说明命令接口。
 
 验收继续区分底层订阅、鉴权 API、原 Session 处理和桌面发送；有界实测不代表长期运行或任意宿主均已通过。项目安装、配置及命令见[Session 插件指南](SESSION_PLUGIN.md)。旧图片、文字失败及未尝试批次保留，新成功不覆盖旧历史。
 
@@ -133,7 +133,6 @@ wx-agent inbox --config /ABS/private/conversations.json events \
 
 本轮接受上述已实现、已验证的通道、发送队列、应用接入及 Session 处理路径。App 的 queue snapshot 模式要求原聊天宿主正常加载；未加载时保留待办及通知，宿主恢复后核对原通知。
 
-以下两项保留为后续设计与专项验收，不计入本轮已通过范围：
+以下能力尚未实现，不计入已通过范围：
 
-- 未加载 App 原聊天宿主的自动冷唤醒：后续讨论宿主可用性检测及正常激活接口。
-- 旧 App Hook 回调路径：后续讨论原生事件支持、信任后的实际加载机制及是否保留该接入方式；现有 native TUI Hook 实现与已验证路径保留。
+- 未加载 App 原聊天宿主的自动冷唤醒尚未实现，需另行确定宿主可用性检测及正常激活接口。

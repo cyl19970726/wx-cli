@@ -6,7 +6,7 @@ reader, and no function here loads a gateway, writes state, or sends a message.
 import hashlib
 import shlex
 
-from .codex_plugin import PluginError
+from .session_routes import PluginError
 from .macos_sender_driver import Refused, validate_text
 
 FINAL_MARKER = "WXCLI_PROPOSAL_READY"

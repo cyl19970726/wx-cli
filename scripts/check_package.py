@@ -21,6 +21,8 @@ def check_wheel_members(wheel):
     bad = [name for name in names if any(piece in name for piece in forbidden)]
     if bad:
         raise ValueError("wheel contains unexpected private/test material: " + ", ".join(bad))
+    if "wx_agent/codex_plugin.py" in names:
+        raise ValueError("wheel still contains the retired Hook handler")
 
 
 def check_install(wheel, tests=None):
@@ -41,11 +43,14 @@ def check_install(wheel, tests=None):
                        cwd=root, env=clean_env, check=True)
         subprocess.run([str(command), "--help"], cwd=root, env=clean_env, check=True,
                        stdout=subprocess.PIPE, text=True)
-        for name in ("wx-agent-plugin", "wx-agent-queue-session", "wx-agent-plugin-runner", "wx-agent-plugin-install",
+        for name in ("wx-agent-queue-session", "wx-agent-plugin-runner", "wx-agent-plugin-install",
                      "wx-agent-gateway", "wx-agent-gateway-client"):
             entry = bin_dir / (name + ".exe" if os.name == "nt" else name)
             subprocess.run([str(entry), "--help"], cwd=root, env=clean_env, check=True,
                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True)
+        retired = bin_dir / ("wx-agent-plugin.exe" if os.name == "nt" else "wx-agent-plugin")
+        if retired.exists():
+            raise ValueError("retired Hook entrypoint is still installed")
         result = subprocess.run(
             [str(python), "-c", "import wx_agent; print(wx_agent.__file__)"],
             cwd=root, env=clean_env, check=True, capture_output=True, text=True,

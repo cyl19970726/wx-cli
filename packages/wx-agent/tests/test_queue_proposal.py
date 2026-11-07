@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from wx_agent.codex_plugin import PluginError
+from wx_agent.session_routes import PluginError
 from wx_agent.queued_snapshot import encoded, publish
 from wx_agent.queue_proposal import (bind_proposal, parse_proposal_script, proposal_delimiter,
                                      proposal_prefix, receipt_from_item)

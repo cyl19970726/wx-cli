@@ -13,7 +13,6 @@ import sys
 import threading
 import time
 
-from .codex_plugin import CodexPlugin
 from . import wechat_agent_ctl as ctl
 
 
@@ -68,12 +67,15 @@ def _summary(value):
     return {"total": len(value["notifications"]), "statuses": counts}
 
 
-def run(config_path, *, seconds=3600, interval=2, plugin_factory=CodexPlugin,
+def run(config_path, *, seconds=3600, interval=2, plugin_factory=None,
         monotonic=time.monotonic, wall_time=time.time, sleep=None,
         install_signals=True):
     if (type(seconds) is not int or not 1 <= seconds <= 86400
             or type(interval) not in (int, float) or not math.isfinite(interval) or interval < 1):
         raise PluginRunnerError("invalid_duration")
+    if plugin_factory is None:
+        from .queued_snapshot import QueuedSnapshotPlugin
+        plugin_factory = QueuedSnapshotPlugin
     runtime = _runtime_dir(Path(config_path))
     with _exclusive(runtime):
         stop_requested = threading.Event()
@@ -150,13 +152,11 @@ def main(argv=None):
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--seconds", type=int, default=3600)
     parser.add_argument("--interval", type=float, default=2)
-    parser.add_argument("--adapter", choices=("hooks", "queue-snapshot"), default="hooks")
+    parser.add_argument("--adapter", choices=("queue-snapshot",), default="queue-snapshot")
     args = parser.parse_args(argv)
     try:
-        factory = CodexPlugin
-        if args.adapter == "queue-snapshot":
-            from .queued_snapshot import QueuedSnapshotPlugin
-            factory = QueuedSnapshotPlugin
+        from .queued_snapshot import QueuedSnapshotPlugin
+        factory = QueuedSnapshotPlugin
         return run(args.config, seconds=args.seconds, interval=args.interval, plugin_factory=factory)
     except Exception as exc:
         print("plugin runner: " + type(exc).__name__, file=sys.stderr)

@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from wx_agent.codex_plugin import PluginError
+from wx_agent.session_routes import PluginError
 from wx_agent.queued_snapshot import (QueuedSnapshotPlugin, QueueNative, encoded, main,
                                      publish, read_private, reader_command, snapshot_chunk,
                                      snapshot_payload)
@@ -656,7 +656,7 @@ class QueuedSnapshotTests(unittest.TestCase):
         self.assertEqual(len(self.completes()), 1)
         self.assertEqual(self.inbox.delivery["status"], "claimed")
 
-    def test_hook_reservation_not_adopted(self):
+    def test_legacy_reservation_without_queue_snapshot_is_not_adopted(self):
         self.inbox.delivery.update(turn_state="reserved", status="claimed", session_ref=self.plugin.routes[0].session_ref)
         self.plugin.notify_once()
         self.assertFalse(self.native.queue)
@@ -677,7 +677,7 @@ class QueuedSnapshotTests(unittest.TestCase):
 
     def test_snapshot_cli_never_opens_base_config(self):
         self.prepare()
-        with patch("wx_agent.queued_snapshot.CodexPlugin", side_effect=AssertionError("credentials accessed")), patch("sys.stdout", new_callable=io.StringIO) as out:
+        with patch("wx_agent.queued_snapshot.SessionBindings", side_effect=AssertionError("credentials accessed")), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(main(["snapshot", "--file", self.note["snapshot_file"], "--ref", self.note["ref"], "--offset", "0"]), 0)
             chunk = json.loads(out.getvalue())
             self.assertTrue(chunk["has_more"])

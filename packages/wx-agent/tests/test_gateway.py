@@ -249,7 +249,7 @@ class GatewayTests(unittest.TestCase):
         self.policy.chmod(0o644)
         with self.assertRaises(gateway.GatewayError):
             gateway.Gateway(self.policy)
-        script = """import importlib.abc,sys\nclass Block(importlib.abc.MetaPathFinder):\n def find_spec(self,name,path=None,target=None):\n  if name in ('wx_agent.session_adapter','wx_agent.integrations.codex','wx_agent.codex_plugin'): raise AssertionError(name)\nsys.meta_path.insert(0,Block())\nimport wx_agent.gateway\nassert 'wx_agent.session_adapter' not in sys.modules\n"""
+        script = """import importlib.abc,sys\nclass Block(importlib.abc.MetaPathFinder):\n def find_spec(self,name,path=None,target=None):\n  if name in ('wx_agent.session_adapter','wx_agent.integrations.codex','wx_agent.session_routes'): raise AssertionError(name)\nsys.meta_path.insert(0,Block())\nimport wx_agent.gateway\nassert 'wx_agent.session_adapter' not in sys.modules\n"""
         done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
         self.assertEqual(done.returncode, 0, done.stderr)
 
