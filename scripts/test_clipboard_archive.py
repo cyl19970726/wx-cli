@@ -123,13 +123,87 @@ print(json.dumps(result))
         self.assertEqual(self.archive()["result"], "clipboard_prepare_rejected")
         self.unchanged()
 
+    def test_exact_copy_mismatch_before_empty_check_archives_only_original_dispatch(self):
+        self.write_artifact(".client-result.json",
+                            dict(self.report, error="composer draft mismatch"))
+        self.write_artifact(".prepare-visual.result.json", {
+            "id": self.tid, "ok": False,
+            "error": "Copied composer text does not exactly match expected draft",
+            "permissions": {"accessibility": True, "postEvents": True, "screenRecording": True},
+        })
+        (self.ui / (self.tid + ".old-draft-empty-check.png")).unlink()
+        result = self.archive()
+        self.assertEqual((result["status"], result["result"], result["outbox_status"]),
+                         ("done", "clipboard_prepare_rejected", "indeterminate"))
+        self.assertEqual(self.calls(), ["--clipboard-archive-capabilities",
+                                        "--clipboard-archive-preflight"])
+        self.unchanged()
+        self.assertFalse((self.root / "unexpected-send").exists())
+
+    def test_copy_mismatch_near_errors_and_missing_copy_trace_refuse(self):
+        copy_error = "Copied composer text does not exactly match expected draft"
+        self.write_artifact(".client-result.json",
+                            dict(self.report, error="composer draft mismatch"))
+        for error in (copy_error + " ", copy_error.replace("exactly", "roughly"),
+                      copy_error.lower()):
+            with self.subTest(error=error):
+                self.write_artifact(".prepare-visual.result.json", {
+                    "id": self.tid, "ok": False, "error": error,
+                    "permissions": {"accessibility": True, "postEvents": True,
+                                    "screenRecording": True},
+                })
+                self.archive(okay=False)
+                self.assertEqual(self.calls(), [])
+        self.write_artifact(".prepare-visual.result.json", {
+            "id": self.tid, "ok": False, "error": copy_error,
+            "permissions": {"accessibility": True, "postEvents": True,
+                            "screenRecording": True},
+        })
+        (self.ui / (self.tid + ".old-draft-empty-check.png")).unlink()
+        self.write_artifact(".prepare-visual.job.json", dict(self.job, expectedDraft="\n\n\n"))
+        self.archive(okay=False)
+        self.assertEqual(self.calls(), [])
+        self.write_artifact(".prepare-visual.job.json", self.job)
+        for suffix in (".old-draft-before-copy.png", ".old-draft-copy-ready.png"):
+            with self.subTest(missing=suffix):
+                path = self.ui / (self.tid + suffix)
+                data = path.read_bytes()
+                path.unlink()
+                self.archive(okay=False)
+                self.assertEqual(self.calls(), [])
+                path.write_bytes(data)
+                path.chmod(0o600)
+        for suffix in (".old-draft-empty-check-1.png", ".old-draft-empty-check-2.png"):
+            with self.subTest(orphan=suffix):
+                path = self.ui / (self.tid + suffix)
+                path.write_bytes(fixtures.PNG)
+                path.chmod(0o600)
+                self.archive(okay=False)
+                self.assertEqual(self.calls(), [])
+                path.unlink()
+        for suffix in (".replace-draft-before-paste.png", ".submit-attempted.json",
+                       "-a2.client-result.json"):
+            with self.subTest(later=suffix):
+                path = self.ui / (self.tid + suffix)
+                path.write_bytes(b"{}")
+                path.chmod(0o600)
+                self.archive(okay=False)
+                self.assertEqual(self.calls(), [])
+                path.unlink()
+        self.unchanged()
+
+    def test_original_clipboard_change_still_requires_first_empty_check(self):
+        (self.ui / (self.tid + ".old-draft-empty-check.png")).unlink()
+        self.archive(okay=False)
+        self.assertEqual(self.calls(), [])
+        self.unchanged()
+
     def test_wrong_error_and_later_artifacts_refuse_before_driver(self):
         native = self.ui / (self.tid + ".prepare-visual.result.json")
         original = native.read_bytes()
-        for error in ("other clipboard failure", "Copied composer text does not exactly match expected draft"):
+        for error in ("other clipboard failure",):
             with self.subTest(error=error):
-                self.write_artifact(".client-result.json", dict(self.report,
-                    error="composer draft mismatch" if error.startswith("Copied") else "clipboard state changed"))
+                self.write_artifact(".client-result.json", self.report)
                 self.write_artifact(".prepare-visual.result.json", {
                     "id": self.tid, "ok": False, "error": error,
                     "permissions": {"accessibility": True, "postEvents": True, "screenRecording": True}})

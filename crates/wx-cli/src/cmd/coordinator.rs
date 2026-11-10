@@ -2590,6 +2590,8 @@ const TEXT_BUTTON_REJECTION_ERROR: &str =
     "Expected exactly one visible Send label in lower conversation pane";
 
 const CLIPBOARD_EMPTY_REJECTION_ERROR: &str = "Clipboard changed during empty draft verification";
+const COMPOSER_COPY_ARCHIVE_ERROR: &str =
+    "Copied composer text does not exactly match expected draft";
 
 // Only artifacts that can precede the first prepare paste are admissible. In
 // particular, a submit marker or any later draft screenshot invalidates proof.
@@ -2597,6 +2599,7 @@ fn clipboard_rejection_snapshot(
     root: &Path,
     tid: &str,
     prepare_job: &Value,
+    native_error: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
     let required = [
         ".client-result.json",
@@ -2613,7 +2616,6 @@ fn clipboard_rejection_snapshot(
         ".old-draft-before-select.png",
         ".old-draft-before-copy.png",
         ".old-draft-copy-ready.png",
-        ".old-draft-empty-check.png",
     ];
     let focus = [
         "focus-attempted.json",
@@ -2641,6 +2643,7 @@ fn clipboard_rejection_snapshot(
         allowed.insert(format!("{tid}-focus.{suffix}"));
     }
     for suffix in [
+        ".old-draft-empty-check.png",
         ".old-draft-empty-check-1.png",
         ".old-draft-empty-check-2.png",
     ] {
@@ -2685,6 +2688,22 @@ fn clipboard_rejection_snapshot(
         .any(|suffix| !snapshot.contains_key(&format!("{tid}{suffix}")))
     {
         return Err(invalid("incomplete first clipboard rejection trace"));
+    }
+    let empty_checks = [
+        ".old-draft-empty-check.png",
+        ".old-draft-empty-check-1.png",
+        ".old-draft-empty-check-2.png",
+    ];
+    let present = empty_checks.map(|suffix| snapshot.contains_key(&format!("{tid}{suffix}")));
+    if (native_error == CLIPBOARD_EMPTY_REJECTION_ERROR && !present[0])
+        || (native_error != CLIPBOARD_EMPTY_REJECTION_ERROR
+            && native_error != COMPOSER_COPY_ARCHIVE_ERROR)
+        || (present[1] && !present[0])
+        || (present[2] && !present[1])
+    {
+        return Err(invalid(
+            "incomplete or nonsequential clipboard rejection checks",
+        ));
     }
     // Pin historical private references from the frozen job itself. A future
     // calibration may update current sender config, never this old proof.
@@ -3265,16 +3284,25 @@ fn archive_clipboard_rejection(
         )?)?)
     };
     let job = read_json(".prepare-visual.job.json")?;
-    let before = clipboard_rejection_snapshot(root, &tid, &job)?;
-    let report = read_json(".client-result.json")?;
     let native = read_json(".prepare-visual.result.json")?;
-    let state = read_json(".visual-state.json")?;
     let native_error = native["error"].as_str();
-    if native_error != Some(CLIPBOARD_EMPTY_REJECTION_ERROR) {
+    if !matches!(
+        native_error,
+        Some(CLIPBOARD_EMPTY_REJECTION_ERROR | COMPOSER_COPY_ARCHIVE_ERROR)
+    ) {
         return Err(invalid(
-            "native result is not the exact empty-draft clipboard rejection",
+            "native result is not an exact before-paste clipboard rejection",
         ));
     }
+    let native_error = native_error.unwrap();
+    let before = clipboard_rejection_snapshot(root, &tid, &job, native_error)?;
+    if read_json(".prepare-visual.result.json")? != native {
+        return Err(invalid(
+            "native clipboard rejection changed during snapshot",
+        ));
+    }
+    let report = read_json(".client-result.json")?;
+    let state = read_json(".visual-state.json")?;
     if report["id"] != tid
         || report["request_id"] != request
         || report["channel_id"] != b.channel_id
@@ -3299,7 +3327,7 @@ fn archive_clipboard_rejection(
         .iter()
         .any(|key| report.get(*key).is_some())
         || native
-            != json!({"id":tid,"ok":false,"error":native_error.unwrap(),
+            != json!({"id":tid,"ok":false,"error":native_error,
             "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
         || job["id"] != tid
         || job["action"] != "prepare-visual"
@@ -3366,7 +3394,7 @@ fn archive_clipboard_rejection(
         Duration::from_secs(25),
         locks[1].as_raw_fd(),
     )?;
-    if clipboard_rejection_snapshot(root, &tid, &job)? != before {
+    if clipboard_rejection_snapshot(root, &tid, &job, native_error)? != before {
         return Err(invalid(
             "clipboard rejection artifacts changed during proof",
         ));

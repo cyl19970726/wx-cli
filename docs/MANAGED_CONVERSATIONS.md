@@ -74,9 +74,11 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 空框的光标亮灭可以使用分别确认过的完整参考图；整块像素仍须精确匹配。不要仅从一次失败就把所有差异当成光标或关闭剪贴板保护。`Clipboard changed during empty draft verification` 证明检查窗口内的剪贴板发生变化，不证明是哪一个进程写入，也不授予再次发送权。
 
+看似空白的输入框也可能保留空格、制表符或换行。这些字符属于草稿；空框截图不能证明文本为空，也不能把复制结果 `strip()` 后当作空白。先核对对应目标的原生复制证据与截图；需要替换已知草稿时，在空闲执行器及共享锁下给该目标的私有模板和 driver 配置相同的精确 `expected_draft`，让原生再次复制并逐字核对后才粘贴。不得清除未知草稿或在失败请求上自动再试。一次性已知草稿被成功替换后，暂停并核对结果，再把未来请求的预期恢复为空；保留旧配置与原 attempt。新空框参考只能来自实际确认没有草稿的画面，不能把选中的空白字符截成“空框参考”。
+
 ### 归档一次空框剪贴板拒绝
 
-若原文字 attempt 1 精确停在 `Clipboard changed during empty draft verification`，可显式归档其调度阻塞：
+若原文字 attempt 1 精确停在 `Clipboard changed during empty draft verification` 或 `Copied composer text does not exactly match expected draft`，且原冻结 `expectedDraft` 为空，可显式归档其调度阻塞：
 
 ```sh
 wx-agent dispatch --config /ABS/private/conversations.json archive-clipboard-rejection \
@@ -84,7 +86,7 @@ wx-agent dispatch --config /ABS/private/conversations.json archive-clipboard-rej
   --reason '已核对完整原生轨迹，首次空框检查拒绝且无粘贴或提交'
 ```
 
-此入口核对原请求、正文、当前 owner/epoch、完整 inspect/focus/prepare-attempted 轨迹、历史参考摘要及助手退出，并在双锁内重验产物未变。出现粘贴、新草稿、submit、后续 attempt 或晚到出站证据时拒绝。结果仅把原 dispatch 记为 `done/clipboard_prepare_rejected`；原 outbox 与 attempt 保持 `indeterminate`，不重发、不开新 attempt、不解除全局暂停，也不把它当作成功的 batch 前件。另一个已获授权、尚未尝试的独立请求可在正常调度条件满足后继续；不能通过换 ID 重放原意图。
+此入口核对原请求、正文、当前 owner/epoch、完整 inspect/focus/prepare-attempted 与点击、选择、复制前轨迹、历史参考摘要及助手退出，并在双锁内重验产物未变。剪贴板变化错误仍要求首张 empty-check；精确复制不匹配可能在进入视觉空框分支前就拒绝，因此允许没有 empty-check，但已有检查必须连续。出现粘贴、新草稿、submit、后续 attempt 或晚到出站证据时拒绝。结果仅把原 dispatch 记为 `done/clipboard_prepare_rejected`；原 outbox 与 attempt 保持 `indeterminate`，不重发、不开新 attempt、不解除全局暂停，也不把它当作成功的 batch 前件。另一个已获授权、尚未尝试的独立请求可在正常调度条件满足后继续；不能通过换 ID 重放原意图。
 
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 

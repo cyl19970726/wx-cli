@@ -309,6 +309,14 @@ import ImageIO
         precondition(!VisualParameters.copyIsExpected(expected: "a b", sentinel: token,
                                                       beforeCount: 10, afterCount: 11,
                                                       clipboardText: "ab", visualBlank: false))
+        precondition(!VisualParameters.copyIsExpected(expected: "", sentinel: token,
+            beforeCount: 10, afterCount: 11, clipboardText: "\n\n\n", visualBlank: true),
+            "A visually blank newline draft must not be treated as an empty composer")
+        precondition(VisualParameters.copyIsExpected(expected: "\n\n\n", sentinel: token,
+            beforeCount: 10, afterCount: 11, clipboardText: "\n\n\n", visualBlank: false),
+            "A known whitespace draft still requires exact copied text")
+        precondition(!VisualParameters.copyIsExpected(expected: "\n\n\n", sentinel: token,
+            beforeCount: 10, afterCount: 11, clipboardText: "\n\n", visualBlank: true))
         precondition(VisualParameters.copyIsExpected(expected: "", sentinel: token,
                                                      beforeCount: 10, afterCount: 10,
                                                      clipboardText: token, visualBlank: true))

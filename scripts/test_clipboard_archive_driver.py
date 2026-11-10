@@ -120,7 +120,7 @@ class ClipboardArchiveDriverTests(unittest.TestCase):
                 path.unlink()
 
     def test_wrong_error_prepared_stage_and_text_change_refuse(self):
-        for suffix, change in (('.prepare-visual.result.json', {'error': 'Copied composer text does not exactly match expected draft'}),
+        for suffix, change in (('.prepare-visual.result.json', {'error': driver.COMPOSER_COPY_ARCHIVE_ERROR + ' '}),
                                ('.visual-state.json', {'stage': 'prepared'}),
                                ('.prepare-visual.job.json', {'text': 'changed'}),
                                ('.client-result.json', {'event_cursor': 10})):
@@ -130,6 +130,41 @@ class ClipboardArchiveDriverTests(unittest.TestCase):
                 with self.assertRaises(driver.Refused):
                     self.prove()
                 path.write_bytes(original)
+
+    def test_exact_empty_draft_copy_mismatch_accepts_no_empty_check_frames(self):
+        self.mutate('.prepare-visual.result.json', error=driver.COMPOSER_COPY_ARCHIVE_ERROR)
+        (self.ui / (self.tid + '.old-draft-empty-check.png')).unlink()
+        before = {p.name: p.read_bytes() for p in self.ui.iterdir()}
+        self.assertTrue(self.prove()['archive_only'])
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.ui.iterdir()})
+
+    def test_exact_copy_mismatch_with_visual_checks_still_archives_only(self):
+        self.mutate('.prepare-visual.result.json', error=driver.COMPOSER_COPY_ARCHIVE_ERROR)
+        self.assertTrue(self.prove()['archive_only'])
+
+    def test_copy_mismatch_still_requires_copy_ready_and_contiguous_checks(self):
+        self.mutate('.prepare-visual.result.json', error=driver.COMPOSER_COPY_ARCHIVE_ERROR)
+        ready = self.ui / (self.tid + '.old-draft-copy-ready.png')
+        original = ready.read_bytes(); ready.unlink()
+        with self.assertRaises(driver.Refused):
+            self.prove()
+        ready.write_bytes(original); ready.chmod(0o600)
+        (self.ui / (self.tid + '.old-draft-empty-check.png')).unlink()
+        late = self.ui / (self.tid + '.old-draft-empty-check-1.png')
+        late.write_bytes(b'late frame without first'); late.chmod(0o600)
+        with self.assertRaises(driver.Refused):
+            self.prove()
+
+    def test_original_clipboard_change_cannot_omit_first_empty_check(self):
+        (self.ui / (self.tid + '.old-draft-empty-check.png')).unlink()
+        with self.assertRaises(driver.Refused):
+            self.prove()
+
+    def test_copy_mismatch_does_not_adopt_a_different_expected_draft(self):
+        self.mutate('.prepare-visual.result.json', error=driver.COMPOSER_COPY_ARCHIVE_ERROR)
+        self.config['expected_draft'] = '\n\n\n'
+        with self.assertRaises(driver.Refused):
+            self.prove()
 
     def test_changed_trace_during_readonly_check_refuses(self):
         calls = []

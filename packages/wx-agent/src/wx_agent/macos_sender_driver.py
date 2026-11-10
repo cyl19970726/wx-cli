@@ -1107,15 +1107,20 @@ def _known_image_copy_rejection(error):
 
 
 CLIPBOARD_ARCHIVE_ERROR = "Clipboard changed during empty draft verification"
+COMPOSER_COPY_ARCHIVE_ERROR = "Copied composer text does not exactly match expected draft"
 
 
-def _clipboard_rejection_snapshot(ui, tid):
+def _clipboard_rejection_snapshot(ui, tid, error=CLIPBOARD_ARCHIVE_ERROR):
     required = {tid + suffix for suffix in (
         ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
         "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-evidence.json",
         ".prepare-visual.job.json", ".prepare-visual.result.json", ".visual-state.json",
         ".prepare-start.png", ".old-draft-before-click.png", ".old-draft-before-select.png",
-        ".old-draft-before-copy.png", ".old-draft-copy-ready.png", ".old-draft-empty-check.png")}
+        ".old-draft-before-copy.png", ".old-draft-copy-ready.png")}
+    if error == CLIPBOARD_ARCHIVE_ERROR:
+        required.add(tid + ".old-draft-empty-check.png")
+    elif error != COMPOSER_COPY_ARCHIVE_ERROR:
+        raise Refused("native clipboard rejection differs")
     optional = {tid + "-focus." + suffix for suffix in (
         "focus-attempted.json", "focus-polls.json", "before-search-click.png",
         "before-search-select.png", "before-search-paste.png", "before-search-copy.png",
@@ -1126,11 +1131,18 @@ def _clipboard_rejection_snapshot(ui, tid):
         "current-header-confirmed.png")}
     optional.update(tid + suffix for suffix in (
         ".old-draft-empty-check-1.png", ".old-draft-empty-check-2.png"))
-    return _rejection_artifact_snapshot(ui, tid, required, optional)
+    if error == COMPOSER_COPY_ARCHIVE_ERROR:
+        optional.add(tid + ".old-draft-empty-check.png")
+    snapshot = _rejection_artifact_snapshot(ui, tid, required, optional)
+    checks = [tid + suffix for suffix in (".old-draft-empty-check.png",
+              ".old-draft-empty-check-1.png", ".old-draft-empty-check-2.png")]
+    if any(checks[i] in snapshot and checks[i - 1] not in snapshot for i in (1, 2)):
+        raise Refused("original clipboard empty-check sequence is incomplete")
+    return snapshot
 
 
 def clipboard_rejection_preflight(request, config):
-    """Archive a proven empty-check rejection, never authorize another attempt."""
+    """Archive a proven original copy rejection, never authorize another attempt."""
     fields = {"protocol_version", "clipboard_archive_protocol_version", "content_kind", "request_id",
               "attempt_number", "channel_id", "session_id", "account", "talker", "text"}
     if (not isinstance(request, dict) or set(request) != fields
@@ -1151,7 +1163,11 @@ def clipboard_rejection_preflight(request, config):
         deadline = time.monotonic() + BUDGET
         _guard_helper(config, deadline, clear=False)
         status(config, deadline)
-        before = _clipboard_rejection_snapshot(ui, tid)
+        rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+        native_error = rejected.get("error")
+        if native_error not in (CLIPBOARD_ARCHIVE_ERROR, COMPOSER_COPY_ARCHIVE_ERROR):
+            raise Refused("native clipboard result is not an exact copy rejection")
+        before = _clipboard_rejection_snapshot(ui, tid, native_error)
         report = _read_artifact(ui / (tid + ".client-result.json"))
         if (report.get("id") != tid or report.get("request_id") != request["request_id"]
                 or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
@@ -1203,15 +1219,15 @@ def clipboard_rejection_preflight(request, config):
         rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
         if (set(rejected) != {"id", "ok", "error", "permissions"}
                 or rejected.get("id") != tid or rejected.get("ok") is not False
-                or rejected.get("error") != CLIPBOARD_ARCHIVE_ERROR
+                or rejected.get("error") != native_error
                 or not _permissions_ok(rejected.get("permissions"))):
-            raise Refused("native clipboard result is not the exact empty-check rejection")
+            raise Refused("native clipboard result is not the exact original copy rejection")
         if _helper_is_live(tid, deadline):
             raise Refused("original clipboard helper is still live")
         _guard_helper(config, deadline, clear=False)
         status(config, deadline)
         validate_empty_composer_reference(historical)
-        if _clipboard_rejection_snapshot(ui, tid) != before:
+        if _clipboard_rejection_snapshot(ui, tid, native_error) != before:
             raise Refused("original clipboard trace changed during proof")
     return {"protocol_version": 1, "clipboard_archive_protocol_version": 1,
             "clipboard_rejection_proven": True, "archive_only": True}
