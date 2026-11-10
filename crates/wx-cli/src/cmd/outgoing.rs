@@ -775,6 +775,48 @@ pub(super) fn check_focus_abandon_preflight(
     Ok(())
 }
 
+pub(super) fn check_clipboard_archive_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--clipboard-archive-capabilities",
+        None,
+        timeout,
+        None,
+    )?;
+    if value
+        != json!({"protocol_version":1,"clipboard_archive_protocol_version":1,
+        "archive_only":true,"before_paste_only":true})
+    {
+        return Err(invalid("driver lacks clipboard archive-only capability").into());
+    }
+    Ok(())
+}
+
+pub(super) fn check_clipboard_archive_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--clipboard-archive-preflight",
+        Some(payload),
+        timeout,
+        Some(lock_fd),
+    )?;
+    if value
+        != json!({"protocol_version":1,"clipboard_archive_protocol_version":1,
+        "clipboard_rejection_proven":true,"archive_only":true})
+    {
+        return Err(invalid("driver did not prove the original clipboard rejection").into());
+    }
+    Ok(())
+}
+
 pub(super) fn check_text_button_rejection_capabilities(
     driver: &Path,
     timeout: Duration,

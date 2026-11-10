@@ -70,6 +70,22 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 切换会话时，系统输入法提示可能改变空输入框的外观。私有 sender 配置可在 `empty_composer_reference` 之外提供至多两个 `empty_composer_alternates`，格式同为 `{path, sha256}`。每一张都必须是已人工确认无草稿的完整输入区截图，位于私有 UI 目录，尺寸、权限和摘要独立校验。接受其中一张完整像素匹配；不屏蔽提示区域或容忍其他文字/图片。原生准备与提交必须使用同一套参考图，恢复原尝试也必须保留它已使用的参考集合。
 
+微信重启会改变进程号。核对已授权账号、固定助手摘要、唯一窗口和当前原生 inspect 后，应同时更新实际配置来源中的 `sender_template.expected_pid` 与需要更新的 sender 文件。只改某群的 `conversation-sender.json` 会被下一次 `prepare_driver` 从旧模板覆盖；不能删除 PID 检查来放行。修改前保留私有备份，在空闲执行器及共享 sender 锁下处理，不重写旧 attempt、意图或游标。
+
+空框的光标亮灭可以使用分别确认过的完整参考图；整块像素仍须精确匹配。不要仅从一次失败就把所有差异当成光标或关闭剪贴板保护。`Clipboard changed during empty draft verification` 证明检查窗口内的剪贴板发生变化，不证明是哪一个进程写入，也不授予再次发送权。
+
+### 归档一次空框剪贴板拒绝
+
+若原文字 attempt 1 精确停在 `Clipboard changed during empty draft verification`，可显式归档其调度阻塞：
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json archive-clipboard-rejection \
+  --dispatch-id DISPATCH_ID --expected-attempt 1 \
+  --reason '已核对完整原生轨迹，首次空框检查拒绝且无粘贴或提交'
+```
+
+此入口核对原请求、正文、当前 owner/epoch、完整 inspect/focus/prepare-attempted 轨迹、历史参考摘要及助手退出，并在双锁内重验产物未变。出现粘贴、新草稿、submit、后续 attempt 或晚到出站证据时拒绝。结果仅把原 dispatch 记为 `done/clipboard_prepare_rejected`；原 outbox 与 attempt 保持 `indeterminate`，不重发、不开新 attempt、不解除全局暂停，也不把它当作成功的 batch 前件。另一个已获授权、尚未尝试的独立请求可在正常调度条件满足后继续；不能通过换 ID 重放原意图。
+
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 
 文字和图片按全局就绪顺序执行，同会话前项失败会阻止后项越过。图文使用相同 `--batch-id` 和从 0 开始的 `--part-index`；即使 part 1 先入队，也等 part 0 成功。前置部分必须是 `done` 且 operation 为 send、result 为 `ui_observed` 或 `recipient_confirmed`；仅有 `done` 不够，`abandoned_pre_submit`、`image_prepare_rejected`、`text_button_guard_rejected` 均不满足依赖。终止归档的 batch 后件保留阻塞，重新授权也不能把归档当成发送成功；显式桌面审查后，新独立批次可以进入正常就绪选择。每部分独立 request ID，不提供原子图文事务。`--priority 0/1/2` 分别表示显式人工、普通业务、主动通知；只影响下次选择，等待超过 300 秒优先按先来顺序，不能越过同会话因果前项。`--expires-at UNIX_SECONDS` 冻结期限，过期返回 owner 检查，不消耗 attempt。图片冻结、输入变化拒绝、像素与出站内容核验沿用[图片合同](IMAGE_SEND_VALIDATION_20261024.md)。队列与 `focus` 共用暂停语义，不在另一个发送中途切窗。

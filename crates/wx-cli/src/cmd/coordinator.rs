@@ -274,6 +274,15 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// Archive one proven TEXT clipboard rejection before paste; never retry its attempt.
+    ArchiveClipboardRejection {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Archive only a proven pre-submit attempt; retain its unknown outbox state forever.
     AbandonUnsent {
         #[arg(long)]
@@ -2580,6 +2589,159 @@ fn archive_image_copy_rejection(
 const TEXT_BUTTON_REJECTION_ERROR: &str =
     "Expected exactly one visible Send label in lower conversation pane";
 
+const CLIPBOARD_EMPTY_REJECTION_ERROR: &str = "Clipboard changed during empty draft verification";
+
+// Only artifacts that can precede the first prepare paste are admissible. In
+// particular, a submit marker or any later draft screenshot invalidates proof.
+fn clipboard_rejection_snapshot(
+    root: &Path,
+    tid: &str,
+    prepare_job: &Value,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    let required = [
+        ".client-result.json",
+        "-inspect.inspect.job.json",
+        "-inspect.result.json",
+        "-focus.focus-group.job.json",
+        "-focus.result.json",
+        "-focus.focus-evidence.json",
+        ".prepare-visual.job.json",
+        ".prepare-visual.result.json",
+        ".visual-state.json",
+        ".prepare-start.png",
+        ".old-draft-before-click.png",
+        ".old-draft-before-select.png",
+        ".old-draft-before-copy.png",
+        ".old-draft-copy-ready.png",
+        ".old-draft-empty-check.png",
+    ];
+    let focus = [
+        "focus-attempted.json",
+        "focus-polls.json",
+        "before-search-click.png",
+        "before-search-select.png",
+        "before-search-paste.png",
+        "before-search-copy.png",
+        "search-copy-ready.png",
+        "focus-initial.png",
+        "current-header-confirmed.png",
+        "focus-search-result-main.png",
+        "focus-search-result-popup.png",
+        "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png",
+        "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png",
+        "focus-search-after-click.png",
+    ];
+    let mut allowed = std::collections::BTreeSet::new();
+    for suffix in required {
+        allowed.insert(format!("{tid}{suffix}"));
+    }
+    for suffix in focus {
+        allowed.insert(format!("{tid}-focus.{suffix}"));
+    }
+    for suffix in [
+        ".old-draft-empty-check-1.png",
+        ".old-draft-empty-check-2.png",
+    ] {
+        allowed.insert(format!("{tid}{suffix}"));
+    }
+    let mut snapshot = std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid(
+                "clipboard rejection directory exceeds bounded proof",
+            ));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&format!("{tid}.")) && !name.starts_with(&format!("{tid}-")) {
+            continue;
+        }
+        if !allowed.contains(&name) {
+            return Err(invalid(
+                "later or conflicting clipboard rejection artifact exists",
+            ));
+        }
+        let bytes = image_rejection_read(
+            &entry.path(),
+            if name.ends_with(".png") {
+                16 * 1024 * 1024
+            } else {
+                65536
+            },
+        )?;
+        total += bytes.len();
+        if total > 128 * 1024 * 1024 {
+            return Err(invalid(
+                "clipboard rejection evidence exceeds bounded proof",
+            ));
+        }
+        snapshot.insert(name, hex::encode(Sha256::digest(&bytes)));
+    }
+    if required
+        .iter()
+        .any(|suffix| !snapshot.contains_key(&format!("{tid}{suffix}")))
+    {
+        return Err(invalid("incomplete first clipboard rejection trace"));
+    }
+    // Pin historical private references from the frozen job itself. A future
+    // calibration may update current sender config, never this old proof.
+    let mut refs = Vec::new();
+    if let Some(reference) = prepare_job.get("emptyComposerReference") {
+        if !reference.is_null() {
+            refs.push(reference);
+        }
+    }
+    if let Some(alternates) = prepare_job.get("emptyComposerAlternates") {
+        for reference in alternates
+            .as_array()
+            .ok_or_else(|| invalid("invalid historical references"))?
+        {
+            refs.push(reference);
+        }
+    }
+    if refs.is_empty() || refs.len() > 3 {
+        return Err(invalid(
+            "historical empty composer references are not bounded",
+        ));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    let mut hashes = std::collections::BTreeSet::new();
+    for reference in refs {
+        let object = reference
+            .as_object()
+            .ok_or_else(|| invalid("invalid historical reference"))?;
+        if object.len() != 2 {
+            return Err(invalid("invalid historical reference fields"));
+        }
+        let path = Path::new(
+            reference["path"]
+                .as_str()
+                .ok_or_else(|| invalid("invalid reference path"))?,
+        );
+        let expected = reference["sha256"]
+            .as_str()
+            .ok_or_else(|| invalid("invalid reference hash"))?;
+        if path.parent() != Some(root)
+            || !paths.insert(path.to_path_buf())
+            || !hashes.insert(expected)
+        {
+            return Err(invalid(
+                "historical reference is outside private root or duplicated",
+            ));
+        }
+        let bytes = image_rejection_read(path, 16 * 1024 * 1024)?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != expected {
+            return Err(invalid("historical reference hash differs"));
+        }
+        snapshot.insert(path.to_string_lossy().into_owned(), actual);
+    }
+    Ok(snapshot)
+}
+
 fn text_button_rejection_snapshot(
     root: &Path,
     tid: &str,
@@ -2980,6 +3142,259 @@ fn archive_text_button_rejection(
         "outbox_status":"indeterminate","attempt_number":1}),
     )
 }
+fn archive_clipboard_rejection(
+    root: &Path,
+    id: i64,
+    expected_attempt: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "clipboard archive requires original attempt 1 and bounded reason",
+        ));
+    }
+    private(root, true)?;
+    if root.canonicalize()? != root {
+        return Err(invalid("clipboard archive root must be canonical"));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; clipboard rejection retained"));
+        }
+        locks.push(lock);
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (conversation, request, status, result, operation, dispatch_channel, dispatch_epoch):
+        (String, String, String, Option<String>, String, String, i64) = tx.query_row(
+        "SELECT conversation_id,request_id,status,result,operation,channel_id,epoch FROM dispatch WHERE id=?1",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    )?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "unknown"
+        || result.as_deref() != Some("indeterminate")
+        || operation != "send"
+        || active.is_some()
+    {
+        return Err(invalid(
+            "only an idle original indeterminate TEXT dispatch may be archived",
+        ));
+    }
+    let b = binding(&tx, &conversation)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root)
+        || b.control != "active"
+        || dispatch_channel != b.channel_id
+        || dispatch_epoch != b.epoch
+    {
+        return Err(invalid(
+            "clipboard archive current binding or epoch differs",
+        ));
+    }
+    private(&b.state.join("outgoing.sqlite3"), false)?;
+    let mut outbox = Connection::open_with_flags(
+        b.state.join("outgoing.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let out = outbox.transaction()?;
+    let (evidence, text, owner, epoch): (String, String, String, i64) = out.query_row(
+        "SELECT result_evidence,text,managed_owner,managed_epoch FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='text' AND status='indeterminate' AND attempt_number=1",
+        params![request,b.channel_id,b.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    )?;
+    if owner != b.owner || epoch != b.epoch {
+        return Err(invalid("clipboard archive owner or outbox epoch differs"));
+    }
+    let attempts: i64 = out.query_row(
+        "SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?1",
+        [&request],
+        |r| r.get(0),
+    )?;
+    let original: bool = out.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=1 AND status='indeterminate' AND result_evidence=?2 AND finished_at IS NOT NULL AND finished_at>=claimed_at AND recovery_from_attempt IS NULL AND recovery_prior_status IS NULL)",
+        params![request,evidence], |r| r.get(0),
+    )?;
+    if attempts != 1 || !original {
+        return Err(invalid(
+            "clipboard archive requires only the finished original attempt",
+        ));
+    }
+    let observations: bool = out.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_observation')",
+        [], |r| r.get(0),
+    )?;
+    if observations {
+        let observed: bool = out.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outgoing_observation WHERE request_id=?1)",
+            [&request],
+            |r| r.get(0),
+        )?;
+        if observed {
+            return Err(invalid("late clipboard observation already exists"));
+        }
+    }
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if Path::new(&evidence) != report_path {
+        return Err(invalid("original clipboard report path differs"));
+    }
+    let read_json = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{tid}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let job = read_json(".prepare-visual.job.json")?;
+    let before = clipboard_rejection_snapshot(root, &tid, &job)?;
+    let report = read_json(".client-result.json")?;
+    let native = read_json(".prepare-visual.result.json")?;
+    let state = read_json(".visual-state.json")?;
+    let native_error = native["error"].as_str();
+    if native_error != Some(CLIPBOARD_EMPTY_REJECTION_ERROR) {
+        return Err(invalid(
+            "native result is not the exact empty-draft clipboard rejection",
+        ));
+    }
+    if report["id"] != tid
+        || report["request_id"] != request
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["attempt_number"] != 1
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || !["composer draft mismatch", "clipboard state changed"]
+            .iter()
+            .any(|category| report["error"] == *category)
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "recovery_from_attempt",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+            "late_observation",
+        ]
+        .iter()
+        .any(|key| report.get(*key).is_some())
+        || native
+            != json!({"id":tid,"ok":false,"error":native_error.unwrap(),
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+        || job["id"] != tid
+        || job["action"] != "prepare-visual"
+        || job["text"] != text
+        || job["expectedDraft"] != ""
+        || job.get("media").is_some_and(|v| !v.is_null())
+        || state["id"] != tid
+        || state["stage"] != "prepare-attempted"
+        || state["text"] != text
+        || state.get("media").is_some_and(|v| !v.is_null())
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "submitted",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid("frozen TEXT clipboard archive evidence differs"));
+    }
+    let mut expected_state = job.clone();
+    expected_state
+        .as_object_mut()
+        .ok_or_else(|| invalid("invalid frozen prepare job"))?
+        .remove("action");
+    expected_state["stage"] = json!("prepare-attempted");
+    if state != expected_state {
+        return Err(invalid(
+            "frozen TEXT job and prepare-attempted state differ",
+        ));
+    }
+    let channel = load_binding(&b.state)?;
+    let payload = serde_json::to_vec(&json!({
+        "protocol_version":1,"clipboard_archive_protocol_version":1,
+        "content_kind":"text","request_id":request,"attempt_number":1,
+        "channel_id":b.channel_id,"session_id":b.session_id,
+        "account":channel.account,"talker":channel.talker,"text":text,
+    }))?;
+    let driver = b.state.join("conversation-sender");
+    private(
+        driver
+            .parent()
+            .ok_or_else(|| invalid("missing driver parent"))?,
+        true,
+    )?;
+    let meta = fs::symlink_metadata(&driver)?;
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid(
+            "registered clipboard archive driver is not private",
+        ));
+    }
+    super::outgoing::check_clipboard_archive_capabilities(&driver, Duration::from_secs(20))?;
+    super::outgoing::check_clipboard_archive_preflight(
+        &driver,
+        &payload,
+        Duration::from_secs(25),
+        locks[1].as_raw_fd(),
+    )?;
+    if clipboard_rejection_snapshot(root, &tid, &job)? != before {
+        return Err(invalid(
+            "clipboard rejection artifacts changed during proof",
+        ));
+    }
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid(
+            "clipboard archive managed root changed during proof",
+        ));
+    }
+    let updated = tx.execute(
+        "UPDATE dispatch SET status='done',result='clipboard_prepare_rejected',updated_at=?2 WHERE id=?1 AND status='unknown' AND result='indeterminate'",
+        params![id,now()],
+    )?;
+    if updated != 1 {
+        return Err(invalid("clipboard archive dispatch CAS failed"));
+    }
+    tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+        params![format!("clipboard_prepare_rejected: {reason}"),now()])?;
+    block_unsent_batch_descendants(&tx)?;
+    out.commit()?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id":id,"status":"done","result":"clipboard_prepare_rejected",
+        "outbox_status":"indeterminate","attempt_number":1}),
+    )
+}
+
 pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Error>> {
     surface_pause(root, Some(reason))?;
     Ok(())
@@ -3921,6 +4336,11 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 expected_attempt,
                 reason,
             } => archive_text_button_rejection(root, dispatch_id, expected_attempt, &reason)?,
+            DispatchAction::ArchiveClipboardRejection {
+                dispatch_id,
+                expected_attempt,
+                reason,
+            } => archive_clipboard_rejection(root, dispatch_id, expected_attempt, &reason)?,
             DispatchAction::AbandonUnsent {
                 dispatch_id,
                 reason,
