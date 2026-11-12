@@ -122,6 +122,8 @@ def apply_sender_calibration(template, calibration, conversation_id, binding):
     if (not _strict_equal(calibration["window_size"], template.get("window_size")) or
             not _strict_equal(calibration["composer_rect"], template.get("composer_rect"))):
         raise CalibrationError("sender calibration geometry differs")
+    if not isinstance(calibration["empty_composer_reference"], dict):
+        raise CalibrationError("sender calibration requires a complete image reference")
 
     result = dict(template)
     result["empty_composer_reference"] = calibration["empty_composer_reference"]

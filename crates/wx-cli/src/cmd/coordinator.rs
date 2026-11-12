@@ -271,6 +271,21 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// One reviewed historical pair of TEXT clipboard failures, under the same request.
+    RecoverClipboardChain {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Retire only the original known IMAGE Copy rejection; never authorize a retry.
     ArchiveImageCopyRejection {
         #[arg(long)]
@@ -1461,6 +1476,7 @@ fn focus_recovery_context(
     owner: &str,
     epoch: i64,
     archived: bool,
+    chain: bool,
 ) -> Result<(Binding, Value), Box<dyn Error>> {
     let (conversation, channel, dispatch_epoch, status, result, operation, saved_request):
         (String, String, i64, String, Option<String>, String, String) = db.query_row(
@@ -1482,7 +1498,9 @@ fn focus_recovery_context(
         || active.is_some()
         || live
         || (status.as_str(), result.as_deref())
-            != if archived {
+            != if chain {
+                ("unknown", Some("indeterminate"))
+            } else if archived {
                 ("done", Some("clipboard_prepare_rejected"))
             } else {
                 ("unknown", Some("indeterminate"))
@@ -1503,7 +1521,7 @@ fn focus_recovery_context(
         ));
     }
     let item = intent(&b, request)?;
-    if archived {
+    if archived || chain {
         let schedule: (Option<String>, Option<i64>) = db.query_row(
             "SELECT batch_id,part_index FROM dispatch WHERE id=?1",
             [id],
@@ -1517,19 +1535,26 @@ fn focus_recovery_context(
     let attempts = original["attempts"]
         .as_array()
         .ok_or_else(|| invalid("missing attempts"))?;
+    let expected = if chain { 2 } else { 1 };
     if item.content_kind != "text"
         || item.status != "indeterminate"
-        || item.attempts != 1
+        || item.attempts != expected
         || item.owner.as_deref() != Some(owner)
         || item.epoch != Some(epoch)
         || item.expires_at.is_some_and(|t| t <= now())
-        || attempts.len() != 1
+        || attempts.len() != expected as usize
         || attempts[0]["attempt_number"] != 1
         || attempts[0]["status"] != "indeterminate"
         || !attempts[0]["finished_at"].is_i64()
         || !attempts[0]["recovery_from_attempt"].is_null()
         || !attempts[0]["recovery_prior_status"].is_null()
-        || original["result_evidence"] != attempts[0]["result_evidence"]
+        || (chain
+            && (attempts[1]["attempt_number"] != 2
+                || attempts[1]["status"] != "indeterminate"
+                || !attempts[1]["finished_at"].is_i64()
+                || attempts[1]["recovery_from_attempt"] != 1
+                || attempts[1]["recovery_prior_status"] != "indeterminate"))
+        || original["result_evidence"] != attempts[expected as usize - 1]["result_evidence"]
         || !original["receipt_evidence"].is_null()
         || original.get("late_observation").is_some()
     {
@@ -1699,6 +1724,16 @@ fn clipboard_recovery_artifacts(
     request: &str,
     original: &Value,
 ) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    clipboard_recovery_artifacts_scoped(root, b, request, original, false)
+}
+
+fn clipboard_recovery_artifacts_scoped(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+    chain: bool,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
     let tid = format!(
         "send-{}",
         &hex::encode(Sha256::digest(
@@ -1726,7 +1761,7 @@ fn clipboard_recovery_artifacts(
         return Err(invalid("clipboard recovery native error differs"));
     }
     let job = read(".prepare-visual.job.json")?;
-    let snapshot = clipboard_rejection_snapshot(root, &tid, &job, error)?;
+    let snapshot = clipboard_rejection_snapshot_scoped(root, &tid, &job, error, chain)?;
     let report = read(".client-result.json")?;
     let state = read(".visual-state.json")?;
     if report["id"] != tid
@@ -1788,11 +1823,176 @@ fn clipboard_recovery_artifacts(
     Ok(snapshot.into_iter().collect())
 }
 
+fn clipboard_chain_artifacts(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let base = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let second = format!("{base}-a2");
+    let first_report = root.join(format!("{base}.client-result.json"));
+    let second_report = root.join(format!("{second}.client-result.json"));
+    let proof_path = root.join(format!("{base}.recovery-proof-to-2.json"));
+    if original["attempts"][0]["result_evidence"] != first_report.to_string_lossy().as_ref()
+        || original["attempts"][1]["result_evidence"] != second_report.to_string_lossy().as_ref()
+    {
+        return Err(invalid("clipboard chain report paths differ"));
+    }
+    let mut first = original.clone();
+    first["result_evidence"] = original["attempts"][0]["result_evidence"].clone();
+    first["text"] = original["text"].clone();
+    let mut snapshot: std::collections::BTreeMap<String, String> =
+        clipboard_recovery_artifacts_scoped(root, b, request, &first, true)?
+            .into_iter()
+            .collect();
+    let read = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{second}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let report = read(".client-result.json")?;
+    let job = read(".prepare-visual.job.json")?;
+    let native = read(".prepare-visual.result.json")?;
+    let state = read(".visual-state.json")?;
+    let error = native["error"]
+        .as_str()
+        .ok_or_else(|| invalid("second clipboard error missing"))?;
+    if !matches!(
+        error,
+        CLIPBOARD_EMPTY_REJECTION_ERROR | COMPOSER_COPY_ARCHIVE_ERROR
+    ) || report["id"] != second
+        || report["request_id"] != request
+        || report["attempt_number"] != 2
+        || report["recovery_from_attempt"] != 1
+        || report["recovery_proof"] != proof_path.to_string_lossy().as_ref()
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || !["clipboard state changed", "composer draft mismatch"]
+            .iter()
+            .any(|v| report["error"] == *v)
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+            "late_observation",
+        ]
+        .iter()
+        .any(|k| report.get(*k).is_some())
+        || native
+            != json!({"id":second,"ok":false,"error":error,
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+        || job["id"] != second
+        || job["action"] != "prepare-visual"
+        || job["expectedDraft"] != ""
+        || job["text"] != original["text"]
+        || job.get("media").is_some_and(|v| !v.is_null())
+        || state["id"] != second
+        || state["stage"] != "prepare-attempted"
+        || state.get("media").is_some_and(|v| !v.is_null())
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "submitted",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|k| state.get(*k).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid("second clipboard trace differs"));
+    }
+    let mut expected_state = job.clone();
+    expected_state
+        .as_object_mut()
+        .ok_or_else(|| invalid("second prepare job invalid"))?
+        .remove("action");
+    expected_state["stage"] = json!("prepare-attempted");
+    if state != expected_state {
+        return Err(invalid("second clipboard prepare state differs"));
+    }
+    snapshot.extend(clipboard_rejection_snapshot(root, &second, &job, error)?);
+    let proof: Value = serde_json::from_slice(&image_rejection_read(&proof_path, 65536)?)?;
+    let fields = [
+        "request_id",
+        "from_attempt",
+        "attempt_number",
+        "transaction_id",
+        "text_sha256",
+        "prior_focus_mode",
+        "proof_saved_at",
+    ];
+    if proof.as_object().map(|o| o.len()) != Some(fields.len())
+        || fields.iter().any(|k| proof.get(*k).is_none())
+        || proof["request_id"] != request
+        || proof["from_attempt"] != 1
+        || proof["attempt_number"] != 2
+        || proof["transaction_id"] != base
+        || proof["text_sha256"]
+            != hex::encode(Sha256::digest(
+                original["text"]
+                    .as_str()
+                    .ok_or_else(|| invalid("text missing"))?
+                    .as_bytes(),
+            ))
+        || proof["prior_focus_mode"] != "archived-clipboard-before-paste"
+        || !proof["proof_saved_at"].is_string()
+    {
+        return Err(invalid("first clipboard recovery proof differs"));
+    }
+    snapshot.insert(
+        proof_path.to_string_lossy().into_owned(),
+        hex::encode(Sha256::digest(image_rejection_read(&proof_path, 65536)?)),
+    );
+    let mut combined_bytes = 0u64;
+    for name in snapshot.keys() {
+        let path = if Path::new(name).is_absolute() {
+            Path::new(name).to_path_buf()
+        } else {
+            root.join(name)
+        };
+        combined_bytes = combined_bytes.saturating_add(fs::symlink_metadata(path)?.len());
+        if combined_bytes > 128 * 1024 * 1024 {
+            return Err(invalid("clipboard chain exceeds bound"));
+        }
+    }
+    // The union must contain every historical artifact and no later attempt product.
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid("clipboard chain directory exceeds bound"));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&format!("{base}.")) && !name.starts_with(&format!("{base}-")) {
+            continue;
+        }
+        if !snapshot.contains_key(&name) && name != format!("{base}.recovery-proof-to-2.json") {
+            return Err(invalid(format!("unknown clipboard chain artifact: {name}")));
+        }
+    }
+    Ok(snapshot.into_iter().collect())
+}
+
 #[derive(Clone, Copy)]
 enum RecoveryKind {
     FocusSearch,
     PrepareHeader,
     ClipboardRejection,
+    ClipboardChain,
 }
 impl RecoveryKind {
     fn label(self) -> &'static str {
@@ -1800,6 +2000,7 @@ impl RecoveryKind {
             Self::FocusSearch => "focus_recovery",
             Self::PrepareHeader => "prepare_header_recovery",
             Self::ClipboardRejection => "clipboard_rejection_recovery",
+            Self::ClipboardChain => "clipboard_chain_recovery",
         }
     }
     fn artifacts(
@@ -1817,6 +2018,7 @@ impl RecoveryKind {
             Self::ClipboardRejection => {
                 clipboard_recovery_artifacts(root, binding, request, original)
             }
+            Self::ClipboardChain => clipboard_chain_artifacts(root, binding, request, original),
         }
     }
     fn preflight(
@@ -1835,6 +2037,9 @@ impl RecoveryKind {
             }
             Self::ClipboardRejection => {
                 super::outgoing::clipboard_recovery_preflight(state, request, driver, fd)
+            }
+            Self::ClipboardChain => {
+                super::outgoing::clipboard_chain_preflight(state, request, driver, fd)
             }
         }
     }
@@ -1865,9 +2070,11 @@ fn recover_reviewed(
     let root = &root.canonicalize()?;
     check_id(request)?;
     check_id(owner)?;
-    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+    let chain = matches!(kind, RecoveryKind::ClipboardChain);
+    let from = if chain { 2 } else { 1 };
+    if expected_attempt != from || reason.trim().len() < 8 || reason.len() > 512 {
         return Err(invalid(
-            "focus recovery requires attempt 1 and a bounded audit reason",
+            "recovery requires the exact prior attempt and a bounded audit reason",
         ));
     }
     let mut locks = Vec::new();
@@ -1890,7 +2097,7 @@ fn recover_reviewed(
     let sender_fd = locks[1].as_raw_fd();
     let mut db = open(root, true)?;
     let archived = matches!(kind, RecoveryKind::ClipboardRejection);
-    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch, archived)?;
+    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch, archived, chain)?;
     let artifacts = kind.artifacts(root, &b, request, &snapshot["original"])?;
     let driver = b.state.join("conversation-sender");
     let meta = fs::symlink_metadata(&driver)?;
@@ -1905,7 +2112,7 @@ fn recover_reviewed(
     }
     kind.preflight(&b.state, request, &driver, sender_fd)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch, archived)?;
+    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch, archived, chain)?;
     if latest != snapshot || kind.artifacts(root, &b, request, &snapshot["original"])? != artifacts
     {
         return Err(invalid(
@@ -1930,8 +2137,8 @@ fn recover_reviewed(
         return Err(invalid("recovery surface changed"));
     }
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
-        params![format!("{} dispatch={id} request={request} owner={owner} epoch={epoch} attempt=1->2: {reason}", kind.label()),now()])?;
-    // Durable recovery reservation and audit precede attempt 2 and all effects.
+        params![format!("{} dispatch={id} request={request} owner={owner} epoch={epoch} attempt={from}->{}: {reason}", kind.label(),from+1),now()])?;
+    // Durable recovery reservation and audit precede the next attempt and all effects.
     tx.commit()?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // No control writer may commit between admission, attempt and driver result.
@@ -1952,9 +2159,14 @@ fn recover_reviewed(
             "focus recovery binding or evidence changed before attempt",
         ));
     }
-    let attempt =
-        super::outgoing::claim_managed_focus_recovery(&b.state, request, &snapshot["original"])?;
-    if archived {
+    let attempt = if chain {
+        super::outgoing::claim_managed_clipboard_chain(&b.state, request, &snapshot["original"])?
+    } else {
+        super::outgoing::claim_managed_focus_recovery(&b.state, request, &snapshot["original"])?
+    };
+    if chain {
+        super::outgoing::execute_managed_clipboard_chain(&b.state, &driver, attempt, sender_fd)?;
+    } else if archived {
         super::outgoing::execute_managed_clipboard_recovery(&b.state, &driver, attempt, sender_fd)?;
     } else {
         super::outgoing::execute_managed_focus_recovery(&b.state, &driver, attempt, sender_fd)?;
@@ -1962,8 +2174,8 @@ fn recover_reviewed(
     tx.commit()?;
     let mut completed = dispatch_complete(root, id, &claim_token, None)?;
     completed["surface_paused"] = json!(true);
-    completed["attempt_number"] = json!(2);
-    completed["recovery_from_attempt"] = json!(1);
+    completed["attempt_number"] = json!(from + 1);
+    completed["recovery_from_attempt"] = json!(from);
     Ok(completed)
 }
 
@@ -2748,6 +2960,16 @@ fn clipboard_rejection_snapshot(
     prepare_job: &Value,
     native_error: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    clipboard_rejection_snapshot_scoped(root, tid, prepare_job, native_error, false)
+}
+
+fn clipboard_rejection_snapshot_scoped(
+    root: &Path,
+    tid: &str,
+    prepare_job: &Value,
+    native_error: &str,
+    allow_chain_sibling: bool,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
     let required = [
         ".client-result.json",
         "-inspect.inspect.job.json",
@@ -2806,6 +3028,13 @@ fn clipboard_rejection_snapshot(
         }
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if allow_chain_sibling
+            && (name.starts_with(&format!("{tid}-a2."))
+                || name.starts_with(&format!("{tid}-a2-"))
+                || name == format!("{tid}.recovery-proof-to-2.json"))
+        {
+            continue;
+        }
         if !name.starts_with(&format!("{tid}.")) && !name.starts_with(&format!("{tid}-")) {
             continue;
         }
@@ -4511,6 +4740,25 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
             } => recover_reviewed(
                 root,
                 RecoveryKind::ClipboardRejection,
+                RecoveryReview {
+                    id: dispatch_id,
+                    request: &request_id,
+                    expected_attempt,
+                    owner: &owner,
+                    epoch: expected_epoch,
+                    reason: &reason,
+                },
+            )?,
+            DispatchAction::RecoverClipboardChain {
+                dispatch_id,
+                request_id,
+                expected_attempt,
+                owner,
+                expected_epoch,
+                reason,
+            } => recover_reviewed(
+                root,
+                RecoveryKind::ClipboardChain,
                 RecoveryReview {
                     id: dispatch_id,
                     request: &request_id,

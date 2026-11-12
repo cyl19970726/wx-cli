@@ -96,6 +96,8 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 每次 `prepare_driver` 都重新验证该元数据，因此共享模板的参考更新不会冲掉有效的逐会话校准。它不覆盖目标、草稿预期、可执行文件、权限、owner 或 epoch，也不改已冻结 attempt 的 job/state/历史图片。同一会话仍最多三张完整参考，命中任意一张即可通过这一项检查；其他目标、复制和提交守卫继续独立执行。校准图片只能来自确认没有草稿的完整区域，建议用生产像素比较器对原截图和导出的 PNG 做精确往返核验。
 
+同一会话在进入输入框、复制核验和发送后的外观也可能不同。参考集合应覆盖已实际观察到的“有提示／无提示”等合法空框状态，不能只把三张都用在同一种提示的光标变化上。可分别固定两种状态的无光标完整画面，再选一张已确认的常见光标外观；不要遮罩或编辑光标。校准应以实际原生复制核验阶段的帧做验证，恢复前的单张静态画面不代表整个输入过程。显式逐会话校准至少有一张完整参考，不能用 null 加空列表退回无图片的判断。
+
 微信重启会改变进程号。核对已授权账号、固定助手摘要、唯一窗口和当前原生 inspect 后，应同时更新实际配置来源中的 `sender_template.expected_pid` 与需要更新的 sender 文件。只改某群的 `conversation-sender.json` 会被下一次 `prepare_driver` 从旧模板覆盖；不能删除 PID 检查来放行。修改前保留私有备份，在空闲执行器及共享 sender 锁下处理，不重写旧 attempt、意图或游标。
 
 空框的光标亮灭可以使用分别确认过的完整参考图；整块像素仍须精确匹配。不要仅从一次失败就把所有差异当成光标或关闭剪贴板保护。`Clipboard changed during empty draft verification` 证明检查窗口内的剪贴板发生变化，不证明是哪一个进程写入，也不授予再次发送权。
@@ -130,6 +132,23 @@ wx-agent dispatch --config /ABS/private/conversations.json recover-clipboard-rej
 Rust 在双锁内先调用精确的 driver capability 和只读证明，再重查原状态与文件摘要，持久记录带 token 的恢复预约后才领取原请求的 attempt 2。驱动仅容许自己刚建立的 attempt 2 起始报告，再次核对原轨迹、保存不可变恢复证明，然后重新 inspect/focus/prepare/submit。旧 attempt 1 的参考集合仍按原摘要验证；新的 attempt 2 可以使用已核实的当前逐会话校准，其自身准备和提交保持一致。任何中断或再次未知都保留原预约和证据，不重新入队、不自动重试或放行 attempt 3。
 
 原 attempt 1、旧原生文件及归档审查记录保持不变；当前 dispatch 只在真实恢复结果产生后更新。真正达到 `ui_observed` 或 `recipient_confirmed` 的恢复前件才满足未来 batch 后件的成功依赖，不能用单纯归档充数。已经被阻塞的零 attempt 后件不会自动恢复；需要按原 `review --restore-unattempted` 合同另行核查。恢复返回时桌面仍暂停，须经正常 `review --confirm-desktop-safe` 后再继续其他工作。
+
+### 严审首两次均在粘贴前拒绝的历史链
+
+上述 V1 入口仍只允许 1→2。另一个独立的显式入口仅处理这种特定历史：首次按 V1 审核恢复后的 attempt 2，又在同一原请求的首次空框复制阶段拒绝，且两次都有完整无粘贴、无提交证据。
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json recover-clipboard-chain \
+  --dispatch-id ORIGINAL_DISPATCH --request-id ORIGINAL_REQUEST \
+  --expected-attempt 2 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对原授权、首两次粘贴前拒绝及完整父证明，当前组合校准覆盖两次实际画面'
+```
+
+两次都必须是同一 text 意图的已结束 indeterminate 尝试。第一次无恢复来源，第二次明确来自第一次，且其不可变 `recovery-proof-to-2.json`、模式、事务 ID、正文摘要及报告指针均须匹配 V1。两套 inspect/focus/prepare-attempted、复制前帧、历史参考集合都要独立核验；两次均不得有 paste、新草稿、prepared、submit、收件或晚到出站、其他未知产物或存活助手。任何其他超时、错误、恢复方式、目标或草稿状态都不准入。
+
+独立 chain capability 和只读证明通过后，Rust 在相同双锁、授权 CAS 和持久预约中仅允许 2→3；驱动再次核对两套证据，单独保存 to-3 证明，再执行正常的原生目标／草稿／提交守卫。前两次对象、文件和审查记录不改写，第四次不获授权，失败也不自动重新调用。命令返回仍保留桌面暂停，成功依赖仍只按真实的当前发送结果计算。
+
+这是会实际发送一次的窄例外，不能拿它绕过用户暂停。必须确认原意图尚未由人工或其他渠道完成，且仍有当前发送授权；人工发送不能回填成旧 bot 成功。用户已改为人工的批次应保持停用，即使机械证据符合历史链也不能执行。
 
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 

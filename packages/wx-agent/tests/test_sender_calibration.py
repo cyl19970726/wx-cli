@@ -153,6 +153,12 @@ class SenderCalibrationTests(unittest.TestCase):
         with self.assertRaisesRegex(calibration.CalibrationError, "references"):
             calibration.apply_sender_calibration(self.template, duplicate, self.cid, self.binding)
 
+    def test_explicit_calibration_cannot_disable_the_pixel_reference(self):
+        with self.assertRaisesRegex(calibration.CalibrationError, "complete image"):
+            calibration.apply_sender_calibration(self.template,
+                self.entry(empty_composer_reference=None, empty_composer_alternates=[]),
+                self.cid, self.binding)
+
     def test_private_file_rejects_symlink_hardlink_mode_and_oversize(self):
         real = self.write_calibration()
         link = self.state / "conversation-sender-calibration.json"
