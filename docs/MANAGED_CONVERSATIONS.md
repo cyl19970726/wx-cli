@@ -98,6 +98,8 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 同一会话在进入输入框、复制核验和发送后的外观也可能不同。参考集合应覆盖已实际观察到的“有提示／无提示”等合法空框状态，不能只把三张都用在同一种提示的光标变化上。可分别固定两种状态的无光标完整画面，再选一张已确认的常见光标外观；不要遮罩或编辑光标。校准应以实际原生复制核验阶段的帧做验证，恢复前的单张静态画面不代表整个输入过程。显式逐会话校准至少有一张完整参考，不能用 null 加空列表退回无图片的判断。
 
+`--dispatch-preflight` 的 `ready` 仅表示配置、锁、助手、进程及窗口等基础条件通过；它不切到目标执行 `readSelectedDraft`，也不核对当前输入框像素。校准验收应使用生产比较器重放该目标已保存的实际准备阶段帧；仅有三张文件或一个测试群发送成功，都不能代替其他群的覆盖验证。新的 focus/capture 可核对当前目标与外观，但不能描述成新执行过复制守卫或发送。Skill 跨机器同步的是操作指南，逐会话的私有校准仍须单独验证。
+
 微信重启会改变进程号。核对已授权账号、固定助手摘要、唯一窗口和当前原生 inspect 后，应同时更新实际配置来源中的 `sender_template.expected_pid` 与需要更新的 sender 文件。只改某群的 `conversation-sender.json` 会被下一次 `prepare_driver` 从旧模板覆盖；不能删除 PID 检查来放行。修改前保留私有备份，在空闲执行器及共享 sender 锁下处理，不重写旧 attempt、意图或游标。
 
 空框的光标亮灭可以使用分别确认过的完整参考图；整块像素仍须精确匹配。不要仅从一次失败就把所有差异当成光标或关闭剪贴板保护。`Clipboard changed during empty draft verification` 证明检查窗口内的剪贴板发生变化，不证明是哪一个进程写入，也不授予再次发送权。
@@ -162,6 +164,20 @@ wx-agent dispatch --config /ABS/private/conversations.json review \
 ```
 
 该命令还必须通过新鲜 helper/桌面 preflight，只恢复其他合格项，不重放未知项。托管模式暂不支持 narrow `recover-unsent`，不能通过旧入口或更换 ID绕过；历史未托管恢复仍按原严格证据合同。
+
+### 用户撤销未完成的发送
+
+用户不再需要某条旧消息时，取消的是它今后的发送和恢复资格，不用删除原意图、失败轨迹或修改数据库来清空队列。先暂停共享桌面并等待当前执行结束，读取授权范围内的原请求及实际 attempt，再逐项执行：
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json cancel-request \
+  --conversation-id CONVERSATION --request-id ORIGINAL_REQUEST \
+  --expected-attempt ATTEMPT --reason '用户已撤销该旧消息'
+```
+
+Rust 在执行器和 sender 双锁内核对绑定、原意图与 attempt。成功或仍在执行的发送不能由此取消。其余未完成调度以及旧的非成功归档可记为 `done/cancelled_by_user`；尚未进入调度队列的托管意图，也会得到同一 ID 的终态取消记录。后续 reconcile、重复入队、恢复与换代审查不能复活该请求，取消也不算 batch 前件发送成功。已有取消重复调用不重复改变状态或审计。
+
+原 outbox 的状态和 attempt 证据保持不变，因此 `indeterminate` 仍表示实际投递结果未知，不能因为取消就声称消息没发出。取消操作不调用原生助手，也不解除桌面暂停；它不撤回微信中可能已经存在的消息。批量处理时先冻结授权目标的清单，保留已有成功记录，并在结束后核对所有清单项均有取消终态、无遗漏的未调度意图。其他应用尚未提交的同批发送计划也须由其负责会话撤销，避免稍后另建意图。
 
 ### 已提交文字的后续源记录对账
 

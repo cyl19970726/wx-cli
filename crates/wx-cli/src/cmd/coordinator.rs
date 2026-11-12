@@ -210,6 +210,13 @@ pub enum DispatchAction {
         token: String,
     },
     Status,
+    /// Read one dispatch's metadata without scanning the desktop queue.
+    Show {
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
     Pause {
         #[arg(long)]
         reason: String,
@@ -308,6 +315,17 @@ pub enum DispatchAction {
     ArchiveClipboardRejection {
         #[arg(long)]
         dispatch_id: i64,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Revoke future dispatch of one original request without deciding whether it was sent.
+    CancelRequest {
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        request_id: String,
         #[arg(long)]
         expected_attempt: i64,
         #[arg(long)]
@@ -912,6 +930,18 @@ fn enqueue(
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = binding(&tx, id)?;
     verify_binding(&b)?;
+    if !focus {
+        let cancelled: Option<i64> = tx.query_row(
+            "SELECT id FROM dispatch WHERE conversation_id=?1 AND request_id=?2 AND operation='send' AND status='done' AND result='cancelled_by_user'",
+            params![id,request], |r| r.get(0),
+        ).optional()?;
+        if let Some(dispatch_id) = cancelled {
+            return Ok(
+                json!({"dispatch_id":dispatch_id,"conversation_id":id,"request_id":request,
+                "operation":"send","status":"done","result":"cancelled_by_user"}),
+            );
+        }
+    }
     if b.epoch != expected || b.control != "active" {
         return Err(invalid("conversation control epoch or state changed"));
     }
@@ -924,14 +954,14 @@ fn enqueue(
         ));
     }
     let operation = if focus { "focus" } else { "send" };
-    let existing:Option<(i64,String,i64,String)>=tx.query_row("SELECT id,operation,epoch,status FROM dispatch WHERE conversation_id=?1 AND request_id=?2",params![id,request],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    let dispatch_id = if let Some((n, op, epoch, _)) = existing {
-        if op != operation || epoch != expected {
+    let existing:Option<(i64,String,i64,String,Option<String>)>=tx.query_row("SELECT id,operation,epoch,status,result FROM dispatch WHERE conversation_id=?1 AND request_id=?2",params![id,request],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    let dispatch_id = if let Some((n, op, epoch, _, _)) = &existing {
+        if op != operation || *epoch != expected {
             return Err(invalid(
                 "dispatch reference already exists with different operation or epoch",
             ));
         }
-        n
+        *n
     } else {
         let scheduling = if focus {
             None
@@ -942,8 +972,13 @@ fn enqueue(
         tx.last_insert_rowid()
     };
     tx.commit()?;
+    let (status, result) = existing
+        .map_or(("queued".to_owned(), None), |(_, _, _, status, result)| {
+            (status, result)
+        });
     Ok(
-        json!({"dispatch_id":dispatch_id,"conversation_id":id,"request_id":request,"operation":operation,"status":"queued"}),
+        json!({"dispatch_id":dispatch_id,"conversation_id":id,"request_id":request,
+        "operation":operation,"status":status,"result":result}),
     )
 }
 fn reconcile_outbox(root: &Path, id: &str) -> Result<Value, Box<dyn Error>> {
@@ -1284,17 +1319,54 @@ fn dispatch_status(root: &Path) -> Result<Value, Box<dyn Error>> {
     )
 }
 
+fn dispatch_show(root: &Path, conversation: &str, request: &str) -> Result<Value, Box<dyn Error>> {
+    check_id(conversation)?;
+    check_id(request)?;
+    let db = open(root, false)?;
+    let b = binding(&db, conversation)?;
+    verify_binding(&b)?;
+    let surface_paused: bool = db.query_row(
+        "SELECT paused_reason IS NOT NULL FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let dispatch: Option<Value> = db.query_row(
+        "SELECT id,status,result,operation,epoch FROM dispatch WHERE conversation_id=?1 AND request_id=?2",
+        params![conversation,request],
+        |r| Ok(json!({"dispatch_id":r.get::<_,i64>(0)?,"status":r.get::<_,String>(1)?,
+            "result":r.get::<_,Option<String>>(2)?,"operation":r.get::<_,String>(3)?,
+            "epoch":r.get::<_,i64>(4)?})),
+    ).optional()?;
+    Ok(json!({"conversation_id":conversation,"request_id":request,
+        "surface_paused":surface_paused,"dispatch":dispatch}))
+}
+
 fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn Error>> {
+    restore_queued_with_after_marker(root, id, reason, || Ok(()))
+}
+
+// The callback is a no-op in production; tests use it to place cancellation
+// exactly after the durable marker and before the second coordinator fence.
+fn restore_queued_with_after_marker<F>(
+    root: &Path,
+    id: i64,
+    reason: &str,
+    after_marker: F,
+) -> Result<Value, Box<dyn Error>>
+where
+    F: FnOnce() -> Result<(), Box<dyn Error>>,
+{
     if reason.trim().len() < 8 || reason.len() > 512 {
         return Err(invalid("restoration requires a bounded review reason"));
     }
     let mut db = open(root, true)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (conversation, request, status, operation, epoch): (String, String, String, String, i64) =
+    let (conversation, request, status, operation, epoch, channel, result):
+        (String, String, String, String, i64, String, Option<String>) =
         tx.query_row(
-            "SELECT conversation_id,request_id,status,operation,epoch FROM dispatch WHERE id=?1",
+            "SELECT conversation_id,request_id,status,operation,epoch,channel_id,result FROM dispatch WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )?;
     let active: Option<i64> = tx.query_row(
         "SELECT active_dispatch FROM surface WHERE singleton=1",
@@ -1304,6 +1376,7 @@ fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn E
     let b = binding(&tx, &conversation)?;
     if active.is_some()
         || operation != "send"
+        || channel != b.channel_id
         || !matches!(status.as_str(), "unknown" | "blocked")
         || b.control != "active"
         || b.reply_policy != "authorized"
@@ -1340,20 +1413,66 @@ fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn E
         params![marker, now()],
     )?;
     tx.commit()?;
+    after_marker()?;
+    // The second coordinator reservation stays open through the outbox commit
+    // and dispatch CAS. Cancellation must serialize on this same reservation.
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: (String, String, String, String, i64, String, Option<String>) = tx.query_row(
+        "SELECT conversation_id,request_id,status,operation,epoch,channel_id,result FROM dispatch WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    )?;
+    let current_binding = binding(&tx, &conversation)?;
+    verify_binding(&current_binding)?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let marker_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM surface_review WHERE reason=?1)",
+        [&marker],
+        |r| r.get(0),
+    )?;
+    if current
+        != (
+            conversation.clone(),
+            request.clone(),
+            status.clone(),
+            operation.clone(),
+            epoch,
+            channel.clone(),
+            result.clone(),
+        )
+        || active.is_some()
+        || !marker_exists
+        || current_binding.state != b.state
+        || current_binding.channel_id != b.channel_id
+        || current_binding.session_id != b.session_id
+        || current_binding.owner != b.owner
+        || current_binding.epoch != b.epoch
+        || current_binding.control != "active"
+        || current_binding.reply_policy != "authorized"
+    {
+        return Err(invalid("restore authority changed after durable marker"));
+    }
     let outbox = b.state.join("outgoing.sqlite3");
     let mut outbox = Connection::open_with_flags(&outbox, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let outbox_tx = outbox.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    outbox_tx.execute(
-        "UPDATE outgoing_intent SET managed_owner=?1,managed_epoch=?2 WHERE request_id=?3 AND managed_owner=?4 AND managed_epoch=?5 AND attempt_number=0 AND status IN ('managed_queued','managed_media_queued')",
-        params![b.owner,b.epoch,request,original.owner,original.epoch],
+    let changed = outbox_tx.execute(
+        "UPDATE outgoing_intent SET managed_owner=?1,managed_epoch=?2 WHERE request_id=?3 AND managed_owner=?4 AND managed_epoch=?5 AND attempt_number=0 AND channel_id=?6 AND session_id=?7 AND status=?8 AND batch_id IS ?9 AND part_index IS ?10 AND priority=?11 AND expires_at IS ?12",
+        params![b.owner,b.epoch,request,original.owner,original.epoch,b.channel_id,b.session_id,
+            original.status,original.batch_id,original.part_index,original.priority,original.expires_at],
     )?;
+    if changed != 1 {
+        return Err(invalid("outbox origin changed during restore"));
+    }
     outbox_tx.commit()?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute(
-        "UPDATE dispatch SET epoch=?2 WHERE id=?1",
-        params![id, b.epoch],
-    )?;
-    tx.execute("UPDATE dispatch SET status='queued',token=NULL,worker=NULL,lease_until=NULL,result='restored_before_attempt',updated_at=?2 WHERE id=?1",params![id,now()])?;
+    let changed = tx.execute("UPDATE dispatch SET epoch=?2,status='queued',token=NULL,worker=NULL,lease_until=NULL,result='restored_before_attempt',updated_at=?3 WHERE id=?1 AND status=?4 AND epoch=?5 AND channel_id=?6 AND result IS ?7",
+        params![id,b.epoch,now(),status,epoch,channel,result])?;
+    if changed != 1 {
+        return Err(invalid("restore dispatch CAS failed"));
+    }
     tx.execute("DELETE FROM surface_review WHERE reason=?1", [&marker])?;
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",params![reason,now()])?;
     tx.commit()?;
@@ -3799,6 +3918,207 @@ fn archive_clipboard_rejection(
     )
 }
 
+struct CancellationDispatch {
+    id: i64,
+    operation: String,
+    status: String,
+    channel: String,
+    epoch: i64,
+    result: Option<String>,
+    batch: Option<String>,
+    part: Option<i64>,
+    priority: i64,
+}
+
+fn cancel_request(
+    root: &Path,
+    conversation: &str,
+    request: &str,
+    expected_attempt: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    check_id(conversation)?;
+    check_id(request)?;
+    if expected_attempt < 0 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "cancellation requires exact attempt and bounded reason",
+        ));
+    }
+    private(root, true)?;
+    if root.canonicalize()? != root {
+        return Err(invalid("cancellation root must be canonical"));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; request remains unchanged"));
+        }
+        locks.push(lock);
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (paused, active): (Option<String>, Option<i64>) = tx.query_row(
+        "SELECT paused_reason,active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let claimed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch WHERE status='claimed')",
+        [],
+        |r| r.get(0),
+    )?;
+    if paused.is_none() || active.is_some() || claimed {
+        return Err(invalid("cancellation requires paused idle desktop"));
+    }
+    let b = binding(&tx, conversation)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid("request is not managed by this coordinator"));
+    }
+    let out_path = b.state.join("outgoing.sqlite3");
+    private(&out_path, false)?;
+    let mut outbox = Connection::open_with_flags(&out_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    outbox.busy_timeout(Duration::from_secs(5))?;
+    let out = outbox.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let item = intent(&b, request)?;
+    let (status, attempt, owner, epoch, receipt):
+        (String, i64, Option<String>, Option<i64>, Option<String>) = out.query_row(
+        "SELECT status,attempt_number,managed_owner,managed_epoch,receipt_evidence FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        params![request,b.channel_id,b.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    if status != item.status
+        || attempt != item.attempts
+        || owner != item.owner
+        || epoch != item.epoch
+        || attempt != expected_attempt
+        || owner.is_none() != epoch.is_none()
+        || !matches!(
+            status.as_str(),
+            "queued"
+                | "media_queued"
+                | "managed_queued"
+                | "managed_media_queued"
+                | "failed"
+                | "indeterminate"
+        )
+        || receipt.is_some()
+    {
+        return Err(invalid("outbox identity, status or attempt differs"));
+    }
+    let projection = super::outgoing::intent_view_in(&out, &b.state, request)?;
+    if projection["status"] != status
+        || projection["attempt_number"] != attempt
+        || projection["managed_owner"] != json!(owner)
+        || projection["managed_epoch"] != json!(epoch)
+        || projection["receipt_evidence"] != Value::Null
+        || projection.get("late_observation").is_some()
+    {
+        return Err(invalid("outbox has positive or late delivery evidence"));
+    }
+    let attempts = projection["attempts"]
+        .as_array()
+        .ok_or_else(|| invalid("attempt history missing"))?;
+    if attempts.len() != attempt as usize
+        || attempts.iter().enumerate().any(|(index, entry)| {
+            entry["attempt_number"] != (index + 1) as i64
+                || !matches!(entry["status"].as_str(), Some("failed" | "indeterminate"))
+                || !entry["finished_at"].is_i64()
+                || entry["finished_at"].as_i64() < entry["claimed_at"].as_i64()
+        })
+    {
+        return Err(invalid(
+            "an outgoing attempt is active, positive or incomplete",
+        ));
+    }
+    if attempt == 0
+        && !matches!(
+            status.as_str(),
+            "queued" | "media_queued" | "managed_queued" | "managed_media_queued"
+        )
+        || attempt > 0 && !matches!(status.as_str(), "failed" | "indeterminate")
+    {
+        return Err(invalid(
+            "outbox current status is inconsistent with its attempts",
+        ));
+    }
+    let legacy_missing_origin = owner.is_none();
+    if legacy_missing_origin && attempt == 0 {
+        return Err(invalid(
+            "legacy cancellation requires a finished historical attempt",
+        ));
+    }
+    let existing: Option<CancellationDispatch> = tx.query_row(
+        "SELECT id,operation,status,channel_id,epoch,result,batch_id,part_index,priority FROM dispatch WHERE conversation_id=?1 AND request_id=?2",
+        params![conversation,request],
+        |r| Ok(CancellationDispatch {id:r.get(0)?,operation:r.get(1)?,status:r.get(2)?,
+            channel:r.get(3)?,epoch:r.get(4)?,result:r.get(5)?,batch:r.get(6)?,
+            part:r.get(7)?,priority:r.get(8)?})).optional()?;
+    let (dispatch_id, old_status, old_result, already_cancelled) = if let Some(previous) = existing
+    {
+        let already =
+            previous.status == "done" && previous.result.as_deref() == Some("cancelled_by_user");
+        if previous.operation != "send"
+            || previous.channel != b.channel_id
+            || (if legacy_missing_origin {
+                !already || previous.epoch > b.epoch
+            } else {
+                Some(previous.epoch) != epoch
+            })
+            || previous.batch != item.batch_id
+            || previous.part != item.part_index
+            || previous.priority != item.priority
+            || !matches!(
+                previous.status.as_str(),
+                "queued" | "blocked" | "unknown" | "done"
+            )
+            || previous.status == "done"
+                && matches!(
+                    previous.result.as_deref(),
+                    Some("ui_observed" | "recipient_confirmed")
+                )
+        {
+            return Err(invalid(
+                "dispatch identity, state or success evidence differs",
+            ));
+        }
+        if !already {
+            let changed = tx.execute("UPDATE dispatch SET status='done',result='cancelled_by_user',updated_at=?2 WHERE id=?1 AND status=?3", params![previous.id,now(),previous.status])?;
+            if changed != 1 {
+                return Err(invalid("cancellation dispatch CAS failed"));
+            }
+        }
+        (previous.id, previous.status, previous.result, already)
+    } else {
+        tx.execute("INSERT INTO dispatch(conversation_id,request_id,operation,channel_id,epoch,status,result,created_at,updated_at,batch_id,part_index,priority,expires_at) VALUES(?1,?2,'send',?3,?4,'done','cancelled_by_user',?5,?5,?6,?7,?8,?9)",
+            params![conversation,request,b.channel_id,epoch.unwrap_or(b.epoch),now(),item.batch_id,item.part_index,item.priority,item.expires_at])?;
+        (tx.last_insert_rowid(), "absent".to_owned(), None, false)
+    };
+    if !already_cancelled {
+        tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+            params![format!("cancelled_by_user dispatch={dispatch_id} request={request} old_dispatch={old_status}/{:?} outbox={status} attempt={attempt} legacy_missing_origin={legacy_missing_origin}: {reason}",old_result),now()])?;
+        block_unsent_batch_descendants(&tx)?;
+    }
+    if super::outgoing::intent_view_in(&out, &b.state, request)? != projection {
+        return Err(invalid("outbox changed during cancellation"));
+    }
+    out.commit()?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id":dispatch_id,"status":"done","result":"cancelled_by_user",
+        "outbox_status":status,"attempt_number":attempt,"already_cancelled":already_cancelled}),
+    )
+}
+
 pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Error>> {
     surface_pause(root, Some(reason))?;
     Ok(())
@@ -4685,6 +5005,10 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 dispatch_validate(root, dispatch_id, &token)?
             }
             DispatchAction::Status => dispatch_status(root)?,
+            DispatchAction::Show {
+                conversation_id,
+                request_id,
+            } => dispatch_show(root, &conversation_id, &request_id)?,
             DispatchAction::Pause { reason } => surface_pause(root, Some(&reason))?,
             DispatchAction::Resume => surface_pause(root, None)?,
             DispatchAction::Review { reason } => surface_review(root, &reason)?,
@@ -4783,6 +5107,18 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 expected_attempt,
                 reason,
             } => archive_clipboard_rejection(root, dispatch_id, expected_attempt, &reason)?,
+            DispatchAction::CancelRequest {
+                conversation_id,
+                request_id,
+                expected_attempt,
+                reason,
+            } => cancel_request(
+                root,
+                &conversation_id,
+                &request_id,
+                expected_attempt,
+                &reason,
+            )?,
             DispatchAction::AbandonUnsent {
                 dispatch_id,
                 reason,
@@ -4950,6 +5286,70 @@ mod tests {
         let b = load_binding(state).unwrap();
         let db = Connection::open(state.join("outgoing.sqlite3")).unwrap();
         db.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,content_kind,status,managed_owner,managed_epoch,created_at,updated_at) VALUES(?1,?2,?3,'fixture','text','queued','owner1',?4,?5,?5)",params![request,b.channel_id,b.session_id,epoch,now()]).unwrap();
+    }
+    #[test]
+    fn cancellation_between_restore_marker_and_outbox_cannot_resurrect_request() {
+        let (_tmp, state, root) = fixture();
+        enroll(
+            &root,
+            "conversation1",
+            &state,
+            "owner1",
+            InputMode::Push,
+            ReplyPolicy::Authorized,
+        )
+        .unwrap();
+        let root = root.canonicalize().unwrap();
+        queued(&state, "cancel-during-restore", 1);
+        let id = enqueue(&root, "conversation1", "cancel-during-restore", 1, false).unwrap()
+            ["dispatch_id"]
+            .as_i64()
+            .unwrap();
+        configure(
+            &root,
+            "conversation1",
+            1,
+            "owner1",
+            InputMode::Push,
+            ReplyPolicy::Authorized,
+        )
+        .unwrap();
+        surface_pause(&root, Some("synthetic operator cancellation review")).unwrap();
+        let restored =
+            restore_queued_with_after_marker(&root, id, "reviewed synthetic restore", || {
+                let cancelled = cancel_request(
+                    &root,
+                    "conversation1",
+                    "cancel-during-restore",
+                    0,
+                    "operator revoked future sending",
+                )?;
+                assert_eq!(cancelled["result"], "cancelled_by_user");
+                Ok(())
+            });
+        assert!(
+            restored.is_err(),
+            "restore must not cross a terminal cancellation"
+        );
+        let db = Connection::open(root.join(DB_NAME)).unwrap();
+        let (status, result, epoch): (String, String, i64) = db
+            .query_row(
+                "SELECT status,result,epoch FROM dispatch WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), result.as_str(), epoch),
+            ("done", "cancelled_by_user", 1)
+        );
+        let out = Connection::open(state.join("outgoing.sqlite3")).unwrap();
+        let (owner, origin_epoch, attempt): (String, i64, i64) = out.query_row(
+            "SELECT managed_owner,managed_epoch,attempt_number FROM outgoing_intent WHERE request_id='cancel-during-restore'",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!((owner.as_str(), origin_epoch, attempt), ("owner1", 1, 0));
+        assert!(restore_queued(&root, id, "cannot revive cancelled request").is_err());
     }
     #[test]
     fn image_copy_rejection_accepts_producer_spacing_only() {

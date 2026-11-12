@@ -18,6 +18,7 @@ import subprocess
 from typing import Callable, Optional
 
 from .macos_sender_driver import Refused, validate_text
+from .dispatch import DispatchError, validate_show_response
 
 
 APP_ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,39}\Z")
@@ -196,6 +197,17 @@ class ApplicationClient:
         attempt = value.get("attempt_number")
         if not isinstance(state, str) or type(attempt) is not int or attempt < 0 or not isinstance(value.get("text"), str):
             raise ResultUnknown("response_unknown", full_id)
-        return {"application_id": self.application_id, "conversation_id": conversation_id,
-                "request_id": full_id, "status": state, "attempt_number": attempt,
-                "text_sha256": hashlib.sha256(value["text"].encode("utf-8")).hexdigest()}
+        result = {"application_id": self.application_id, "conversation_id": conversation_id,
+                  "request_id": full_id, "status": state, "attempt_number": attempt,
+                  "text_sha256": hashlib.sha256(value["text"].encode("utf-8")).hexdigest()}
+        shown = self._json([str(self.wx_cli), "coordinator", "--state-dir", str(self.coordinator_root),
+                            "dispatch", "show", "--conversation-id", conversation_id,
+                            "--request-id", full_id], full_id)
+        try:
+            record = validate_show_response(shown, conversation_id, full_id)["dispatch"]
+        except DispatchError as exc:
+            raise ResultUnknown("response_unknown", full_id) from exc
+        if record is not None and record["result"] == "cancelled_by_user":
+            result.update(cancelled=True, dispatch_id=record["dispatch_id"],
+                          dispatch_status="done", dispatch_result="cancelled_by_user")
+        return result

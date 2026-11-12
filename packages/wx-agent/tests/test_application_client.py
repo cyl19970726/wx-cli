@@ -45,6 +45,8 @@ class ApplicationClientTests(unittest.TestCase):
         self.response_id = "app_a.notice-001"
         self.response_text = "first body"
         self.outbox_publisher = "app_a"
+        self.dispatch_result = None
+        self.show_override = None
         self.fail_code = None
         self.timeout = False
 
@@ -56,7 +58,14 @@ class ApplicationClientTests(unittest.TestCase):
         self.calls.append((argv, data))
         if self.timeout and "send" in argv:
             raise subprocess.TimeoutExpired(argv, timeout)
-        if "coordinator" in argv:
+        if "coordinator" in argv and "dispatch" in argv:
+            value = self.show_override if self.show_override is not None else {
+                "conversation_id": CID, "request_id": self.response_id,
+                "surface_paused": False,
+                "dispatch": None if self.dispatch_result is None else {
+                    "dispatch_id": 7, "status": "done", "result": self.dispatch_result,
+                    "operation": "send", "epoch": 4}}
+        elif "coordinator" in argv:
             value = {"conversation_id": CID, "channel_state_dir": self.binding_state,
                      "owner": self.owner, "epoch": self.epoch,
                      "control": self.control, "reply_policy": self.reply_policy}
@@ -174,6 +183,40 @@ class ApplicationClientTests(unittest.TestCase):
                     client.send_text(CID, "new-notice", "body")
                 self.assertEqual(error.exception.code, "owner_epoch_drift")
         self.assertFalse(any("conversations" in argv for argv, _ in self.calls))
+
+    def test_cancelled_dispatch_keeps_original_unknown_outbox_evidence(self):
+        self.outbox_status = "indeterminate"
+        self.outbox_attempt = 2
+        self.dispatch_result = "cancelled_by_user"
+        shown = self.client().status(CID, "notice-001")
+        self.assertEqual(shown["status"], "indeterminate")
+        self.assertTrue(shown["cancelled"])
+        self.assertNotIn("outbox_status", shown)
+        self.assertEqual(shown["attempt_number"], 2)
+        self.assertEqual((shown["dispatch_id"], shown["dispatch_status"], shown["dispatch_result"]),
+                         (7, "done", "cancelled_by_user"))
+        self.assertNotIn("text", shown)
+        self.assertNotIn("result_evidence", shown)
+        self.assertTrue(any(argv[-6:] == ["dispatch", "show", "--conversation-id", CID,
+                                           "--request-id", "app_a.notice-001"] for argv, _ in self.calls))
+        self.assertFalse(any(argv[-2:] == ["dispatch", "status"] for argv, _ in self.calls))
+
+    def test_status_rejects_wrong_show_scope_or_invalid_cancel(self):
+        base = {"conversation_id": CID, "request_id": "app_a.notice-001",
+                "surface_paused": False, "dispatch": None}
+        for changed in ({"conversation_id": "b" * 32}, {"request_id": "app_a.other"},
+                        {"surface_paused": 0}, {"dispatch": {}},
+                        {"dispatch": {"dispatch_id": 7, "status": "queued",
+                                      "result": "cancelled_by_user", "operation": "send", "epoch": 4}},
+                        {"dispatch": {"dispatch_id": 7, "status": "done",
+                                      "result": "cancelled_by_user", "operation": "focus", "epoch": 4}}):
+            with self.subTest(changed=changed):
+                self.show_override = {**base, **changed}
+                with self.assertRaises(ResultUnknown) as error:
+                    self.client().status(CID, "notice-001")
+                self.assertEqual(error.exception.code, "response_unknown")
+        self.show_override = base
+        self.assertNotIn("cancelled", self.client().status(CID, "notice-001"))
 
     def test_same_application_new_grant_reads_old_publication_and_sends_new(self):
         self.config["conversations"][CID].update(owner="successor_owner", expected_epoch=5)

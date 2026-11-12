@@ -42,6 +42,8 @@ python3 examples/application-notifier.py \
 
 `send_text()` 在新发送前检查固定的 owner、epoch、控制状态及回复授权，并将应用 ID 冻结为 Rust outbox 的 `publisher_id`。该字段与业务 owner 分开，重启或交还不会改变；已有 ID 也不能更换 publisher。`status()` 只读原会话中属于本应用 publisher 的请求，即使本应用后来续授权到新 owner/epoch，仍可查询自己的旧结果；旧记录的 `NULL` publisher 不会被冒认为本应用。查询不会重新发送。超时或返回不明时，保留原 key，检查原请求状态，不能改 key 重投。`pending` 是排队状态，`ui_observed` 是本地界面证据，均不等于收件人确认。
 
+用户撤销旧发送后，`status()` 保留原 outbox 的 `status`，并返回 `cancelled: true`、`dispatch_status: "done"` 和 `dispatch_result: "cancelled_by_user"`。例如原结果 `indeterminate` 仍表示投递情况未知，取消只关闭今后的执行资格。应用应停止该意图的提交、轮询推进与批次续发，不能换 key 绕过取消。取消元数据按本会话和原 request ID 单独查询，不读取其他会话的调度列表；操作入口见[用户撤销未完成的发送](MANAGED_CONVERSATIONS.md#用户撤销未完成的发送)。
+
 `ApplicationClient` 是**可信本机配置适配器**，配置限定会话范围并固定 owner/epoch。独立应用凭据和远端能力由下述 gateway 负责；本地适配器本身不隔离同一系统用户拥有任意 shell 权限的程序。图片发送后置。
 
 ## 鉴权远端接入

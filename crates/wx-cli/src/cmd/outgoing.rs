@@ -1453,6 +1453,15 @@ pub(crate) fn intent_view(
     )
 }
 
+/// Read the frozen outbox projection through the caller's existing transaction.
+pub(crate) fn intent_view_in(
+    conn: &Connection,
+    state_dir: &Path,
+    request_id: &str,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    show_intent(conn, &load_binding(state_dir)?, request_id)
+}
+
 fn managed_send(
     state_dir: &Path,
     request_id: &str,

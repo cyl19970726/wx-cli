@@ -48,6 +48,7 @@ jobs:
           scripts.test_clipboard_archive
           scripts.test_clipboard_recovery
           scripts.test_clipboard_chain_recovery
+          scripts.test_dispatch_cancel
       - name: Sender contract against compiled CLI events
         env:
           PYTHONPATH: packages/wx-agent/src
