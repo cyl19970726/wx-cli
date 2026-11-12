@@ -68,7 +68,89 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 多个会话可以同时提交意图；执行器逐项领取，用该项 channel 的 driver 切到对应目标，核对精确标题、群/私聊类型及草稿后提交，完成本地出站核验再释放桌面。执行期间第二个执行器返回 busy，其他会话仍可读取。队列不依赖默认 selected_id，也不在上一个发送的剪贴板、准备或提交阶段切换会话。
 
-切换会话时，系统输入法提示可能改变空输入框的外观。私有 sender 配置可在 `empty_composer_reference` 之外提供至多两个 `empty_composer_alternates`，格式同为 `{path, sha256}`。每一张都必须是已人工确认无草稿的完整输入区截图，位于私有 UI 目录，尺寸、权限和摘要独立校验。接受其中一张完整像素匹配；不屏蔽提示区域或容忍其他文字/图片。原生准备与提交必须使用同一套参考图，恢复原尝试也必须保留它已使用的参考集合。
+切换会话时，输入框提示可能改变空框的外观。私有 sender 配置可在 `empty_composer_reference` 之外提供至多两个 `empty_composer_alternates`，格式同为 `{path, sha256}`。每一张都必须是已人工确认无草稿的完整输入区截图，位于私有 UI 目录，尺寸、权限和摘要独立校验。接受其中一张完整像素匹配；不屏蔽提示区域或容忍其他文字/图片。每个 attempt 的原生准备与提交必须使用同一套参考图；已冻结的旧参考文件及集合不能改写，恢复时按对应入口的合同核对历史和当前校准。
+
+### 按会话固定空框参考
+
+不同会话可能显示或隐藏输入框提示文字。它们可以分别使用自己的参考集合，不应把某群确认过的画面写入共享模板后覆盖所有群。共享模板仍是缺省值；某个 channel 的私有 `state_dir/conversation-sender-calibration.json` 可以仅覆盖该会话的两项参考字段：
+
+```json
+{
+  "version": 1,
+  "conversation_id": "SYNTHETIC_CONVERSATION",
+  "binding": {
+    "channel_id": "SYNTHETIC_CHANNEL",
+    "session_id": "SYNTHETIC_SESSION",
+    "account": "SYNTHETIC_ACCOUNT",
+    "talker": "SYNTHETIC_GROUP@chatroom"
+  },
+  "helper_sha256": "CURRENT_HELPER_SHA256",
+  "window_size": {"width": 880, "height": 640},
+  "composer_rect": {"x": 308, "y": 497, "width": 559, "height": 93},
+  "empty_composer_reference": {"path": "/ABS/private/ui/empty-with-caret.png", "sha256": "PNG_SHA256"},
+  "empty_composer_alternates": [{"path": "/ABS/private/ui/empty-without-caret.png", "sha256": "OTHER_PNG_SHA256"}]
+}
+```
+
+示例中的身份、摘要和几何必须取自当前实际绑定和模板；不能直接套用示例值。文件必须为当前用户持有的私有普通文件、0600、单链接、规范绝对路径，大小不超过 64 KiB。重复或额外 JSON 字段、不同会话/绑定/助手/几何、越界路径、PNG 头/尺寸或摘要不符均拒绝。文件不存在时保持原缺省行为；存在但无效时在写 driver 配置之前失败，不自动退回共享模板。原生使用参考时还会完整解码图片。
+
+每次 `prepare_driver` 都重新验证该元数据，因此共享模板的参考更新不会冲掉有效的逐会话校准。它不覆盖目标、草稿预期、可执行文件、权限、owner 或 epoch，也不改已冻结 attempt 的 job/state/历史图片。同一会话仍最多三张完整参考，命中任意一张即可通过这一项检查；其他目标、复制和提交守卫继续独立执行。校准图片只能来自确认没有草稿的完整区域，建议用生产像素比较器对原截图和导出的 PNG 做精确往返核验。
+
+同一会话在进入输入框、复制核验和发送后的外观也可能不同。参考集合应覆盖已实际观察到的“有提示／无提示”等合法空框状态，不能只把三张都用在同一种提示的光标变化上。可分别固定两种状态的无光标完整画面，再选一张已确认的常见光标外观；不要遮罩或编辑光标。校准应以实际原生复制核验阶段的帧做验证，恢复前的单张静态画面不代表整个输入过程。显式逐会话校准至少有一张完整参考，不能用 null 加空列表退回无图片的判断。
+
+`--dispatch-preflight` 的 `ready` 仅表示配置、锁、助手、进程及窗口等基础条件通过；它不切到目标执行 `readSelectedDraft`，也不核对当前输入框像素。校准验收应使用生产比较器重放该目标已保存的实际准备阶段帧；仅有三张文件或一个测试群发送成功，都不能代替其他群的覆盖验证。新的 focus/capture 可核对当前目标与外观，但不能描述成新执行过复制守卫或发送。Skill 跨机器同步的是操作指南，逐会话的私有校准仍须单独验证。
+
+微信重启会改变进程号。核对已授权账号、固定助手摘要、唯一窗口和当前原生 inspect 后，应同时更新实际配置来源中的 `sender_template.expected_pid` 与需要更新的 sender 文件。只改某群的 `conversation-sender.json` 会被下一次 `prepare_driver` 从旧模板覆盖；不能删除 PID 检查来放行。修改前保留私有备份，在空闲执行器及共享 sender 锁下处理，不重写旧 attempt、意图或游标。
+
+空框的光标亮灭可以使用分别确认过的完整参考图；整块像素仍须精确匹配。不要仅从一次失败就把所有差异当成光标或关闭剪贴板保护。`Clipboard changed during empty draft verification` 证明检查窗口内的剪贴板发生变化，不证明是哪一个进程写入，也不授予再次发送权。
+
+看似空白的输入框也可能保留空格、制表符或换行。这些字符属于草稿；空框截图不能证明文本为空，也不能把复制结果 `strip()` 后当作空白。先核对对应目标的原生复制证据与截图；需要替换已知草稿时，在空闲执行器及共享锁下给该目标的私有模板和 driver 配置相同的精确 `expected_draft`，让原生再次复制并逐字核对后才粘贴。不得清除未知草稿或在失败请求上自动再试。一次性已知草稿被成功替换后，暂停并核对结果，再把未来请求的预期恢复为空；保留旧配置与原 attempt。新空框参考只能来自实际确认没有草稿的画面，不能把选中的空白字符截成“空框参考”。
+
+### 归档一次空框剪贴板拒绝
+
+若原文字 attempt 1 精确停在 `Clipboard changed during empty draft verification` 或 `Copied composer text does not exactly match expected draft`，且原冻结 `expectedDraft` 为空，可显式归档其调度阻塞：
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json archive-clipboard-rejection \
+  --dispatch-id DISPATCH_ID --expected-attempt 1 \
+  --reason '已核对完整原生轨迹，首次空框检查拒绝且无粘贴或提交'
+```
+
+此入口核对原请求、正文、当前 owner/epoch、完整 inspect/focus/prepare-attempted 与点击、选择、复制前轨迹、历史参考摘要及助手退出，并在双锁内重验产物未变。剪贴板变化错误仍要求首张 empty-check；精确复制不匹配可能在进入视觉空框分支前就拒绝，因此允许没有 empty-check，但已有检查必须连续。出现粘贴、新草稿、submit、后续 attempt 或晚到出站证据时拒绝。结果仅把原 dispatch 记为 `done/clipboard_prepare_rejected`；原 outbox 与 attempt 保持 `indeterminate`，不重发、不开新 attempt、不解除全局暂停，也不把它当作成功的 batch 前件。另一个已获授权、尚未尝试的独立请求可在正常调度条件满足后继续；不能通过换 ID 重放原意图。
+
+### 显式恢复已证明停在首次复制核验的原请求
+
+归档本身不授权重发。只有原意图仍获用户授权、根因和当前空框校准已核实，并且原请求符合以下完整证据时，才可显式恢复同一 ID 一次：
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json recover-clipboard-rejection \
+  --dispatch-id ORIGINAL_DISPATCH --request-id ORIGINAL_REQUEST \
+  --expected-attempt 1 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对原请求授权、首次粘贴前拒绝、完整轨迹和当前校准'
+```
+
+该命令可以实际发送，不能用于只读检查。只接受已归档 `done/clipboard_prepare_rejected` 的托管文字、唯一已结束的 indeterminate attempt 1，及上面两个精确原生错误；原冻结草稿预期须为空。原 request、正文、publisher、owner/epoch、batch/part、绑定、完整点击/选择/复制前轨迹和历史参考均须匹配，且没有粘贴、prepared、submit、晚到出站、其他 attempt 或存活助手。共享桌面须暂停且空闲；当前草稿仍须通过原生核验，不能清掉未知草稿。
+
+Rust 在双锁内先调用精确的 driver capability 和只读证明，再重查原状态与文件摘要，持久记录带 token 的恢复预约后才领取原请求的 attempt 2。驱动仅容许自己刚建立的 attempt 2 起始报告，再次核对原轨迹、保存不可变恢复证明，然后重新 inspect/focus/prepare/submit。旧 attempt 1 的参考集合仍按原摘要验证；新的 attempt 2 可以使用已核实的当前逐会话校准，其自身准备和提交保持一致。任何中断或再次未知都保留原预约和证据，不重新入队、不自动重试或放行 attempt 3。
+
+原 attempt 1、旧原生文件及归档审查记录保持不变；当前 dispatch 只在真实恢复结果产生后更新。真正达到 `ui_observed` 或 `recipient_confirmed` 的恢复前件才满足未来 batch 后件的成功依赖，不能用单纯归档充数。已经被阻塞的零 attempt 后件不会自动恢复；需要按原 `review --restore-unattempted` 合同另行核查。恢复返回时桌面仍暂停，须经正常 `review --confirm-desktop-safe` 后再继续其他工作。
+
+### 严审首两次均在粘贴前拒绝的历史链
+
+上述 V1 入口仍只允许 1→2。另一个独立的显式入口仅处理这种特定历史：首次按 V1 审核恢复后的 attempt 2，又在同一原请求的首次空框复制阶段拒绝，且两次都有完整无粘贴、无提交证据。
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json recover-clipboard-chain \
+  --dispatch-id ORIGINAL_DISPATCH --request-id ORIGINAL_REQUEST \
+  --expected-attempt 2 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对原授权、首两次粘贴前拒绝及完整父证明，当前组合校准覆盖两次实际画面'
+```
+
+两次都必须是同一 text 意图的已结束 indeterminate 尝试。第一次无恢复来源，第二次明确来自第一次，且其不可变 `recovery-proof-to-2.json`、模式、事务 ID、正文摘要及报告指针均须匹配 V1。两套 inspect/focus/prepare-attempted、复制前帧、历史参考集合都要独立核验；两次均不得有 paste、新草稿、prepared、submit、收件或晚到出站、其他未知产物或存活助手。任何其他超时、错误、恢复方式、目标或草稿状态都不准入。
+
+独立 chain capability 和只读证明通过后，Rust 在相同双锁、授权 CAS 和持久预约中仅允许 2→3；驱动再次核对两套证据，单独保存 to-3 证明，再执行正常的原生目标／草稿／提交守卫。前两次对象、文件和审查记录不改写，第四次不获授权，失败也不自动重新调用。命令返回仍保留桌面暂停，成功依赖仍只按真实的当前发送结果计算。
+
+这是会实际发送一次的窄例外，不能拿它绕过用户暂停。必须确认原意图尚未由人工或其他渠道完成，且仍有当前发送授权；人工发送不能回填成旧 bot 成功。用户已改为人工的批次应保持停用，即使机械证据符合历史链也不能执行。
 
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 
@@ -82,6 +164,20 @@ wx-agent dispatch --config /ABS/private/conversations.json review \
 ```
 
 该命令还必须通过新鲜 helper/桌面 preflight，只恢复其他合格项，不重放未知项。托管模式暂不支持 narrow `recover-unsent`，不能通过旧入口或更换 ID绕过；历史未托管恢复仍按原严格证据合同。
+
+### 用户撤销未完成的发送
+
+用户不再需要某条旧消息时，取消的是它今后的发送和恢复资格，不用删除原意图、失败轨迹或修改数据库来清空队列。先暂停共享桌面并等待当前执行结束，读取授权范围内的原请求及实际 attempt，再逐项执行：
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json cancel-request \
+  --conversation-id CONVERSATION --request-id ORIGINAL_REQUEST \
+  --expected-attempt ATTEMPT --reason '用户已撤销该旧消息'
+```
+
+Rust 在执行器和 sender 双锁内核对绑定、原意图与 attempt。成功或仍在执行的发送不能由此取消。其余未完成调度以及旧的非成功归档可记为 `done/cancelled_by_user`；尚未进入调度队列的托管意图，也会得到同一 ID 的终态取消记录。后续 reconcile、重复入队、恢复与换代审查不能复活该请求，取消也不算 batch 前件发送成功。已有取消重复调用不重复改变状态或审计。
+
+原 outbox 的状态和 attempt 证据保持不变，因此 `indeterminate` 仍表示实际投递结果未知，不能因为取消就声称消息没发出。取消操作不调用原生助手，也不解除桌面暂停；它不撤回微信中可能已经存在的消息。批量处理时先冻结授权目标的清单，保留已有成功记录，并在结束后核对所有清单项均有取消终态、无遗漏的未调度意图。其他应用尚未提交的同批发送计划也须由其负责会话撤销，避免稍后另建意图。
 
 ### 已提交文字的后续源记录对账
 

@@ -61,6 +61,38 @@ def resolve_binding(binary, root, state):
     raise DispatchError("channel is not enrolled in this coordinator")
 
 
+def validate_show_response(value, conversation_id, request_id):
+    if (not isinstance(value, dict)
+            or set(value) != {"conversation_id", "request_id", "surface_paused", "dispatch"}
+            or value["conversation_id"] != conversation_id or value["request_id"] != request_id
+            or type(value["surface_paused"]) is not bool):
+        raise DispatchError("dispatch show identity or shape differs")
+    item = value["dispatch"]
+    if item is not None:
+        if (not isinstance(item, dict)
+                or set(item) != {"dispatch_id", "status", "result", "operation", "epoch"}
+                or type(item["dispatch_id"]) is not int or item["dispatch_id"] <= 0
+                or item["status"] not in ("queued", "claimed", "done", "blocked", "unknown")
+                or item["result"] is not None and not isinstance(item["result"], str)
+                or item["operation"] not in ("send", "focus")
+                or type(item["epoch"]) is not int or item["epoch"] <= 0
+                or item["result"] == "cancelled_by_user"
+                and (item["status"] != "done" or item["operation"] != "send")):
+            raise DispatchError("dispatch show record differs")
+    return value
+
+
+def _show_request(binary, root, conversation_id, request_id):
+    value = call(binary, root, "dispatch", "show", "--conversation-id", conversation_id,
+                 "--request-id", request_id)
+    return validate_show_response(value, conversation_id, request_id)
+
+
+def _cancelled_request(binary, root, conversation_id, request_id):
+    item = _show_request(binary, root, conversation_id, request_id)["dispatch"]
+    return item is not None and item["result"] == "cancelled_by_user"
+
+
 def enqueue_existing(binary, state, request_id, owner=None, expected_epoch=None):
     root = managed_root(state)
     if root is None:
@@ -68,8 +100,13 @@ def enqueue_existing(binary, state, request_id, owner=None, expected_epoch=None)
     binding = resolve_binding(binary, root, state)
     if owner != binding["owner"] or expected_epoch != binding["epoch"]:
         raise DispatchError("managed send requires the originating owner and current expected epoch")
-    return root, call(binary, root, "enqueue", "--conversation-id", binding["conversation_id"],
-                      "--request-id", request_id, "--expected-epoch", expected_epoch)
+    if _cancelled_request(binary, root, binding["conversation_id"], request_id):
+        raise DispatchError("original request was cancelled_by_user")
+    queued = call(binary, root, "enqueue", "--conversation-id", binding["conversation_id"],
+                  "--request-id", request_id, "--expected-epoch", expected_epoch)
+    if queued.get("status") == "done" and queued.get("result") == "cancelled_by_user":
+        raise DispatchError("original request was cancelled_by_user")
+    return root, queued
 
 
 def _outbox(binary, state, *parts):
@@ -145,12 +182,19 @@ def send_existing(binary, state, request_id, wait_seconds=90, owner=None, expect
     root, queued = enqueue_existing(binary, state, request_id, owner, expected_epoch)
     deadline = time.monotonic() + wait_seconds
     while True:
+        if _cancelled_request(binary, root, queued["conversation_id"], request_id):
+            raise DispatchError("original request was cancelled_by_user")
         drain(binary, root)
         item = _outbox(binary, state, "show", "--request-id", request_id)
+        shown = _show_request(binary, root, queued["conversation_id"], request_id)
+        record = shown["dispatch"]
+        if record is not None and record["dispatch_id"] != queued["dispatch_id"]:
+            raise DispatchError("dispatch show ID differs from queued request")
+        if record is not None and record["result"] == "cancelled_by_user":
+            raise DispatchError("original request was cancelled_by_user")
         if item["status"] not in ("managed_queued", "managed_media_queued"):
             return item
-        status = call(binary, root, "dispatch", "status")
-        if status.get("paused_reason") or time.monotonic() >= deadline:
+        if shown["surface_paused"] or time.monotonic() >= deadline:
             return {"request_id": request_id, "status": "pending", "dispatch_id": queued["dispatch_id"]}
         time.sleep(0.2)
 
@@ -238,11 +282,24 @@ def main(argv=None):
     review.add_argument("--reason", required=True)
     review.add_argument("--confirm-desktop-safe", action="store_true", required=True)
     review.add_argument("--restore-unattempted", type=int)
-    for name in ("abandon-unsent", "archive-image-copy-rejection", "archive-text-button-rejection"):
+    cancel = sub.add_parser("cancel-request")
+    cancel.add_argument("--conversation-id", required=True)
+    cancel.add_argument("--request-id", required=True)
+    cancel.add_argument("--expected-attempt", type=int, required=True)
+    cancel.add_argument("--reason", required=True)
+    for name in ("abandon-unsent", "archive-image-copy-rejection", "archive-text-button-rejection", "archive-clipboard-rejection"):
         archive = sub.add_parser(name)
         archive.add_argument("--dispatch-id", type=int, required=True)
         archive.add_argument("--expected-attempt", type=int, required=True)
         archive.add_argument("--reason", required=True)
+    for name in ("recover-clipboard-rejection", "recover-clipboard-chain"):
+        recovery = sub.add_parser(name)
+        recovery.add_argument("--dispatch-id", type=int, required=True)
+        recovery.add_argument("--request-id", required=True)
+        recovery.add_argument("--expected-attempt", type=int, required=True)
+        recovery.add_argument("--owner", required=True)
+        recovery.add_argument("--expected-epoch", type=int, required=True)
+        recovery.add_argument("--reason", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
     run.add_argument("--seconds", type=float, default=3600)
@@ -277,10 +334,21 @@ def main(argv=None):
             value = call(binary, root, "dispatch", "resume")
         elif args.action == "review":
             value = review_surface(binary, root, args.reason, args.confirm_desktop_safe, args.restore_unattempted)
-        elif args.action in ("abandon-unsent", "archive-image-copy-rejection", "archive-text-button-rejection"):
+        elif args.action == "cancel-request":
+            value = call(binary, root, "dispatch", "cancel-request",
+                         "--conversation-id", args.conversation_id, "--request-id", args.request_id,
+                         "--expected-attempt", args.expected_attempt, "--reason", args.reason)
+        elif args.action in ("abandon-unsent", "archive-image-copy-rejection", "archive-text-button-rejection", "archive-clipboard-rejection"):
             # Rust holds both locks through native proof and scheduler commit.
             value = call(binary, root, "dispatch", args.action, "--dispatch-id", args.dispatch_id,
                          "--expected-attempt", args.expected_attempt, "--reason", args.reason)
+        elif args.action in ("recover-clipboard-rejection", "recover-clipboard-chain"):
+            # This explicit command can send once. Rust owns admission, the
+            # durable reservation, both locks and original attempt history.
+            value = call(binary, root, "dispatch", args.action,
+                         "--dispatch-id", args.dispatch_id, "--request-id", args.request_id,
+                         "--expected-attempt", args.expected_attempt, "--owner", args.owner,
+                         "--expected-epoch", args.expected_epoch, "--reason", args.reason)
         else:
             value = call(binary, root, "dispatch", "status")
         print(json.dumps(value, separators=(",", ":")))

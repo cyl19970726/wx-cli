@@ -508,6 +508,14 @@ def focus_result_ok(result, config, focus_id, window_id, frame):
 
 def prove_unsent(request, config, attempt_number, deadline, persist=True):
     """Require a complete native no-submit trace before a bounded recovery."""
+    if isinstance(request, dict) and "clipboard_chain_recovery_protocol_version" in request:
+        if type(attempt_number) is not int or attempt_number != 3:
+            raise Refused("clipboard chain recovery permits only attempt 3")
+        return _prove_clipboard_chain(request, config, persist)
+    if isinstance(request, dict) and "clipboard_recovery_protocol_version" in request:
+        if attempt_number != 2:
+            raise Refused("archived clipboard recovery permits only attempt 2")
+        return _prove_archived_clipboard_recovery(request, config, persist)
     if type(attempt_number) is not int or attempt_number < 2:
         raise Refused("recovery requires a later attempt")
     recovery_from = request.get("recovery_from_attempt")
@@ -1104,6 +1112,372 @@ def _known_image_copy_rejection(error):
     types = match.group(1).split(",")
     return (all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", item) for item in types)
             and bool({"public.png", "public.tiff"} & set(types)))
+
+
+CLIPBOARD_ARCHIVE_ERROR = "Clipboard changed during empty draft verification"
+COMPOSER_COPY_ARCHIVE_ERROR = "Copied composer text does not exactly match expected draft"
+
+
+def _clipboard_rejection_names(tid, error):
+    required = {tid + suffix for suffix in (
+        ".client-result.json", "-inspect.inspect.job.json", "-inspect.result.json",
+        "-focus.focus-group.job.json", "-focus.result.json", "-focus.focus-evidence.json",
+        ".prepare-visual.job.json", ".prepare-visual.result.json", ".visual-state.json",
+        ".prepare-start.png", ".old-draft-before-click.png", ".old-draft-before-select.png",
+        ".old-draft-before-copy.png", ".old-draft-copy-ready.png")}
+    if error == CLIPBOARD_ARCHIVE_ERROR:
+        required.add(tid + ".old-draft-empty-check.png")
+    elif error != COMPOSER_COPY_ARCHIVE_ERROR:
+        raise Refused("native clipboard rejection differs")
+    optional = {tid + "-focus." + suffix for suffix in (
+        "focus-attempted.json", "focus-polls.json", "before-search-click.png",
+        "before-search-select.png", "before-search-paste.png", "before-search-copy.png",
+        "search-copy-ready.png", "focus-initial.png", "focus-search-result-main.png",
+        "focus-search-result-popup.png", "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png", "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png", "focus-search-after-click.png",
+        "current-header-confirmed.png")}
+    optional.update(tid + suffix for suffix in (
+        ".old-draft-empty-check-1.png", ".old-draft-empty-check-2.png"))
+    if error == COMPOSER_COPY_ARCHIVE_ERROR:
+        optional.add(tid + ".old-draft-empty-check.png")
+    return required, optional
+
+
+def _clipboard_rejection_snapshot(ui, tid, error=CLIPBOARD_ARCHIVE_ERROR, current_name=None):
+    required, optional = _clipboard_rejection_names(tid, error)
+    if current_name is not None:
+        optional.add(current_name)
+    snapshot = _rejection_artifact_snapshot(ui, tid, required, optional)
+    checks = [tid + suffix for suffix in (".old-draft-empty-check.png",
+              ".old-draft-empty-check-1.png", ".old-draft-empty-check-2.png")]
+    if any(checks[i] in snapshot and checks[i - 1] not in snapshot for i in (1, 2)):
+        raise Refused("original clipboard empty-check sequence is incomplete")
+    return snapshot
+
+
+def clipboard_rejection_preflight(request, config, current_name=None):
+    """Archive a proven original copy rejection, never authorize another attempt."""
+    fields = {"protocol_version", "clipboard_archive_protocol_version", "content_kind", "request_id",
+              "attempt_number", "channel_id", "session_id", "account", "talker", "text"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("clipboard_archive_protocol_version")) is not int
+            or request["clipboard_archive_protocol_version"] != 1
+            or request.get("content_kind") != "text"
+            or type(request.get("attempt_number")) is not int or request["attempt_number"] != 1
+            or "target_name" not in config or config.get("expected_draft", "") != ""
+            or config.get("expected_draft_media") is not None):
+        raise Refused("clipboard archive protocol differs")
+    tid = request_ok(request, config, 1)
+    ui = config["ui_dir"]
+    if current_name is not None and current_name != tid + "-a2.client-result.json":
+        raise Refused("current clipboard recovery report path differs")
+    private(ui, directory=True)
+    if ui.resolve(strict=True) != ui:
+        raise Refused("clipboard archive UI root is not canonical")
+    with recovery_sender_lock(ui / "sender.lock"):
+        deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        if current_name is not None:
+            current = _read_artifact(ui / current_name)
+            if (set(current) != {"id", "attempt_number", "request_id", "stage", "status",
+                    "channel_id", "session_id", "started_at", "recovery_from_attempt"}
+                    or current.get("id") != tid + "-a2" or current.get("attempt_number") != 2
+                    or type(current.get("attempt_number")) is not int
+                    or current.get("recovery_from_attempt") != 1
+                    or type(current.get("recovery_from_attempt")) is not int
+                    or current.get("stage") != "started" or current.get("status") != "indeterminate"
+                    or any(current.get(key) != request[key] for key in ("request_id", "channel_id", "session_id"))):
+                raise Refused("current clipboard recovery already has effects")
+        rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+        native_error = rejected.get("error")
+        if native_error not in (CLIPBOARD_ARCHIVE_ERROR, COMPOSER_COPY_ARCHIVE_ERROR):
+            raise Refused("native clipboard result is not an exact copy rejection")
+        before = _clipboard_rejection_snapshot(ui, tid, native_error, current_name)
+        report = _read_artifact(ui / (tid + ".client-result.json"))
+        if (report.get("id") != tid or report.get("request_id") != request["request_id"]
+                or type(report.get("attempt_number")) is not int or report["attempt_number"] != 1
+                or any(report.get(k) != request[k] for k in ("channel_id", "session_id"))
+                or report.get("stage") != "group_focused" or report.get("status") != "indeterminate"
+                or report.get("error") not in ("composer draft mismatch", "clipboard state changed")
+                or any(k in report for k in ("media_prepared", "media_submitted", "event_cursor",
+                    "recovery_from_attempt", "observation", "ui_submit_seconds",
+                    "submit_action_seconds", "verification_seconds", "late_observation"))):
+            raise Refused("original clipboard report differs")
+        job = _read_artifact(ui / (tid + ".prepare-visual.job.json"))
+        prior_pid = job.get("expectedPID")
+        if type(prior_pid) is not int or prior_pid <= 0:
+            raise Refused("original clipboard PID is invalid")
+        historical = dict(config, expected_pid=prior_pid,
+                          empty_composer_reference=job.get("emptyComposerReference"),
+                          empty_composer_alternates=job.get("emptyComposerAlternates", []))
+        if historical["empty_composer_reference"] is None:
+            raise Refused("original clipboard reference is missing")
+        validate_empty_composer_reference(historical)
+        inspect_id, focus_id = tid + "-inspect", tid + "-focus"
+        inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+        if (_read_artifact(ui / (inspect_id + ".inspect.job.json")) != {"id": inspect_id, "action": "inspect"}
+                or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+                or inspected.get("ok") is not True):
+            raise Refused("original clipboard inspect proof differs")
+        window_id, frame = inspect_ok(inspected, historical)
+        if any(not math.isfinite(frame[k]) for k in ("x", "y", "width", "height")):
+            raise Refused("original clipboard frame is invalid")
+        expected_focus = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+            "allowCurrentHeader": True, "targetKind": config.get("conversation_kind", "group"),
+            "expectedPID": prior_pid, "expectedWindowID": window_id, "expectedFrame": frame,
+            "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
+        focused = _read_artifact(ui / (focus_id + ".result.json"))
+        if (_read_artifact(ui / (focus_id + ".focus-group.job.json")) != expected_focus
+                or focused.get("id") != focus_id or focused.get("action") != "focus-group"
+                or focused.get("ok") is not True or not _permissions_ok(focused.get("permissions"))):
+            raise Refused("original clipboard focus proof differs")
+        proof = focus_result_ok(focused, historical, focus_id, window_id, frame)
+        if (report.get("target_kind") != config.get("conversation_kind", "group")
+                or report.get("focus_evidence_id") != focus_id or report.get("focus_category") != proof["category"]):
+            raise Refused("original clipboard report target differs")
+        expected_job = dict(_prepare_command(request, historical, window_id, frame, focus_id),
+                            id=tid, action="prepare-visual")
+        expected_state = dict(expected_job, stage="prepare-attempted")
+        expected_state.pop("action")
+        if job != expected_job or _read_artifact(ui / (tid + ".visual-state.json")) != expected_state:
+            raise Refused("original clipboard preparation identity or text differs")
+        rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+        if (set(rejected) != {"id", "ok", "error", "permissions"}
+                or rejected.get("id") != tid or rejected.get("ok") is not False
+                or rejected.get("error") != native_error
+                or not _permissions_ok(rejected.get("permissions"))):
+            raise Refused("native clipboard result is not the exact original copy rejection")
+        if _helper_is_live(tid, deadline):
+            raise Refused("original clipboard helper is still live")
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        validate_empty_composer_reference(historical)
+        if _clipboard_rejection_snapshot(ui, tid, native_error, current_name) != before:
+            raise Refused("original clipboard trace changed during proof")
+    return {"protocol_version": 1, "clipboard_archive_protocol_version": 1,
+            "clipboard_rejection_proven": True, "archive_only": True}
+
+
+def _clipboard_recovery_request(request, config):
+    fields = {"protocol_version", "clipboard_recovery_protocol_version", "request_id",
+              "attempt_number", "recovery_from_attempt", "channel_id", "session_id",
+              "account", "talker", "text"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("clipboard_recovery_protocol_version")) is not int
+            or request["clipboard_recovery_protocol_version"] != 1
+            or type(request.get("attempt_number")) is not int or request["attempt_number"] != 2
+            or type(request.get("recovery_from_attempt")) is not int
+            or request["recovery_from_attempt"] != 1):
+        raise Refused("archived clipboard recovery protocol differs")
+    tid = request_ok(request, config, 2)
+    if not tid.endswith("-a2"):
+        raise Refused("archived clipboard recovery transaction differs")
+    original = {key: request[key] for key in fields - {"clipboard_recovery_protocol_version", "recovery_from_attempt"}}
+    original["attempt_number"] = 1
+    original["clipboard_archive_protocol_version"] = 1
+    original["content_kind"] = "text"
+    return tid, original
+
+
+def clipboard_recovery_preflight(request, config):
+    _, original = _clipboard_recovery_request(request, config)
+    clipboard_rejection_preflight(original, config)
+    return {"protocol_version": 1, "clipboard_recovery_protocol_version": 1, "unsent_proven": True}
+
+
+def _prove_archived_clipboard_recovery(request, config, persist):
+    tid, original = _clipboard_recovery_request(request, config)
+    current_name = tid + ".client-result.json" if persist else None
+    clipboard_rejection_preflight(original, config, current_name)
+    proof = {"request_id": request["request_id"], "from_attempt": 1,
+             "attempt_number": 2, "transaction_id": tid[:-3],
+             "text_sha256": hashlib.sha256(request["text"].encode()).hexdigest(),
+             "prior_focus_mode": "archived-clipboard-before-paste"}
+    if not persist:
+        return proof
+    proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+    path = config["ui_dir"] / (tid[:-3] + ".recovery-proof-to-2.json")
+    private_create(path, proof)
+    return str(path)
+
+
+def _clipboard_chain_request(request, config):
+    fields = {"protocol_version", "clipboard_chain_recovery_protocol_version", "request_id",
+              "attempt_number", "recovery_from_attempt", "channel_id", "session_id",
+              "account", "talker", "text"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or type(request.get("protocol_version")) is not int or request["protocol_version"] != 1
+            or type(request.get("clipboard_chain_recovery_protocol_version")) is not int
+            or request["clipboard_chain_recovery_protocol_version"] != 1
+            or type(request.get("attempt_number")) is not int or request["attempt_number"] != 3
+            or type(request.get("recovery_from_attempt")) is not int
+            or request["recovery_from_attempt"] != 2
+            or "target_name" not in config or config.get("expected_draft", "") != ""
+            or config.get("expected_draft_media") is not None):
+        raise Refused("clipboard chain protocol differs")
+    third = request_ok(request, config, 3)
+    return third[:-3], third
+
+
+def _clipboard_chain_snapshot(ui, base, errors, current_name):
+    required, optional = set(), set()
+    for tid, error in ((base, errors[0]), (base + "-a2", errors[1])):
+        need, maybe = _clipboard_rejection_names(tid, error)
+        required.update(need)
+        optional.update(maybe)
+    required.add(base + ".recovery-proof-to-2.json")
+    if current_name is not None:
+        optional.add(current_name)
+    snapshot = _rejection_artifact_snapshot(ui, base, required, optional)
+    for tid in (base, base + "-a2"):
+        checks = [tid + suffix for suffix in (".old-draft-empty-check.png",
+                  ".old-draft-empty-check-1.png", ".old-draft-empty-check-2.png")]
+        if any(checks[i] in snapshot and checks[i - 1] not in snapshot for i in (1, 2)):
+            raise Refused("clipboard empty-check sequence is incomplete")
+    return snapshot
+
+
+def _validate_clipboard_chain_attempt(request, config, tid, attempt, native_error, proof2):
+    ui = config["ui_dir"]
+    report = _read_artifact(ui / (tid + ".client-result.json"))
+    common = {"id", "request_id", "attempt_number", "channel_id", "session_id",
+              "stage", "status", "error", "target_kind", "focus_evidence_id",
+              "focus_category", "started_at", "elapsed_seconds"}
+    extra = {"recovery_from_attempt", "recovery_proof"} if attempt == 2 else set()
+    if (not set(report) <= common | extra
+            or report.get("id") != tid or report.get("request_id") != request["request_id"]
+            or type(report.get("attempt_number")) is not int or report["attempt_number"] != attempt
+            or any(report.get(k) != request[k] for k in ("channel_id", "session_id"))
+            or report.get("stage") != "group_focused" or report.get("status") != "indeterminate"
+            or report.get("error") not in ("composer draft mismatch", "clipboard state changed")
+            or (attempt == 2 and (type(report.get("recovery_from_attempt")) is not int
+                                  or report["recovery_from_attempt"] != 1
+                                  or report.get("recovery_proof") != str(proof2)))
+            or (attempt == 1 and ("recovery_from_attempt" in report or "recovery_proof" in report))):
+        raise Refused("historical clipboard report differs")
+    job = _read_artifact(ui / (tid + ".prepare-visual.job.json"))
+    prior_pid = job.get("expectedPID")
+    if type(prior_pid) is not int or prior_pid <= 0:
+        raise Refused("historical clipboard PID is invalid")
+    historical = dict(config, expected_pid=prior_pid,
+                      empty_composer_reference=job.get("emptyComposerReference"),
+                      empty_composer_alternates=job.get("emptyComposerAlternates", []))
+    if historical["empty_composer_reference"] is None:
+        raise Refused("historical clipboard reference is missing")
+    validate_empty_composer_reference(historical)
+    inspect_id, focus_id = tid + "-inspect", tid + "-focus"
+    inspected = _read_artifact(ui / (inspect_id + ".result.json"))
+    if (_read_artifact(ui / (inspect_id + ".inspect.job.json")) != {"id": inspect_id, "action": "inspect"}
+            or inspected.get("id") != inspect_id or inspected.get("action") != "inspect"
+            or inspected.get("ok") is not True):
+        raise Refused("historical clipboard inspect proof differs")
+    window_id, frame = inspect_ok(inspected, historical)
+    if any(not math.isfinite(frame[k]) for k in ("x", "y", "width", "height")):
+        raise Refused("historical clipboard frame is invalid")
+    expected_focus = {"id": focus_id, "action": "focus-group", "targetGroup": config["target_group"],
+        "allowCurrentHeader": True, "targetKind": config.get("conversation_kind", "group"),
+        "expectedPID": prior_pid, "expectedWindowID": window_id, "expectedFrame": frame,
+        "conversationListRect": config["conversation_list_rect"], "searchPoint": config["search_point"]}
+    focused = _read_artifact(ui / (focus_id + ".result.json"))
+    if (_read_artifact(ui / (focus_id + ".focus-group.job.json")) != expected_focus
+            or focused.get("id") != focus_id or focused.get("action") != "focus-group"
+            or focused.get("ok") is not True or not _permissions_ok(focused.get("permissions"))):
+        raise Refused("historical clipboard focus proof differs")
+    focus = focus_result_ok(focused, historical, focus_id, window_id, frame)
+    if (report.get("target_kind") != config.get("conversation_kind", "group")
+            or report.get("focus_evidence_id") != focus_id
+            or report.get("focus_category") != focus["category"]):
+        raise Refused("historical clipboard report target differs")
+    expected_job = dict(_prepare_command(request, historical, window_id, frame, focus_id),
+                        id=tid, action="prepare-visual")
+    expected_state = dict(expected_job, stage="prepare-attempted")
+    expected_state.pop("action")
+    if job != expected_job or _read_artifact(ui / (tid + ".visual-state.json")) != expected_state:
+        raise Refused("historical clipboard preparation identity or text differs")
+    rejected = _read_artifact(ui / (tid + ".prepare-visual.result.json"))
+    if (set(rejected) != {"id", "ok", "error", "permissions"}
+            or rejected.get("id") != tid or rejected.get("ok") is not False
+            or rejected.get("error") != native_error
+            or not _permissions_ok(rejected.get("permissions"))):
+        raise Refused("native clipboard rejection differs from report")
+    return historical
+
+
+def _prove_clipboard_chain(request, config, persist):
+    base, third = _clipboard_chain_request(request, config)
+    ui = config["ui_dir"]
+    private(ui, directory=True)
+    if ui.resolve(strict=True) != ui:
+        raise Refused("clipboard chain UI root is not canonical")
+    proof2 = ui / (base + ".recovery-proof-to-2.json")
+    proof3 = ui / (base + ".recovery-proof-to-3.json")
+    current_name = third + ".client-result.json" if persist else None
+    with recovery_sender_lock(ui / "sender.lock"):
+        deadline = time.monotonic() + BUDGET
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        if _exists(proof3):
+            raise Refused("clipboard chain proof already exists")
+        if current_name is not None:
+            current = _read_artifact(ui / current_name)
+            if (set(current) != {"id", "attempt_number", "request_id", "stage", "status",
+                                 "channel_id", "session_id", "started_at", "recovery_from_attempt"}
+                    or current.get("id") != third
+                    or type(current.get("attempt_number")) is not int or current["attempt_number"] != 3
+                    or type(current.get("recovery_from_attempt")) is not int
+                    or current["recovery_from_attempt"] != 2
+                    or current.get("stage") != "started" or current.get("status") != "indeterminate"
+                    or any(current.get(k) != request[k] for k in ("request_id", "channel_id", "session_id"))):
+                raise Refused("third clipboard attempt already has effects")
+        parent = _read_artifact(proof2)
+        if (set(parent) != {"request_id", "from_attempt", "attempt_number", "transaction_id",
+                            "text_sha256", "prior_focus_mode", "proof_saved_at"}
+                or parent.get("request_id") != request["request_id"]
+                or type(parent.get("from_attempt")) is not int or parent["from_attempt"] != 1
+                or type(parent.get("attempt_number")) is not int or parent["attempt_number"] != 2
+                or parent.get("transaction_id") != base
+                or parent.get("text_sha256") != hashlib.sha256(request["text"].encode()).hexdigest()
+                or parent.get("prior_focus_mode") != "archived-clipboard-before-paste"
+                or not isinstance(parent.get("proof_saved_at"), str)):
+            raise Refused("parent clipboard proof differs")
+        errors = []
+        for tid in (base, base + "-a2"):
+            error = _read_artifact(ui / (tid + ".prepare-visual.result.json")).get("error")
+            if error not in (CLIPBOARD_ARCHIVE_ERROR, COMPOSER_COPY_ARCHIVE_ERROR):
+                raise Refused("historical native clipboard rejection differs")
+            errors.append(error)
+        before = _clipboard_chain_snapshot(ui, base, errors, current_name)
+        history = []
+        for attempt, tid in ((1, base), (2, base + "-a2")):
+            history.append(_validate_clipboard_chain_attempt(request, config, tid, attempt,
+                                                             errors[attempt - 1], proof2))
+            if _helper_is_live(tid, deadline):
+                raise Refused("historical clipboard helper is still live")
+        _guard_helper(config, deadline, clear=False)
+        status(config, deadline)
+        for historical in history:
+            validate_empty_composer_reference(historical)
+        if _clipboard_chain_snapshot(ui, base, errors, current_name) != before:
+            raise Refused("clipboard chain changed during proof")
+        proof = {"request_id": request["request_id"], "from_attempt": 2,
+                 "attempt_number": 3, "transaction_id": base,
+                 "text_sha256": hashlib.sha256(request["text"].encode()).hexdigest(),
+                 "prior_focus_mode": "clipboard-first-two-before-paste"}
+        if not persist:
+            return proof
+        proof["proof_saved_at"] = datetime.now(timezone.utc).isoformat()
+        private_create(proof3, proof)
+        return str(proof3)
+
+
+def clipboard_chain_recovery_preflight(request, config):
+    _prove_clipboard_chain(request, config, persist=False)
+    return {"protocol_version": 1, "clipboard_chain_recovery_protocol_version": 1,
+            "unsent_proven": True}
 
 
 def image_rejection_preflight(request, config):
@@ -1721,8 +2095,8 @@ def helper_reason(result):
         ("group rows", "ambiguous target group rows"),
         ("group absent", "target group not found"),
         ("search input", "search input mismatch"),
-        ("draft", "composer draft mismatch"),
         ("clipboard", "clipboard state changed"),
+        ("draft", "composer draft mismatch"),
         ("Send button", "Send button not confirmed"),
         ("Send label", "Send button not confirmed"),
         ("window", "WeChat window changed"),
@@ -2066,6 +2440,63 @@ def run(request, config):
 def main(argv=None):
     os.umask(0o077)
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--clipboard-chain-recovery-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "clipboard_chain_recovery_protocol_version": 1,
+                          "first_two_text_before_paste_only": True, "max_attempt": 3},
+                         separators=(",", ":")))
+        return 0
+    if argv == ["--clipboard-chain-recovery-preflight"]:
+        result = {"protocol_version": 1, "clipboard_chain_recovery_protocol_version": 1,
+                  "unsent_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = clipboard_chain_recovery_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["unsent_proven"] else 1
+    if argv == ["--clipboard-recovery-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "clipboard_recovery_protocol_version": 1,
+                          "first_text_before_paste_only": True, "max_attempt": 2}, separators=(",", ":")))
+        return 0
+    if argv == ["--clipboard-recovery-preflight"]:
+        result = {"protocol_version": 1, "clipboard_recovery_protocol_version": 1, "unsent_proven": False}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = clipboard_recovery_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["unsent_proven"] else 1
+    if argv == ["--clipboard-archive-capabilities"]:
+        print(json.dumps({"protocol_version": 1, "clipboard_archive_protocol_version": 1,
+                          "archive_only": True, "before_paste_only": True}, separators=(",", ":")))
+        return 0
+    if argv == ["--clipboard-archive-preflight"]:
+        result = {"protocol_version": 1, "clipboard_archive_protocol_version": 1,
+                  "clipboard_rejection_proven": False, "archive_only": True}
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+            if len(raw) > MAX_INPUT:
+                raise Refused("request too large")
+            cfg = os.environ.get("WX_SENDER_CONFIG")
+            if not cfg:
+                raise Refused("WX_SENDER_CONFIG required")
+            result = clipboard_rejection_preflight(json.loads(raw), safe_config(private_read(abs_path(cfg))))
+        except (Refused, Uncertain, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["clipboard_rejection_proven"] else 1
     if argv == ["--focus-abandon-capabilities"]:
         print(json.dumps({"protocol_version": 1, "focus_abandon_protocol_version": 1,
                           "before_prepare_only": True, "archive_only": True}, separators=(",", ":")))

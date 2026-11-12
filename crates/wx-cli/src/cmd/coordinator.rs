@@ -210,6 +210,13 @@ pub enum DispatchAction {
         token: String,
     },
     Status,
+    /// Read one dispatch's metadata without scanning the desktop queue.
+    Show {
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
     Pause {
         #[arg(long)]
         reason: String,
@@ -256,6 +263,36 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// Recover one archived first TEXT clipboard rejection under its original request.
+    RecoverClipboardRejection {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// One reviewed historical pair of TEXT clipboard failures, under the same request.
+    RecoverClipboardChain {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Retire only the original known IMAGE Copy rejection; never authorize a retry.
     ArchiveImageCopyRejection {
         #[arg(long)]
@@ -269,6 +306,26 @@ pub enum DispatchAction {
     ArchiveTextButtonRejection {
         #[arg(long)]
         dispatch_id: i64,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Archive one proven TEXT clipboard rejection before paste; never retry its attempt.
+    ArchiveClipboardRejection {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Revoke future dispatch of one original request without deciding whether it was sent.
+    CancelRequest {
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        request_id: String,
         #[arg(long)]
         expected_attempt: i64,
         #[arg(long)]
@@ -873,6 +930,18 @@ fn enqueue(
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = binding(&tx, id)?;
     verify_binding(&b)?;
+    if !focus {
+        let cancelled: Option<i64> = tx.query_row(
+            "SELECT id FROM dispatch WHERE conversation_id=?1 AND request_id=?2 AND operation='send' AND status='done' AND result='cancelled_by_user'",
+            params![id,request], |r| r.get(0),
+        ).optional()?;
+        if let Some(dispatch_id) = cancelled {
+            return Ok(
+                json!({"dispatch_id":dispatch_id,"conversation_id":id,"request_id":request,
+                "operation":"send","status":"done","result":"cancelled_by_user"}),
+            );
+        }
+    }
     if b.epoch != expected || b.control != "active" {
         return Err(invalid("conversation control epoch or state changed"));
     }
@@ -885,14 +954,14 @@ fn enqueue(
         ));
     }
     let operation = if focus { "focus" } else { "send" };
-    let existing:Option<(i64,String,i64,String)>=tx.query_row("SELECT id,operation,epoch,status FROM dispatch WHERE conversation_id=?1 AND request_id=?2",params![id,request],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    let dispatch_id = if let Some((n, op, epoch, _)) = existing {
-        if op != operation || epoch != expected {
+    let existing:Option<(i64,String,i64,String,Option<String>)>=tx.query_row("SELECT id,operation,epoch,status,result FROM dispatch WHERE conversation_id=?1 AND request_id=?2",params![id,request],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    let dispatch_id = if let Some((n, op, epoch, _, _)) = &existing {
+        if op != operation || *epoch != expected {
             return Err(invalid(
                 "dispatch reference already exists with different operation or epoch",
             ));
         }
-        n
+        *n
     } else {
         let scheduling = if focus {
             None
@@ -903,8 +972,13 @@ fn enqueue(
         tx.last_insert_rowid()
     };
     tx.commit()?;
+    let (status, result) = existing
+        .map_or(("queued".to_owned(), None), |(_, _, _, status, result)| {
+            (status, result)
+        });
     Ok(
-        json!({"dispatch_id":dispatch_id,"conversation_id":id,"request_id":request,"operation":operation,"status":"queued"}),
+        json!({"dispatch_id":dispatch_id,"conversation_id":id,"request_id":request,
+        "operation":operation,"status":status,"result":result}),
     )
 }
 fn reconcile_outbox(root: &Path, id: &str) -> Result<Value, Box<dyn Error>> {
@@ -1245,17 +1319,54 @@ fn dispatch_status(root: &Path) -> Result<Value, Box<dyn Error>> {
     )
 }
 
+fn dispatch_show(root: &Path, conversation: &str, request: &str) -> Result<Value, Box<dyn Error>> {
+    check_id(conversation)?;
+    check_id(request)?;
+    let db = open(root, false)?;
+    let b = binding(&db, conversation)?;
+    verify_binding(&b)?;
+    let surface_paused: bool = db.query_row(
+        "SELECT paused_reason IS NOT NULL FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let dispatch: Option<Value> = db.query_row(
+        "SELECT id,status,result,operation,epoch FROM dispatch WHERE conversation_id=?1 AND request_id=?2",
+        params![conversation,request],
+        |r| Ok(json!({"dispatch_id":r.get::<_,i64>(0)?,"status":r.get::<_,String>(1)?,
+            "result":r.get::<_,Option<String>>(2)?,"operation":r.get::<_,String>(3)?,
+            "epoch":r.get::<_,i64>(4)?})),
+    ).optional()?;
+    Ok(json!({"conversation_id":conversation,"request_id":request,
+        "surface_paused":surface_paused,"dispatch":dispatch}))
+}
+
 fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn Error>> {
+    restore_queued_with_after_marker(root, id, reason, || Ok(()))
+}
+
+// The callback is a no-op in production; tests use it to place cancellation
+// exactly after the durable marker and before the second coordinator fence.
+fn restore_queued_with_after_marker<F>(
+    root: &Path,
+    id: i64,
+    reason: &str,
+    after_marker: F,
+) -> Result<Value, Box<dyn Error>>
+where
+    F: FnOnce() -> Result<(), Box<dyn Error>>,
+{
     if reason.trim().len() < 8 || reason.len() > 512 {
         return Err(invalid("restoration requires a bounded review reason"));
     }
     let mut db = open(root, true)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (conversation, request, status, operation, epoch): (String, String, String, String, i64) =
+    let (conversation, request, status, operation, epoch, channel, result):
+        (String, String, String, String, i64, String, Option<String>) =
         tx.query_row(
-            "SELECT conversation_id,request_id,status,operation,epoch FROM dispatch WHERE id=?1",
+            "SELECT conversation_id,request_id,status,operation,epoch,channel_id,result FROM dispatch WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )?;
     let active: Option<i64> = tx.query_row(
         "SELECT active_dispatch FROM surface WHERE singleton=1",
@@ -1265,6 +1376,7 @@ fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn E
     let b = binding(&tx, &conversation)?;
     if active.is_some()
         || operation != "send"
+        || channel != b.channel_id
         || !matches!(status.as_str(), "unknown" | "blocked")
         || b.control != "active"
         || b.reply_policy != "authorized"
@@ -1301,20 +1413,66 @@ fn restore_queued(root: &Path, id: i64, reason: &str) -> Result<Value, Box<dyn E
         params![marker, now()],
     )?;
     tx.commit()?;
+    after_marker()?;
+    // The second coordinator reservation stays open through the outbox commit
+    // and dispatch CAS. Cancellation must serialize on this same reservation.
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: (String, String, String, String, i64, String, Option<String>) = tx.query_row(
+        "SELECT conversation_id,request_id,status,operation,epoch,channel_id,result FROM dispatch WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    )?;
+    let current_binding = binding(&tx, &conversation)?;
+    verify_binding(&current_binding)?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let marker_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM surface_review WHERE reason=?1)",
+        [&marker],
+        |r| r.get(0),
+    )?;
+    if current
+        != (
+            conversation.clone(),
+            request.clone(),
+            status.clone(),
+            operation.clone(),
+            epoch,
+            channel.clone(),
+            result.clone(),
+        )
+        || active.is_some()
+        || !marker_exists
+        || current_binding.state != b.state
+        || current_binding.channel_id != b.channel_id
+        || current_binding.session_id != b.session_id
+        || current_binding.owner != b.owner
+        || current_binding.epoch != b.epoch
+        || current_binding.control != "active"
+        || current_binding.reply_policy != "authorized"
+    {
+        return Err(invalid("restore authority changed after durable marker"));
+    }
     let outbox = b.state.join("outgoing.sqlite3");
     let mut outbox = Connection::open_with_flags(&outbox, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let outbox_tx = outbox.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    outbox_tx.execute(
-        "UPDATE outgoing_intent SET managed_owner=?1,managed_epoch=?2 WHERE request_id=?3 AND managed_owner=?4 AND managed_epoch=?5 AND attempt_number=0 AND status IN ('managed_queued','managed_media_queued')",
-        params![b.owner,b.epoch,request,original.owner,original.epoch],
+    let changed = outbox_tx.execute(
+        "UPDATE outgoing_intent SET managed_owner=?1,managed_epoch=?2 WHERE request_id=?3 AND managed_owner=?4 AND managed_epoch=?5 AND attempt_number=0 AND channel_id=?6 AND session_id=?7 AND status=?8 AND batch_id IS ?9 AND part_index IS ?10 AND priority=?11 AND expires_at IS ?12",
+        params![b.owner,b.epoch,request,original.owner,original.epoch,b.channel_id,b.session_id,
+            original.status,original.batch_id,original.part_index,original.priority,original.expires_at],
     )?;
+    if changed != 1 {
+        return Err(invalid("outbox origin changed during restore"));
+    }
     outbox_tx.commit()?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute(
-        "UPDATE dispatch SET epoch=?2 WHERE id=?1",
-        params![id, b.epoch],
-    )?;
-    tx.execute("UPDATE dispatch SET status='queued',token=NULL,worker=NULL,lease_until=NULL,result='restored_before_attempt',updated_at=?2 WHERE id=?1",params![id,now()])?;
+    let changed = tx.execute("UPDATE dispatch SET epoch=?2,status='queued',token=NULL,worker=NULL,lease_until=NULL,result='restored_before_attempt',updated_at=?3 WHERE id=?1 AND status=?4 AND epoch=?5 AND channel_id=?6 AND result IS ?7",
+        params![id,b.epoch,now(),status,epoch,channel,result])?;
+    if changed != 1 {
+        return Err(invalid("restore dispatch CAS failed"));
+    }
     tx.execute("DELETE FROM surface_review WHERE reason=?1", [&marker])?;
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",params![reason,now()])?;
     tx.commit()?;
@@ -1436,6 +1594,8 @@ fn focus_recovery_context(
     request: &str,
     owner: &str,
     epoch: i64,
+    archived: bool,
+    chain: bool,
 ) -> Result<(Binding, Value), Box<dyn Error>> {
     let (conversation, channel, dispatch_epoch, status, result, operation, saved_request):
         (String, String, i64, String, Option<String>, String, String) = db.query_row(
@@ -1456,8 +1616,14 @@ fn focus_recovery_context(
     if paused.is_none()
         || active.is_some()
         || live
-        || status != "unknown"
-        || result.as_deref() != Some("indeterminate")
+        || (status.as_str(), result.as_deref())
+            != if chain {
+                ("unknown", Some("indeterminate"))
+            } else if archived {
+                ("done", Some("clipboard_prepare_rejected"))
+            } else {
+                ("unknown", Some("indeterminate"))
+            }
         || operation != "send"
         || saved_request != request
         || channel != b.channel_id
@@ -1474,22 +1640,40 @@ fn focus_recovery_context(
         ));
     }
     let item = intent(&b, request)?;
+    if archived || chain {
+        let schedule: (Option<String>, Option<i64>) = db.query_row(
+            "SELECT batch_id,part_index FROM dispatch WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if schedule != (item.batch_id.clone(), item.part_index) {
+            return Err(invalid("archived clipboard batch or part differs"));
+        }
+    }
     let original = super::outgoing::intent_view(&b.state, request)?;
     let attempts = original["attempts"]
         .as_array()
         .ok_or_else(|| invalid("missing attempts"))?;
+    let expected = if chain { 2 } else { 1 };
     if item.content_kind != "text"
         || item.status != "indeterminate"
-        || item.attempts != 1
+        || item.attempts != expected
         || item.owner.as_deref() != Some(owner)
         || item.epoch != Some(epoch)
         || item.expires_at.is_some_and(|t| t <= now())
-        || attempts.len() != 1
+        || attempts.len() != expected as usize
         || attempts[0]["attempt_number"] != 1
         || attempts[0]["status"] != "indeterminate"
         || !attempts[0]["finished_at"].is_i64()
         || !attempts[0]["recovery_from_attempt"].is_null()
-        || original["result_evidence"] != attempts[0]["result_evidence"]
+        || !attempts[0]["recovery_prior_status"].is_null()
+        || (chain
+            && (attempts[1]["attempt_number"] != 2
+                || attempts[1]["status"] != "indeterminate"
+                || !attempts[1]["finished_at"].is_i64()
+                || attempts[1]["recovery_from_attempt"] != 1
+                || attempts[1]["recovery_prior_status"] != "indeterminate"))
+        || original["result_evidence"] != attempts[expected as usize - 1]["result_evidence"]
         || !original["receipt_evidence"].is_null()
         || original.get("late_observation").is_some()
     {
@@ -1653,16 +1837,289 @@ fn prepare_header_recovery_artifacts(
     Ok(snapshot.into_iter().collect())
 }
 
+fn clipboard_recovery_artifacts(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    clipboard_recovery_artifacts_scoped(root, b, request, original, false)
+}
+
+fn clipboard_recovery_artifacts_scoped(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+    chain: bool,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let read = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{tid}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if original["result_evidence"] != report_path.to_string_lossy().as_ref() {
+        return Err(invalid("clipboard recovery original report path differs"));
+    }
+    let native = read(".prepare-visual.result.json")?;
+    let error = native["error"]
+        .as_str()
+        .ok_or_else(|| invalid("clipboard error missing"))?;
+    if !matches!(
+        error,
+        CLIPBOARD_EMPTY_REJECTION_ERROR | COMPOSER_COPY_ARCHIVE_ERROR
+    ) {
+        return Err(invalid("clipboard recovery native error differs"));
+    }
+    let job = read(".prepare-visual.job.json")?;
+    let snapshot = clipboard_rejection_snapshot_scoped(root, &tid, &job, error, chain)?;
+    let report = read(".client-result.json")?;
+    let state = read(".visual-state.json")?;
+    if report["id"] != tid
+        || report["request_id"] != request
+        || report["attempt_number"] != 1
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || !["clipboard state changed", "composer draft mismatch"]
+            .iter()
+            .any(|category| report["error"] == *category)
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "recovery_from_attempt",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+            "late_observation",
+        ]
+        .iter()
+        .any(|key| report.get(*key).is_some())
+        || native
+            != json!({"id":tid,"ok":false,"error":error,
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+        || job["id"] != tid
+        || job["action"] != "prepare-visual"
+        || job["expectedDraft"] != ""
+        || job.get("media").is_some_and(|v| !v.is_null())
+        || state["id"] != tid
+        || state["stage"] != "prepare-attempted"
+        || state.get("media").is_some_and(|v| !v.is_null())
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "submitted",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid("clipboard recovery original evidence differs"));
+    }
+    let mut expected_state = job.clone();
+    expected_state
+        .as_object_mut()
+        .ok_or_else(|| invalid("invalid prepare job"))?
+        .remove("action");
+    expected_state["stage"] = json!("prepare-attempted");
+    if state != expected_state || job["text"] != original["text"] {
+        return Err(invalid("clipboard recovery original text or state differs"));
+    }
+    Ok(snapshot.into_iter().collect())
+}
+
+fn clipboard_chain_artifacts(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let base = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let second = format!("{base}-a2");
+    let first_report = root.join(format!("{base}.client-result.json"));
+    let second_report = root.join(format!("{second}.client-result.json"));
+    let proof_path = root.join(format!("{base}.recovery-proof-to-2.json"));
+    if original["attempts"][0]["result_evidence"] != first_report.to_string_lossy().as_ref()
+        || original["attempts"][1]["result_evidence"] != second_report.to_string_lossy().as_ref()
+    {
+        return Err(invalid("clipboard chain report paths differ"));
+    }
+    let mut first = original.clone();
+    first["result_evidence"] = original["attempts"][0]["result_evidence"].clone();
+    first["text"] = original["text"].clone();
+    let mut snapshot: std::collections::BTreeMap<String, String> =
+        clipboard_recovery_artifacts_scoped(root, b, request, &first, true)?
+            .into_iter()
+            .collect();
+    let read = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{second}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let report = read(".client-result.json")?;
+    let job = read(".prepare-visual.job.json")?;
+    let native = read(".prepare-visual.result.json")?;
+    let state = read(".visual-state.json")?;
+    let error = native["error"]
+        .as_str()
+        .ok_or_else(|| invalid("second clipboard error missing"))?;
+    if !matches!(
+        error,
+        CLIPBOARD_EMPTY_REJECTION_ERROR | COMPOSER_COPY_ARCHIVE_ERROR
+    ) || report["id"] != second
+        || report["request_id"] != request
+        || report["attempt_number"] != 2
+        || report["recovery_from_attempt"] != 1
+        || report["recovery_proof"] != proof_path.to_string_lossy().as_ref()
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || !["clipboard state changed", "composer draft mismatch"]
+            .iter()
+            .any(|v| report["error"] == *v)
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+            "late_observation",
+        ]
+        .iter()
+        .any(|k| report.get(*k).is_some())
+        || native
+            != json!({"id":second,"ok":false,"error":error,
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+        || job["id"] != second
+        || job["action"] != "prepare-visual"
+        || job["expectedDraft"] != ""
+        || job["text"] != original["text"]
+        || job.get("media").is_some_and(|v| !v.is_null())
+        || state["id"] != second
+        || state["stage"] != "prepare-attempted"
+        || state.get("media").is_some_and(|v| !v.is_null())
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "submitted",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|k| state.get(*k).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid("second clipboard trace differs"));
+    }
+    let mut expected_state = job.clone();
+    expected_state
+        .as_object_mut()
+        .ok_or_else(|| invalid("second prepare job invalid"))?
+        .remove("action");
+    expected_state["stage"] = json!("prepare-attempted");
+    if state != expected_state {
+        return Err(invalid("second clipboard prepare state differs"));
+    }
+    snapshot.extend(clipboard_rejection_snapshot(root, &second, &job, error)?);
+    let proof: Value = serde_json::from_slice(&image_rejection_read(&proof_path, 65536)?)?;
+    let fields = [
+        "request_id",
+        "from_attempt",
+        "attempt_number",
+        "transaction_id",
+        "text_sha256",
+        "prior_focus_mode",
+        "proof_saved_at",
+    ];
+    if proof.as_object().map(|o| o.len()) != Some(fields.len())
+        || fields.iter().any(|k| proof.get(*k).is_none())
+        || proof["request_id"] != request
+        || proof["from_attempt"] != 1
+        || proof["attempt_number"] != 2
+        || proof["transaction_id"] != base
+        || proof["text_sha256"]
+            != hex::encode(Sha256::digest(
+                original["text"]
+                    .as_str()
+                    .ok_or_else(|| invalid("text missing"))?
+                    .as_bytes(),
+            ))
+        || proof["prior_focus_mode"] != "archived-clipboard-before-paste"
+        || !proof["proof_saved_at"].is_string()
+    {
+        return Err(invalid("first clipboard recovery proof differs"));
+    }
+    snapshot.insert(
+        proof_path.to_string_lossy().into_owned(),
+        hex::encode(Sha256::digest(image_rejection_read(&proof_path, 65536)?)),
+    );
+    let mut combined_bytes = 0u64;
+    for name in snapshot.keys() {
+        let path = if Path::new(name).is_absolute() {
+            Path::new(name).to_path_buf()
+        } else {
+            root.join(name)
+        };
+        combined_bytes = combined_bytes.saturating_add(fs::symlink_metadata(path)?.len());
+        if combined_bytes > 128 * 1024 * 1024 {
+            return Err(invalid("clipboard chain exceeds bound"));
+        }
+    }
+    // The union must contain every historical artifact and no later attempt product.
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid("clipboard chain directory exceeds bound"));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&format!("{base}.")) && !name.starts_with(&format!("{base}-")) {
+            continue;
+        }
+        if !snapshot.contains_key(&name) && name != format!("{base}.recovery-proof-to-2.json") {
+            return Err(invalid(format!("unknown clipboard chain artifact: {name}")));
+        }
+    }
+    Ok(snapshot.into_iter().collect())
+}
+
 #[derive(Clone, Copy)]
 enum RecoveryKind {
     FocusSearch,
     PrepareHeader,
+    ClipboardRejection,
+    ClipboardChain,
 }
 impl RecoveryKind {
     fn label(self) -> &'static str {
         match self {
             Self::FocusSearch => "focus_recovery",
             Self::PrepareHeader => "prepare_header_recovery",
+            Self::ClipboardRejection => "clipboard_rejection_recovery",
+            Self::ClipboardChain => "clipboard_chain_recovery",
         }
     }
     fn artifacts(
@@ -1677,6 +2134,10 @@ impl RecoveryKind {
             Self::PrepareHeader => {
                 prepare_header_recovery_artifacts(root, binding, request, original)
             }
+            Self::ClipboardRejection => {
+                clipboard_recovery_artifacts(root, binding, request, original)
+            }
+            Self::ClipboardChain => clipboard_chain_artifacts(root, binding, request, original),
         }
     }
     fn preflight(
@@ -1692,6 +2153,12 @@ impl RecoveryKind {
             }
             Self::PrepareHeader => {
                 super::outgoing::prepare_header_recovery_preflight(state, request, driver, fd)
+            }
+            Self::ClipboardRejection => {
+                super::outgoing::clipboard_recovery_preflight(state, request, driver, fd)
+            }
+            Self::ClipboardChain => {
+                super::outgoing::clipboard_chain_preflight(state, request, driver, fd)
             }
         }
     }
@@ -1722,9 +2189,11 @@ fn recover_reviewed(
     let root = &root.canonicalize()?;
     check_id(request)?;
     check_id(owner)?;
-    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+    let chain = matches!(kind, RecoveryKind::ClipboardChain);
+    let from = if chain { 2 } else { 1 };
+    if expected_attempt != from || reason.trim().len() < 8 || reason.len() > 512 {
         return Err(invalid(
-            "focus recovery requires attempt 1 and a bounded audit reason",
+            "recovery requires the exact prior attempt and a bounded audit reason",
         ));
     }
     let mut locks = Vec::new();
@@ -1746,7 +2215,8 @@ fn recover_reviewed(
     }
     let sender_fd = locks[1].as_raw_fd();
     let mut db = open(root, true)?;
-    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch)?;
+    let archived = matches!(kind, RecoveryKind::ClipboardRejection);
+    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch, archived, chain)?;
     let artifacts = kind.artifacts(root, &b, request, &snapshot["original"])?;
     let driver = b.state.join("conversation-sender");
     let meta = fs::symlink_metadata(&driver)?;
@@ -1761,7 +2231,7 @@ fn recover_reviewed(
     }
     kind.preflight(&b.state, request, &driver, sender_fd)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch)?;
+    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch, archived, chain)?;
     if latest != snapshot || kind.artifacts(root, &b, request, &snapshot["original"])? != artifacts
     {
         return Err(invalid(
@@ -1771,15 +2241,23 @@ fn recover_reviewed(
     let claim_token = token()?;
     let purpose = format!("reviewed_{}", kind.label());
     let worker = format!("reviewed-{}", kind.label().replace('_', "-"));
-    let changed = tx.execute("UPDATE dispatch SET status='claimed',result=?6,token=?2,worker=?7,lease_until=?3,updated_at=?4 WHERE id=?1 AND status='unknown' AND result='indeterminate' AND epoch=?5",
-        params![id,claim_token,now()+120,now(),epoch,purpose,worker])?;
+    let (previous_status, previous_result) = if archived {
+        ("done", "clipboard_prepare_rejected")
+    } else {
+        ("unknown", "indeterminate")
+    };
+    let changed = tx.execute("UPDATE dispatch SET status='claimed',result=?6,token=?2,worker=?7,lease_until=?3,updated_at=?4 WHERE id=?1 AND status=?8 AND result=?9 AND epoch=?5",
+        params![id,claim_token,now()+120,now(),epoch,purpose,worker,previous_status,previous_result])?;
     if changed != 1 {
-        return Err(invalid("stale focus recovery dispatch claim"));
+        return Err(invalid("stale reviewed recovery dispatch claim"));
     }
-    tx.execute("UPDATE surface SET active_dispatch=?1,epoch=epoch+1 WHERE singleton=1 AND active_dispatch IS NULL AND paused_reason IS NOT NULL",[id])?;
+    let changed = tx.execute("UPDATE surface SET active_dispatch=?1,epoch=epoch+1 WHERE singleton=1 AND active_dispatch IS NULL AND paused_reason IS NOT NULL",[id])?;
+    if changed != 1 {
+        return Err(invalid("recovery surface changed"));
+    }
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
-        params![format!("{} dispatch={id} request={request} owner={owner} epoch={epoch} attempt=1->2: {reason}", kind.label()),now()])?;
-    // Durable recovery reservation and audit precede attempt 2 and all effects.
+        params![format!("{} dispatch={id} request={request} owner={owner} epoch={epoch} attempt={from}->{}: {reason}", kind.label(),from+1),now()])?;
+    // Durable recovery reservation and audit precede the next attempt and all effects.
     tx.commit()?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // No control writer may commit between admission, attempt and driver result.
@@ -1800,14 +2278,23 @@ fn recover_reviewed(
             "focus recovery binding or evidence changed before attempt",
         ));
     }
-    let attempt =
-        super::outgoing::claim_managed_focus_recovery(&b.state, request, &snapshot["original"])?;
-    super::outgoing::execute_managed_focus_recovery(&b.state, &driver, attempt, sender_fd)?;
+    let attempt = if chain {
+        super::outgoing::claim_managed_clipboard_chain(&b.state, request, &snapshot["original"])?
+    } else {
+        super::outgoing::claim_managed_focus_recovery(&b.state, request, &snapshot["original"])?
+    };
+    if chain {
+        super::outgoing::execute_managed_clipboard_chain(&b.state, &driver, attempt, sender_fd)?;
+    } else if archived {
+        super::outgoing::execute_managed_clipboard_recovery(&b.state, &driver, attempt, sender_fd)?;
+    } else {
+        super::outgoing::execute_managed_focus_recovery(&b.state, &driver, attempt, sender_fd)?;
+    }
     tx.commit()?;
     let mut completed = dispatch_complete(root, id, &claim_token, None)?;
     completed["surface_paused"] = json!(true);
-    completed["attempt_number"] = json!(2);
-    completed["recovery_from_attempt"] = json!(1);
+    completed["attempt_number"] = json!(from + 1);
+    completed["recovery_from_attempt"] = json!(from);
     Ok(completed)
 }
 
@@ -2580,6 +3067,195 @@ fn archive_image_copy_rejection(
 const TEXT_BUTTON_REJECTION_ERROR: &str =
     "Expected exactly one visible Send label in lower conversation pane";
 
+const CLIPBOARD_EMPTY_REJECTION_ERROR: &str = "Clipboard changed during empty draft verification";
+const COMPOSER_COPY_ARCHIVE_ERROR: &str =
+    "Copied composer text does not exactly match expected draft";
+
+// Only artifacts that can precede the first prepare paste are admissible. In
+// particular, a submit marker or any later draft screenshot invalidates proof.
+fn clipboard_rejection_snapshot(
+    root: &Path,
+    tid: &str,
+    prepare_job: &Value,
+    native_error: &str,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    clipboard_rejection_snapshot_scoped(root, tid, prepare_job, native_error, false)
+}
+
+fn clipboard_rejection_snapshot_scoped(
+    root: &Path,
+    tid: &str,
+    prepare_job: &Value,
+    native_error: &str,
+    allow_chain_sibling: bool,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn Error>> {
+    let required = [
+        ".client-result.json",
+        "-inspect.inspect.job.json",
+        "-inspect.result.json",
+        "-focus.focus-group.job.json",
+        "-focus.result.json",
+        "-focus.focus-evidence.json",
+        ".prepare-visual.job.json",
+        ".prepare-visual.result.json",
+        ".visual-state.json",
+        ".prepare-start.png",
+        ".old-draft-before-click.png",
+        ".old-draft-before-select.png",
+        ".old-draft-before-copy.png",
+        ".old-draft-copy-ready.png",
+    ];
+    let focus = [
+        "focus-attempted.json",
+        "focus-polls.json",
+        "before-search-click.png",
+        "before-search-select.png",
+        "before-search-paste.png",
+        "before-search-copy.png",
+        "search-copy-ready.png",
+        "focus-initial.png",
+        "current-header-confirmed.png",
+        "focus-search-result-main.png",
+        "focus-search-result-popup.png",
+        "focus-search-result-confirm.png",
+        "focus-search-before-click-main.png",
+        "focus-search-before-click-popup.png",
+        "focus-search-before-click-confirm.png",
+        "focus-search-after-click.png",
+    ];
+    let mut allowed = std::collections::BTreeSet::new();
+    for suffix in required {
+        allowed.insert(format!("{tid}{suffix}"));
+    }
+    for suffix in focus {
+        allowed.insert(format!("{tid}-focus.{suffix}"));
+    }
+    for suffix in [
+        ".old-draft-empty-check.png",
+        ".old-draft-empty-check-1.png",
+        ".old-draft-empty-check-2.png",
+    ] {
+        allowed.insert(format!("{tid}{suffix}"));
+    }
+    let mut snapshot = std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 10000 {
+            return Err(invalid(
+                "clipboard rejection directory exceeds bounded proof",
+            ));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if allow_chain_sibling
+            && (name.starts_with(&format!("{tid}-a2."))
+                || name.starts_with(&format!("{tid}-a2-"))
+                || name == format!("{tid}.recovery-proof-to-2.json"))
+        {
+            continue;
+        }
+        if !name.starts_with(&format!("{tid}.")) && !name.starts_with(&format!("{tid}-")) {
+            continue;
+        }
+        if !allowed.contains(&name) {
+            return Err(invalid(
+                "later or conflicting clipboard rejection artifact exists",
+            ));
+        }
+        let bytes = image_rejection_read(
+            &entry.path(),
+            if name.ends_with(".png") {
+                16 * 1024 * 1024
+            } else {
+                65536
+            },
+        )?;
+        total += bytes.len();
+        if total > 128 * 1024 * 1024 {
+            return Err(invalid(
+                "clipboard rejection evidence exceeds bounded proof",
+            ));
+        }
+        snapshot.insert(name, hex::encode(Sha256::digest(&bytes)));
+    }
+    if required
+        .iter()
+        .any(|suffix| !snapshot.contains_key(&format!("{tid}{suffix}")))
+    {
+        return Err(invalid("incomplete first clipboard rejection trace"));
+    }
+    let empty_checks = [
+        ".old-draft-empty-check.png",
+        ".old-draft-empty-check-1.png",
+        ".old-draft-empty-check-2.png",
+    ];
+    let present = empty_checks.map(|suffix| snapshot.contains_key(&format!("{tid}{suffix}")));
+    if (native_error == CLIPBOARD_EMPTY_REJECTION_ERROR && !present[0])
+        || (native_error != CLIPBOARD_EMPTY_REJECTION_ERROR
+            && native_error != COMPOSER_COPY_ARCHIVE_ERROR)
+        || (present[1] && !present[0])
+        || (present[2] && !present[1])
+    {
+        return Err(invalid(
+            "incomplete or nonsequential clipboard rejection checks",
+        ));
+    }
+    // Pin historical private references from the frozen job itself. A future
+    // calibration may update current sender config, never this old proof.
+    let mut refs = Vec::new();
+    if let Some(reference) = prepare_job.get("emptyComposerReference") {
+        if !reference.is_null() {
+            refs.push(reference);
+        }
+    }
+    if let Some(alternates) = prepare_job.get("emptyComposerAlternates") {
+        for reference in alternates
+            .as_array()
+            .ok_or_else(|| invalid("invalid historical references"))?
+        {
+            refs.push(reference);
+        }
+    }
+    if refs.is_empty() || refs.len() > 3 {
+        return Err(invalid(
+            "historical empty composer references are not bounded",
+        ));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    let mut hashes = std::collections::BTreeSet::new();
+    for reference in refs {
+        let object = reference
+            .as_object()
+            .ok_or_else(|| invalid("invalid historical reference"))?;
+        if object.len() != 2 {
+            return Err(invalid("invalid historical reference fields"));
+        }
+        let path = Path::new(
+            reference["path"]
+                .as_str()
+                .ok_or_else(|| invalid("invalid reference path"))?,
+        );
+        let expected = reference["sha256"]
+            .as_str()
+            .ok_or_else(|| invalid("invalid reference hash"))?;
+        if path.parent() != Some(root)
+            || !paths.insert(path.to_path_buf())
+            || !hashes.insert(expected)
+        {
+            return Err(invalid(
+                "historical reference is outside private root or duplicated",
+            ));
+        }
+        let bytes = image_rejection_read(path, 16 * 1024 * 1024)?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != expected {
+            return Err(invalid("historical reference hash differs"));
+        }
+        snapshot.insert(path.to_string_lossy().into_owned(), actual);
+    }
+    Ok(snapshot)
+}
+
 fn text_button_rejection_snapshot(
     root: &Path,
     tid: &str,
@@ -2980,6 +3656,469 @@ fn archive_text_button_rejection(
         "outbox_status":"indeterminate","attempt_number":1}),
     )
 }
+fn archive_clipboard_rejection(
+    root: &Path,
+    id: i64,
+    expected_attempt: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    if expected_attempt != 1 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "clipboard archive requires original attempt 1 and bounded reason",
+        ));
+    }
+    private(root, true)?;
+    if root.canonicalize()? != root {
+        return Err(invalid("clipboard archive root must be canonical"));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; clipboard rejection retained"));
+        }
+        locks.push(lock);
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (conversation, request, status, result, operation, dispatch_channel, dispatch_epoch):
+        (String, String, String, Option<String>, String, String, i64) = tx.query_row(
+        "SELECT conversation_id,request_id,status,result,operation,channel_id,epoch FROM dispatch WHERE id=?1",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    )?;
+    let active: Option<i64> = tx.query_row(
+        "SELECT active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "unknown"
+        || result.as_deref() != Some("indeterminate")
+        || operation != "send"
+        || active.is_some()
+    {
+        return Err(invalid(
+            "only an idle original indeterminate TEXT dispatch may be archived",
+        ));
+    }
+    let b = binding(&tx, &conversation)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root)
+        || b.control != "active"
+        || dispatch_channel != b.channel_id
+        || dispatch_epoch != b.epoch
+    {
+        return Err(invalid(
+            "clipboard archive current binding or epoch differs",
+        ));
+    }
+    private(&b.state.join("outgoing.sqlite3"), false)?;
+    let mut outbox = Connection::open_with_flags(
+        b.state.join("outgoing.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let out = outbox.transaction()?;
+    let (evidence, text, owner, epoch): (String, String, String, i64) = out.query_row(
+        "SELECT result_evidence,text,managed_owner,managed_epoch FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='text' AND status='indeterminate' AND attempt_number=1",
+        params![request,b.channel_id,b.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    )?;
+    if owner != b.owner || epoch != b.epoch {
+        return Err(invalid("clipboard archive owner or outbox epoch differs"));
+    }
+    let attempts: i64 = out.query_row(
+        "SELECT COUNT(*) FROM outgoing_attempt WHERE request_id=?1",
+        [&request],
+        |r| r.get(0),
+    )?;
+    let original: bool = out.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outgoing_attempt WHERE request_id=?1 AND attempt_number=1 AND status='indeterminate' AND result_evidence=?2 AND finished_at IS NOT NULL AND finished_at>=claimed_at AND recovery_from_attempt IS NULL AND recovery_prior_status IS NULL)",
+        params![request,evidence], |r| r.get(0),
+    )?;
+    if attempts != 1 || !original {
+        return Err(invalid(
+            "clipboard archive requires only the finished original attempt",
+        ));
+    }
+    let observations: bool = out.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_observation')",
+        [], |r| r.get(0),
+    )?;
+    if observations {
+        let observed: bool = out.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outgoing_observation WHERE request_id=?1)",
+            [&request],
+            |r| r.get(0),
+        )?;
+        if observed {
+            return Err(invalid("late clipboard observation already exists"));
+        }
+    }
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if Path::new(&evidence) != report_path {
+        return Err(invalid("original clipboard report path differs"));
+    }
+    let read_json = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{tid}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let job = read_json(".prepare-visual.job.json")?;
+    let native = read_json(".prepare-visual.result.json")?;
+    let native_error = native["error"].as_str();
+    if !matches!(
+        native_error,
+        Some(CLIPBOARD_EMPTY_REJECTION_ERROR | COMPOSER_COPY_ARCHIVE_ERROR)
+    ) {
+        return Err(invalid(
+            "native result is not an exact before-paste clipboard rejection",
+        ));
+    }
+    let native_error = native_error.unwrap();
+    let before = clipboard_rejection_snapshot(root, &tid, &job, native_error)?;
+    if read_json(".prepare-visual.result.json")? != native {
+        return Err(invalid(
+            "native clipboard rejection changed during snapshot",
+        ));
+    }
+    let report = read_json(".client-result.json")?;
+    let state = read_json(".visual-state.json")?;
+    if report["id"] != tid
+        || report["request_id"] != request
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["attempt_number"] != 1
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || !["composer draft mismatch", "clipboard state changed"]
+            .iter()
+            .any(|category| report["error"] == *category)
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "recovery_from_attempt",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+            "late_observation",
+        ]
+        .iter()
+        .any(|key| report.get(*key).is_some())
+        || native
+            != json!({"id":tid,"ok":false,"error":native_error,
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+        || job["id"] != tid
+        || job["action"] != "prepare-visual"
+        || job["text"] != text
+        || job["expectedDraft"] != ""
+        || job.get("media").is_some_and(|v| !v.is_null())
+        || state["id"] != tid
+        || state["stage"] != "prepare-attempted"
+        || state["text"] != text
+        || state.get("media").is_some_and(|v| !v.is_null())
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "submitted",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid("frozen TEXT clipboard archive evidence differs"));
+    }
+    let mut expected_state = job.clone();
+    expected_state
+        .as_object_mut()
+        .ok_or_else(|| invalid("invalid frozen prepare job"))?
+        .remove("action");
+    expected_state["stage"] = json!("prepare-attempted");
+    if state != expected_state {
+        return Err(invalid(
+            "frozen TEXT job and prepare-attempted state differ",
+        ));
+    }
+    let channel = load_binding(&b.state)?;
+    let payload = serde_json::to_vec(&json!({
+        "protocol_version":1,"clipboard_archive_protocol_version":1,
+        "content_kind":"text","request_id":request,"attempt_number":1,
+        "channel_id":b.channel_id,"session_id":b.session_id,
+        "account":channel.account,"talker":channel.talker,"text":text,
+    }))?;
+    let driver = b.state.join("conversation-sender");
+    private(
+        driver
+            .parent()
+            .ok_or_else(|| invalid("missing driver parent"))?,
+        true,
+    )?;
+    let meta = fs::symlink_metadata(&driver)?;
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(invalid(
+            "registered clipboard archive driver is not private",
+        ));
+    }
+    super::outgoing::check_clipboard_archive_capabilities(&driver, Duration::from_secs(20))?;
+    super::outgoing::check_clipboard_archive_preflight(
+        &driver,
+        &payload,
+        Duration::from_secs(25),
+        locks[1].as_raw_fd(),
+    )?;
+    if clipboard_rejection_snapshot(root, &tid, &job, native_error)? != before {
+        return Err(invalid(
+            "clipboard rejection artifacts changed during proof",
+        ));
+    }
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid(
+            "clipboard archive managed root changed during proof",
+        ));
+    }
+    let updated = tx.execute(
+        "UPDATE dispatch SET status='done',result='clipboard_prepare_rejected',updated_at=?2 WHERE id=?1 AND status='unknown' AND result='indeterminate'",
+        params![id,now()],
+    )?;
+    if updated != 1 {
+        return Err(invalid("clipboard archive dispatch CAS failed"));
+    }
+    tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+        params![format!("clipboard_prepare_rejected: {reason}"),now()])?;
+    block_unsent_batch_descendants(&tx)?;
+    out.commit()?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id":id,"status":"done","result":"clipboard_prepare_rejected",
+        "outbox_status":"indeterminate","attempt_number":1}),
+    )
+}
+
+struct CancellationDispatch {
+    id: i64,
+    operation: String,
+    status: String,
+    channel: String,
+    epoch: i64,
+    result: Option<String>,
+    batch: Option<String>,
+    part: Option<i64>,
+    priority: i64,
+}
+
+fn cancel_request(
+    root: &Path,
+    conversation: &str,
+    request: &str,
+    expected_attempt: i64,
+    reason: &str,
+) -> Result<Value, Box<dyn Error>> {
+    check_id(conversation)?;
+    check_id(request)?;
+    if expected_attempt < 0 || reason.trim().len() < 8 || reason.len() > 512 {
+        return Err(invalid(
+            "cancellation requires exact attempt and bounded reason",
+        ));
+    }
+    private(root, true)?;
+    if root.canonicalize()? != root {
+        return Err(invalid("cancellation root must be canonical"));
+    }
+    let mut locks = Vec::new();
+    for name in ["executor.lock", "sender.lock"] {
+        let path = root.join(name);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        private(&path, false)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(invalid("desktop busy; request remains unchanged"));
+        }
+        locks.push(lock);
+    }
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (paused, active): (Option<String>, Option<i64>) = tx.query_row(
+        "SELECT paused_reason,active_dispatch FROM surface WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let claimed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch WHERE status='claimed')",
+        [],
+        |r| r.get(0),
+    )?;
+    if paused.is_none() || active.is_some() || claimed {
+        return Err(invalid("cancellation requires paused idle desktop"));
+    }
+    let b = binding(&tx, conversation)?;
+    verify_binding(&b)?;
+    if super::outgoing::managed_root(&b.state)?.as_deref() != Some(root) {
+        return Err(invalid("request is not managed by this coordinator"));
+    }
+    let out_path = b.state.join("outgoing.sqlite3");
+    private(&out_path, false)?;
+    let mut outbox = Connection::open_with_flags(&out_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    outbox.busy_timeout(Duration::from_secs(5))?;
+    let out = outbox.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let item = intent(&b, request)?;
+    let (status, attempt, owner, epoch, receipt):
+        (String, i64, Option<String>, Option<i64>, Option<String>) = out.query_row(
+        "SELECT status,attempt_number,managed_owner,managed_epoch,receipt_evidence FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3",
+        params![request,b.channel_id,b.session_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    if status != item.status
+        || attempt != item.attempts
+        || owner != item.owner
+        || epoch != item.epoch
+        || attempt != expected_attempt
+        || owner.is_none() != epoch.is_none()
+        || !matches!(
+            status.as_str(),
+            "queued"
+                | "media_queued"
+                | "managed_queued"
+                | "managed_media_queued"
+                | "failed"
+                | "indeterminate"
+        )
+        || receipt.is_some()
+    {
+        return Err(invalid("outbox identity, status or attempt differs"));
+    }
+    let projection = super::outgoing::intent_view_in(&out, &b.state, request)?;
+    if projection["status"] != status
+        || projection["attempt_number"] != attempt
+        || projection["managed_owner"] != json!(owner)
+        || projection["managed_epoch"] != json!(epoch)
+        || projection["receipt_evidence"] != Value::Null
+        || projection.get("late_observation").is_some()
+    {
+        return Err(invalid("outbox has positive or late delivery evidence"));
+    }
+    let attempts = projection["attempts"]
+        .as_array()
+        .ok_or_else(|| invalid("attempt history missing"))?;
+    if attempts.len() != attempt as usize
+        || attempts.iter().enumerate().any(|(index, entry)| {
+            entry["attempt_number"] != (index + 1) as i64
+                || !matches!(entry["status"].as_str(), Some("failed" | "indeterminate"))
+                || !entry["finished_at"].is_i64()
+                || entry["finished_at"].as_i64() < entry["claimed_at"].as_i64()
+        })
+    {
+        return Err(invalid(
+            "an outgoing attempt is active, positive or incomplete",
+        ));
+    }
+    if attempt == 0
+        && !matches!(
+            status.as_str(),
+            "queued" | "media_queued" | "managed_queued" | "managed_media_queued"
+        )
+        || attempt > 0 && !matches!(status.as_str(), "failed" | "indeterminate")
+    {
+        return Err(invalid(
+            "outbox current status is inconsistent with its attempts",
+        ));
+    }
+    let legacy_missing_origin = owner.is_none();
+    if legacy_missing_origin && attempt == 0 {
+        return Err(invalid(
+            "legacy cancellation requires a finished historical attempt",
+        ));
+    }
+    let existing: Option<CancellationDispatch> = tx.query_row(
+        "SELECT id,operation,status,channel_id,epoch,result,batch_id,part_index,priority FROM dispatch WHERE conversation_id=?1 AND request_id=?2",
+        params![conversation,request],
+        |r| Ok(CancellationDispatch {id:r.get(0)?,operation:r.get(1)?,status:r.get(2)?,
+            channel:r.get(3)?,epoch:r.get(4)?,result:r.get(5)?,batch:r.get(6)?,
+            part:r.get(7)?,priority:r.get(8)?})).optional()?;
+    let (dispatch_id, old_status, old_result, already_cancelled) = if let Some(previous) = existing
+    {
+        let already =
+            previous.status == "done" && previous.result.as_deref() == Some("cancelled_by_user");
+        if previous.operation != "send"
+            || previous.channel != b.channel_id
+            || (if legacy_missing_origin {
+                !already || previous.epoch > b.epoch
+            } else {
+                Some(previous.epoch) != epoch
+            })
+            || previous.batch != item.batch_id
+            || previous.part != item.part_index
+            || previous.priority != item.priority
+            || !matches!(
+                previous.status.as_str(),
+                "queued" | "blocked" | "unknown" | "done"
+            )
+            || previous.status == "done"
+                && matches!(
+                    previous.result.as_deref(),
+                    Some("ui_observed" | "recipient_confirmed")
+                )
+        {
+            return Err(invalid(
+                "dispatch identity, state or success evidence differs",
+            ));
+        }
+        if !already {
+            let changed = tx.execute("UPDATE dispatch SET status='done',result='cancelled_by_user',updated_at=?2 WHERE id=?1 AND status=?3", params![previous.id,now(),previous.status])?;
+            if changed != 1 {
+                return Err(invalid("cancellation dispatch CAS failed"));
+            }
+        }
+        (previous.id, previous.status, previous.result, already)
+    } else {
+        tx.execute("INSERT INTO dispatch(conversation_id,request_id,operation,channel_id,epoch,status,result,created_at,updated_at,batch_id,part_index,priority,expires_at) VALUES(?1,?2,'send',?3,?4,'done','cancelled_by_user',?5,?5,?6,?7,?8,?9)",
+            params![conversation,request,b.channel_id,epoch.unwrap_or(b.epoch),now(),item.batch_id,item.part_index,item.priority,item.expires_at])?;
+        (tx.last_insert_rowid(), "absent".to_owned(), None, false)
+    };
+    if !already_cancelled {
+        tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
+            params![format!("cancelled_by_user dispatch={dispatch_id} request={request} old_dispatch={old_status}/{:?} outbox={status} attempt={attempt} legacy_missing_origin={legacy_missing_origin}: {reason}",old_result),now()])?;
+        block_unsent_batch_descendants(&tx)?;
+    }
+    if super::outgoing::intent_view_in(&out, &b.state, request)? != projection {
+        return Err(invalid("outbox changed during cancellation"));
+    }
+    out.commit()?;
+    tx.commit()?;
+    Ok(
+        json!({"dispatch_id":dispatch_id,"status":"done","result":"cancelled_by_user",
+        "outbox_status":status,"attempt_number":attempt,"already_cancelled":already_cancelled}),
+    )
+}
+
 pub(crate) fn pause_surface(root: &Path, reason: &str) -> Result<(), Box<dyn Error>> {
     surface_pause(root, Some(reason))?;
     Ok(())
@@ -3866,6 +5005,10 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 dispatch_validate(root, dispatch_id, &token)?
             }
             DispatchAction::Status => dispatch_status(root)?,
+            DispatchAction::Show {
+                conversation_id,
+                request_id,
+            } => dispatch_show(root, &conversation_id, &request_id)?,
             DispatchAction::Pause { reason } => surface_pause(root, Some(&reason))?,
             DispatchAction::Resume => surface_pause(root, None)?,
             DispatchAction::Review { reason } => surface_review(root, &reason)?,
@@ -3911,6 +5054,44 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                     reason: &reason,
                 },
             )?,
+            DispatchAction::RecoverClipboardRejection {
+                dispatch_id,
+                request_id,
+                expected_attempt,
+                owner,
+                expected_epoch,
+                reason,
+            } => recover_reviewed(
+                root,
+                RecoveryKind::ClipboardRejection,
+                RecoveryReview {
+                    id: dispatch_id,
+                    request: &request_id,
+                    expected_attempt,
+                    owner: &owner,
+                    epoch: expected_epoch,
+                    reason: &reason,
+                },
+            )?,
+            DispatchAction::RecoverClipboardChain {
+                dispatch_id,
+                request_id,
+                expected_attempt,
+                owner,
+                expected_epoch,
+                reason,
+            } => recover_reviewed(
+                root,
+                RecoveryKind::ClipboardChain,
+                RecoveryReview {
+                    id: dispatch_id,
+                    request: &request_id,
+                    expected_attempt,
+                    owner: &owner,
+                    epoch: expected_epoch,
+                    reason: &reason,
+                },
+            )?,
             DispatchAction::ArchiveImageCopyRejection {
                 dispatch_id,
                 expected_attempt,
@@ -3921,6 +5102,23 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 expected_attempt,
                 reason,
             } => archive_text_button_rejection(root, dispatch_id, expected_attempt, &reason)?,
+            DispatchAction::ArchiveClipboardRejection {
+                dispatch_id,
+                expected_attempt,
+                reason,
+            } => archive_clipboard_rejection(root, dispatch_id, expected_attempt, &reason)?,
+            DispatchAction::CancelRequest {
+                conversation_id,
+                request_id,
+                expected_attempt,
+                reason,
+            } => cancel_request(
+                root,
+                &conversation_id,
+                &request_id,
+                expected_attempt,
+                &reason,
+            )?,
             DispatchAction::AbandonUnsent {
                 dispatch_id,
                 reason,
@@ -4088,6 +5286,70 @@ mod tests {
         let b = load_binding(state).unwrap();
         let db = Connection::open(state.join("outgoing.sqlite3")).unwrap();
         db.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,content_kind,status,managed_owner,managed_epoch,created_at,updated_at) VALUES(?1,?2,?3,'fixture','text','queued','owner1',?4,?5,?5)",params![request,b.channel_id,b.session_id,epoch,now()]).unwrap();
+    }
+    #[test]
+    fn cancellation_between_restore_marker_and_outbox_cannot_resurrect_request() {
+        let (_tmp, state, root) = fixture();
+        enroll(
+            &root,
+            "conversation1",
+            &state,
+            "owner1",
+            InputMode::Push,
+            ReplyPolicy::Authorized,
+        )
+        .unwrap();
+        let root = root.canonicalize().unwrap();
+        queued(&state, "cancel-during-restore", 1);
+        let id = enqueue(&root, "conversation1", "cancel-during-restore", 1, false).unwrap()
+            ["dispatch_id"]
+            .as_i64()
+            .unwrap();
+        configure(
+            &root,
+            "conversation1",
+            1,
+            "owner1",
+            InputMode::Push,
+            ReplyPolicy::Authorized,
+        )
+        .unwrap();
+        surface_pause(&root, Some("synthetic operator cancellation review")).unwrap();
+        let restored =
+            restore_queued_with_after_marker(&root, id, "reviewed synthetic restore", || {
+                let cancelled = cancel_request(
+                    &root,
+                    "conversation1",
+                    "cancel-during-restore",
+                    0,
+                    "operator revoked future sending",
+                )?;
+                assert_eq!(cancelled["result"], "cancelled_by_user");
+                Ok(())
+            });
+        assert!(
+            restored.is_err(),
+            "restore must not cross a terminal cancellation"
+        );
+        let db = Connection::open(root.join(DB_NAME)).unwrap();
+        let (status, result, epoch): (String, String, i64) = db
+            .query_row(
+                "SELECT status,result,epoch FROM dispatch WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), result.as_str(), epoch),
+            ("done", "cancelled_by_user", 1)
+        );
+        let out = Connection::open(state.join("outgoing.sqlite3")).unwrap();
+        let (owner, origin_epoch, attempt): (String, i64, i64) = out.query_row(
+            "SELECT managed_owner,managed_epoch,attempt_number FROM outgoing_intent WHERE request_id='cancel-during-restore'",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!((owner.as_str(), origin_epoch, attempt), ("owner1", 1, 0));
+        assert!(restore_queued(&root, id, "cannot revive cancelled request").is_err());
     }
     #[test]
     fn image_copy_rejection_accepts_producer_spacing_only() {

@@ -556,6 +556,98 @@ pub(super) fn prepare_header_recovery_preflight(
     reviewed_recovery_preflight(state, request, driver, lock_fd, true)
 }
 
+pub(super) fn clipboard_recovery_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    validate_driver(driver)?;
+    let capability = invoke_recovery_probe(
+        driver,
+        "--clipboard-recovery-capabilities",
+        None,
+        Duration::from_secs(20),
+        Some(lock_fd),
+    )?;
+    if capability
+        != json!({"protocol_version":1,"clipboard_recovery_protocol_version":1,
+        "first_text_before_paste_only":true,"max_attempt":2})
+    {
+        return Err(invalid("driver lacks archived clipboard recovery capability").into());
+    }
+    let binding = load_binding(state)?;
+    let candidate = load_recovery_candidate(state, &binding, request, 1)?;
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&driver_input(&binding, &candidate, Some(1))?)?;
+    payload["clipboard_recovery_protocol_version"] = json!(1);
+    let proof = invoke_recovery_probe(
+        driver,
+        "--clipboard-recovery-preflight",
+        Some(&serde_json::to_vec(&payload)?),
+        Duration::from_secs(25),
+        Some(lock_fd),
+    )?;
+    if proof
+        != json!({"protocol_version":1,"clipboard_recovery_protocol_version":1,
+        "unsent_proven":true})
+    {
+        return Err(invalid("driver did not prove archived clipboard rejection unsent").into());
+    }
+    let (ready, _) =
+        invoke_driver_mode(driver, b"{}", Duration::from_secs(20), Some(lock_fd), true);
+    if ready != AttemptResult::UiObserved {
+        return Err(invalid("desktop readiness refused; clipboard recovery unattempted").into());
+    }
+    Ok(())
+}
+
+pub(super) fn clipboard_chain_preflight(
+    state: &Path,
+    request: &str,
+    driver: &Path,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    validate_driver(driver)?;
+    let capability = invoke_recovery_probe(
+        driver,
+        "--clipboard-chain-recovery-capabilities",
+        None,
+        Duration::from_secs(20),
+        Some(lock_fd),
+    )?;
+    if capability
+        != json!({"protocol_version":1,"clipboard_chain_recovery_protocol_version":1,
+        "first_two_text_before_paste_only":true,"max_attempt":3})
+    {
+        return Err(invalid("driver lacks clipboard chain recovery capability").into());
+    }
+    let binding = load_binding(state)?;
+    let candidate = load_recovery_candidate(state, &binding, request, 2)?;
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&driver_input(&binding, &candidate, Some(2))?)?;
+    payload["clipboard_chain_recovery_protocol_version"] = json!(1);
+    let proof = invoke_recovery_probe(
+        driver,
+        "--clipboard-chain-recovery-preflight",
+        Some(&serde_json::to_vec(&payload)?),
+        Duration::from_secs(25),
+        Some(lock_fd),
+    )?;
+    if proof
+        != json!({"protocol_version":1,"clipboard_chain_recovery_protocol_version":1,
+        "unsent_proven":true})
+    {
+        return Err(invalid("driver did not prove clipboard chain unsent").into());
+    }
+    let (ready, _) =
+        invoke_driver_mode(driver, b"{}", Duration::from_secs(20), Some(lock_fd), true);
+    if ready != AttemptResult::UiObserved {
+        return Err(invalid("desktop readiness refused; clipboard chain unattempted").into());
+    }
+    Ok(())
+}
+
 fn reviewed_recovery_preflight(
     state: &Path,
     request: &str,
@@ -653,6 +745,51 @@ pub(super) fn claim_managed_focus_recovery(
     })
 }
 
+pub(super) fn claim_managed_clipboard_chain(
+    state: &Path,
+    request: &str,
+    original: &serde_json::Value,
+) -> Result<Attempt, Box<dyn Error>> {
+    let binding = load_binding(state)?;
+    let mut conn = open_journal(state)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = show_intent(&tx, &binding, request)?;
+    if current != *original
+        || current["status"] != "indeterminate"
+        || current["attempt_number"] != 2
+        || current.get("media").is_some()
+        || current["attempts"].as_array().map(Vec::len) != Some(2)
+        || current["attempts"][0]["status"] != "indeterminate"
+        || current["attempts"][1]["status"] != "indeterminate"
+        || current["attempts"][1]["recovery_from_attempt"] != 1
+        || current["attempts"][1]["recovery_prior_status"] != "indeterminate"
+    {
+        return Err(invalid("clipboard chain outbox changed").into());
+    }
+    let text = current["text"]
+        .as_str()
+        .ok_or_else(|| invalid("text missing"))?
+        .to_owned();
+    let timestamp = now()?;
+    tx.execute("UPDATE managed_control SET gate=1 WHERE singleton=1", [])?;
+    let changed = tx.execute(
+        "UPDATE outgoing_intent SET status='attempt_recorded',attempt_number=3,result_evidence=NULL,receipt_evidence=NULL,updated_at=?2 WHERE request_id=?1 AND content_kind='text' AND status='indeterminate' AND attempt_number=2",
+        params![request,timestamp])?;
+    if changed != 1 {
+        return Err(invalid("stale clipboard chain claim").into());
+    }
+    tx.execute("INSERT INTO outgoing_attempt(request_id,attempt_number,status,recovery_from_attempt,recovery_prior_status,claimed_at) VALUES(?1,3,'attempt_recorded',2,'indeterminate',?2)",
+        params![request,timestamp])?;
+    tx.execute("UPDATE managed_control SET gate=0 WHERE singleton=1", [])?;
+    tx.commit()?;
+    Ok(Attempt {
+        request_id: request.to_owned(),
+        attempt_number: 3,
+        text,
+        media: None,
+    })
+}
+
 pub(super) fn execute_managed_focus_recovery(
     state: &Path,
     driver: &Path,
@@ -663,6 +800,44 @@ pub(super) fn execute_managed_focus_recovery(
     let payload = driver_input(&binding, &attempt, Some(1))?;
     let (result, evidence) = invoke_driver_locked(driver, &payload, DRIVER_TIMEOUT, Some(lock_fd));
     record_result(state, &attempt.request_id, 2, result, &evidence)
+}
+
+pub(super) fn execute_managed_clipboard_recovery(
+    state: &Path,
+    driver: &Path,
+    attempt: Attempt,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let binding = load_binding(state)?;
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&driver_input(&binding, &attempt, Some(1))?)?;
+    payload["clipboard_recovery_protocol_version"] = json!(1);
+    let (result, evidence) = invoke_driver_locked(
+        driver,
+        &serde_json::to_vec(&payload)?,
+        DRIVER_TIMEOUT,
+        Some(lock_fd),
+    );
+    record_result(state, &attempt.request_id, 2, result, &evidence)
+}
+
+pub(super) fn execute_managed_clipboard_chain(
+    state: &Path,
+    driver: &Path,
+    attempt: Attempt,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let binding = load_binding(state)?;
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&driver_input(&binding, &attempt, Some(2))?)?;
+    payload["clipboard_chain_recovery_protocol_version"] = json!(1);
+    let (result, evidence) = invoke_driver_locked(
+        driver,
+        &serde_json::to_vec(&payload)?,
+        DRIVER_TIMEOUT,
+        Some(lock_fd),
+    );
+    record_result(state, &attempt.request_id, 3, result, &evidence)
 }
 
 pub(super) fn check_image_rejection_capabilities(
@@ -771,6 +946,48 @@ pub(super) fn check_focus_abandon_preflight(
     });
     if !valid {
         return Err(invalid("driver did not prove focus failure before prepare").into());
+    }
+    Ok(())
+}
+
+pub(super) fn check_clipboard_archive_capabilities(
+    driver: &Path,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--clipboard-archive-capabilities",
+        None,
+        timeout,
+        None,
+    )?;
+    if value
+        != json!({"protocol_version":1,"clipboard_archive_protocol_version":1,
+        "archive_only":true,"before_paste_only":true})
+    {
+        return Err(invalid("driver lacks clipboard archive-only capability").into());
+    }
+    Ok(())
+}
+
+pub(super) fn check_clipboard_archive_preflight(
+    driver: &Path,
+    payload: &[u8],
+    timeout: Duration,
+    lock_fd: i32,
+) -> Result<(), Box<dyn Error>> {
+    let value = invoke_recovery_probe(
+        driver,
+        "--clipboard-archive-preflight",
+        Some(payload),
+        timeout,
+        Some(lock_fd),
+    )?;
+    if value
+        != json!({"protocol_version":1,"clipboard_archive_protocol_version":1,
+        "clipboard_rejection_proven":true,"archive_only":true})
+    {
+        return Err(invalid("driver did not prove the original clipboard rejection").into());
     }
     Ok(())
 }
@@ -1234,6 +1451,15 @@ pub(crate) fn intent_view(
         &load_binding(state_dir)?,
         request_id,
     )
+}
+
+/// Read the frozen outbox projection through the caller's existing transaction.
+pub(crate) fn intent_view_in(
+    conn: &Connection,
+    state_dir: &Path,
+    request_id: &str,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    show_intent(conn, &load_binding(state_dir)?, request_id)
 }
 
 fn managed_send(

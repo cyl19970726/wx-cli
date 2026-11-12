@@ -17,6 +17,7 @@ from . import channel_agent as runner
 from . import dispatch
 from . import interactive
 from . import macos_sender_driver as sender
+from . import sender_calibration
 from . import wechat_agent_ctl as ctl
 
 
@@ -302,6 +303,11 @@ def prepare_driver(settings, entry):
     template.update(binding=binding, channel_state_dir=str(state), wx_cli=settings["wx_cli"],
                     target_name=entry["name"], conversation_kind=entry["kind"])
     template.pop("target_group", None)
+    try:
+        template = sender_calibration.load_sender_calibration(
+            state, template, entry.get("conversation_id"), binding)
+    except sender_calibration.CalibrationError as exc:
+        require(False, "sender_calibration", str(exc))
     config_path, driver_path = _driver_paths(entry)
     ctl.atomic_json(config_path, template)
     command = shlex.quote(settings["sender_executable"])

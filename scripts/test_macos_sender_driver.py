@@ -1003,6 +1003,8 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(driver.helper_reason({"error": "Copied composer text does not exactly match expected draft"}),
                          "composer draft mismatch")
         self.assertEqual(driver.helper_reason({"error": "private secret 123"}), "helper rejected action")
+        self.assertEqual(driver.helper_reason({"error": "Clipboard changed during empty draft verification"}),
+                         "clipboard state changed")
         denied = {"ok": False,
                   "error": 'Error Domain=com.apple.ScreenCaptureKit.SCStreamErrorDomain Code=-3801 "用户拒绝...TCC"',
                   "permissions": {"accessibility": False, "postEvents": False, "screenRecording": False}}
