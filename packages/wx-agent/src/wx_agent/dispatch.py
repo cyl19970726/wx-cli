@@ -243,6 +243,13 @@ def main(argv=None):
         archive.add_argument("--dispatch-id", type=int, required=True)
         archive.add_argument("--expected-attempt", type=int, required=True)
         archive.add_argument("--reason", required=True)
+    recovery = sub.add_parser("recover-clipboard-rejection")
+    recovery.add_argument("--dispatch-id", type=int, required=True)
+    recovery.add_argument("--request-id", required=True)
+    recovery.add_argument("--expected-attempt", type=int, required=True)
+    recovery.add_argument("--owner", required=True)
+    recovery.add_argument("--expected-epoch", type=int, required=True)
+    recovery.add_argument("--reason", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
     run.add_argument("--seconds", type=float, default=3600)
@@ -281,6 +288,13 @@ def main(argv=None):
             # Rust holds both locks through native proof and scheduler commit.
             value = call(binary, root, "dispatch", args.action, "--dispatch-id", args.dispatch_id,
                          "--expected-attempt", args.expected_attempt, "--reason", args.reason)
+        elif args.action == "recover-clipboard-rejection":
+            # This explicit command can send once. Rust owns admission, the
+            # durable reservation, both locks and original attempt history.
+            value = call(binary, root, "dispatch", args.action,
+                         "--dispatch-id", args.dispatch_id, "--request-id", args.request_id,
+                         "--expected-attempt", args.expected_attempt, "--owner", args.owner,
+                         "--expected-epoch", args.expected_epoch, "--reason", args.reason)
         else:
             value = call(binary, root, "dispatch", "status")
         print(json.dumps(value, separators=(",", ":")))

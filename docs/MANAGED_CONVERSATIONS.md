@@ -68,7 +68,33 @@ wx-agent dispatch --config /ABS/private/conversations.json run --once
 
 多个会话可以同时提交意图；执行器逐项领取，用该项 channel 的 driver 切到对应目标，核对精确标题、群/私聊类型及草稿后提交，完成本地出站核验再释放桌面。执行期间第二个执行器返回 busy，其他会话仍可读取。队列不依赖默认 selected_id，也不在上一个发送的剪贴板、准备或提交阶段切换会话。
 
-切换会话时，系统输入法提示可能改变空输入框的外观。私有 sender 配置可在 `empty_composer_reference` 之外提供至多两个 `empty_composer_alternates`，格式同为 `{path, sha256}`。每一张都必须是已人工确认无草稿的完整输入区截图，位于私有 UI 目录，尺寸、权限和摘要独立校验。接受其中一张完整像素匹配；不屏蔽提示区域或容忍其他文字/图片。原生准备与提交必须使用同一套参考图，恢复原尝试也必须保留它已使用的参考集合。
+切换会话时，输入框提示可能改变空框的外观。私有 sender 配置可在 `empty_composer_reference` 之外提供至多两个 `empty_composer_alternates`，格式同为 `{path, sha256}`。每一张都必须是已人工确认无草稿的完整输入区截图，位于私有 UI 目录，尺寸、权限和摘要独立校验。接受其中一张完整像素匹配；不屏蔽提示区域或容忍其他文字/图片。每个 attempt 的原生准备与提交必须使用同一套参考图；已冻结的旧参考文件及集合不能改写，恢复时按对应入口的合同核对历史和当前校准。
+
+### 按会话固定空框参考
+
+不同会话可能显示或隐藏输入框提示文字。它们可以分别使用自己的参考集合，不应把某群确认过的画面写入共享模板后覆盖所有群。共享模板仍是缺省值；某个 channel 的私有 `state_dir/conversation-sender-calibration.json` 可以仅覆盖该会话的两项参考字段：
+
+```json
+{
+  "version": 1,
+  "conversation_id": "SYNTHETIC_CONVERSATION",
+  "binding": {
+    "channel_id": "SYNTHETIC_CHANNEL",
+    "session_id": "SYNTHETIC_SESSION",
+    "account": "SYNTHETIC_ACCOUNT",
+    "talker": "SYNTHETIC_GROUP@chatroom"
+  },
+  "helper_sha256": "CURRENT_HELPER_SHA256",
+  "window_size": {"width": 880, "height": 640},
+  "composer_rect": {"x": 308, "y": 497, "width": 559, "height": 93},
+  "empty_composer_reference": {"path": "/ABS/private/ui/empty-with-caret.png", "sha256": "PNG_SHA256"},
+  "empty_composer_alternates": [{"path": "/ABS/private/ui/empty-without-caret.png", "sha256": "OTHER_PNG_SHA256"}]
+}
+```
+
+示例中的身份、摘要和几何必须取自当前实际绑定和模板；不能直接套用示例值。文件必须为当前用户持有的私有普通文件、0600、单链接、规范绝对路径，大小不超过 64 KiB。重复或额外 JSON 字段、不同会话/绑定/助手/几何、越界路径、PNG 头/尺寸或摘要不符均拒绝。文件不存在时保持原缺省行为；存在但无效时在写 driver 配置之前失败，不自动退回共享模板。原生使用参考时还会完整解码图片。
+
+每次 `prepare_driver` 都重新验证该元数据，因此共享模板的参考更新不会冲掉有效的逐会话校准。它不覆盖目标、草稿预期、可执行文件、权限、owner 或 epoch，也不改已冻结 attempt 的 job/state/历史图片。同一会话仍最多三张完整参考，命中任意一张即可通过这一项检查；其他目标、复制和提交守卫继续独立执行。校准图片只能来自确认没有草稿的完整区域，建议用生产像素比较器对原截图和导出的 PNG 做精确往返核验。
 
 微信重启会改变进程号。核对已授权账号、固定助手摘要、唯一窗口和当前原生 inspect 后，应同时更新实际配置来源中的 `sender_template.expected_pid` 与需要更新的 sender 文件。只改某群的 `conversation-sender.json` 会被下一次 `prepare_driver` 从旧模板覆盖；不能删除 PID 检查来放行。修改前保留私有备份，在空闲执行器及共享 sender 锁下处理，不重写旧 attempt、意图或游标。
 
@@ -87,6 +113,23 @@ wx-agent dispatch --config /ABS/private/conversations.json archive-clipboard-rej
 ```
 
 此入口核对原请求、正文、当前 owner/epoch、完整 inspect/focus/prepare-attempted 与点击、选择、复制前轨迹、历史参考摘要及助手退出，并在双锁内重验产物未变。剪贴板变化错误仍要求首张 empty-check；精确复制不匹配可能在进入视觉空框分支前就拒绝，因此允许没有 empty-check，但已有检查必须连续。出现粘贴、新草稿、submit、后续 attempt 或晚到出站证据时拒绝。结果仅把原 dispatch 记为 `done/clipboard_prepare_rejected`；原 outbox 与 attempt 保持 `indeterminate`，不重发、不开新 attempt、不解除全局暂停，也不把它当作成功的 batch 前件。另一个已获授权、尚未尝试的独立请求可在正常调度条件满足后继续；不能通过换 ID 重放原意图。
+
+### 显式恢复已证明停在首次复制核验的原请求
+
+归档本身不授权重发。只有原意图仍获用户授权、根因和当前空框校准已核实，并且原请求符合以下完整证据时，才可显式恢复同一 ID 一次：
+
+```sh
+wx-agent dispatch --config /ABS/private/conversations.json recover-clipboard-rejection \
+  --dispatch-id ORIGINAL_DISPATCH --request-id ORIGINAL_REQUEST \
+  --expected-attempt 1 --owner ORIGINAL_OWNER --expected-epoch ORIGINAL_EPOCH \
+  --reason '已核对原请求授权、首次粘贴前拒绝、完整轨迹和当前校准'
+```
+
+该命令可以实际发送，不能用于只读检查。只接受已归档 `done/clipboard_prepare_rejected` 的托管文字、唯一已结束的 indeterminate attempt 1，及上面两个精确原生错误；原冻结草稿预期须为空。原 request、正文、publisher、owner/epoch、batch/part、绑定、完整点击/选择/复制前轨迹和历史参考均须匹配，且没有粘贴、prepared、submit、晚到出站、其他 attempt 或存活助手。共享桌面须暂停且空闲；当前草稿仍须通过原生核验，不能清掉未知草稿。
+
+Rust 在双锁内先调用精确的 driver capability 和只读证明，再重查原状态与文件摘要，持久记录带 token 的恢复预约后才领取原请求的 attempt 2。驱动仅容许自己刚建立的 attempt 2 起始报告，再次核对原轨迹、保存不可变恢复证明，然后重新 inspect/focus/prepare/submit。旧 attempt 1 的参考集合仍按原摘要验证；新的 attempt 2 可以使用已核实的当前逐会话校准，其自身准备和提交保持一致。任何中断或再次未知都保留原预约和证据，不重新入队、不自动重试或放行 attempt 3。
+
+原 attempt 1、旧原生文件及归档审查记录保持不变；当前 dispatch 只在真实恢复结果产生后更新。真正达到 `ui_observed` 或 `recipient_confirmed` 的恢复前件才满足未来 batch 后件的成功依赖，不能用单纯归档充数。已经被阻塞的零 attempt 后件不会自动恢复；需要按原 `review --restore-unattempted` 合同另行核查。恢复返回时桌面仍暂停，须经正常 `review --confirm-desktop-safe` 后再继续其他工作。
 
 同步发送内部入队并有界等待；`--no-wait` 只冻结并入队，交给独立桌面执行器，受管 Session 应采用此方式。返回 `pending` 只表示还未完成，应查询原 ID，不能换 ID 重发。事件→inbox、意图→dispatch 是可对账的跨文件步骤：监听器每轮补 inbox，执行器启动及每 10 秒补 dispatch；也可显式运行 `inbox reconcile`、`dispatch reconcile`，不生成新意图。未带 origin epoch 的旧排队项保留并阻止执行；不把它们自动授权给新 owner。
 

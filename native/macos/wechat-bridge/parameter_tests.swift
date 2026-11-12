@@ -384,10 +384,11 @@ import ImageIO
     }
 
     static func emptyComposerChecks() {
-        func image(_ changed: Bool = false, unexpectedDraft: Bool = false) -> CGImage {
+        func image(_ changed: Bool = false, unexpectedDraft: Bool = false, hint: Bool = false) -> CGImage {
             var bytes = [UInt8](repeating: 255, count: 4 * 3 * 4)
             if changed { bytes[0] = 254 }
             if unexpectedDraft { bytes[4] = 253 }
+            if hint { bytes[8] = 252 }
             let provider = CGDataProvider(data: Data(bytes) as CFData)!
             return CGImage(width: 4, height: 3, bitsPerComponent: 8, bitsPerPixel: 32,
                 bytesPerRow: 16, space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -405,6 +406,17 @@ import ImageIO
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect, references: []))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect,
             references: [original, indicator, original, indicator]))
+        let hinted = image(hint: true), hintedIndicator = image(true, hint: true)
+        precondition(VisualParameters.matchesEmptyComposer(hinted, rect: rect,
+            references: [hinted, hintedIndicator]))
+        precondition(VisualParameters.matchesEmptyComposer(hintedIndicator, rect: rect,
+            references: [hinted, hintedIndicator]))
+        precondition(!VisualParameters.matchesEmptyComposer(hinted, rect: rect,
+            references: [original, indicator]), "Another conversation's references must not pass")
+        precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect,
+            references: [hinted, hintedIndicator]))
+        precondition(!VisualParameters.matchesEmptyComposer(image(true, unexpectedDraft: true, hint: true),
+            rect: rect, references: [hinted, hintedIndicator]))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 1, dy: 0), reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: CGRect(x: 0, y: 0, width: 3, height: 3), reference: original))
         precondition(!VisualParameters.matchesEmptyComposer(original, rect: rect.offsetBy(dx: 0.1, dy: 0), reference: original))

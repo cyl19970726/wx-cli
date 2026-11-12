@@ -256,6 +256,21 @@ pub enum DispatchAction {
         #[arg(long)]
         reason: String,
     },
+    /// Recover one archived first TEXT clipboard rejection under its original request.
+    RecoverClipboardRejection {
+        #[arg(long)]
+        dispatch_id: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_attempt: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        reason: String,
+    },
     /// Retire only the original known IMAGE Copy rejection; never authorize a retry.
     ArchiveImageCopyRejection {
         #[arg(long)]
@@ -1445,6 +1460,7 @@ fn focus_recovery_context(
     request: &str,
     owner: &str,
     epoch: i64,
+    archived: bool,
 ) -> Result<(Binding, Value), Box<dyn Error>> {
     let (conversation, channel, dispatch_epoch, status, result, operation, saved_request):
         (String, String, i64, String, Option<String>, String, String) = db.query_row(
@@ -1465,8 +1481,12 @@ fn focus_recovery_context(
     if paused.is_none()
         || active.is_some()
         || live
-        || status != "unknown"
-        || result.as_deref() != Some("indeterminate")
+        || (status.as_str(), result.as_deref())
+            != if archived {
+                ("done", Some("clipboard_prepare_rejected"))
+            } else {
+                ("unknown", Some("indeterminate"))
+            }
         || operation != "send"
         || saved_request != request
         || channel != b.channel_id
@@ -1483,6 +1503,16 @@ fn focus_recovery_context(
         ));
     }
     let item = intent(&b, request)?;
+    if archived {
+        let schedule: (Option<String>, Option<i64>) = db.query_row(
+            "SELECT batch_id,part_index FROM dispatch WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if schedule != (item.batch_id.clone(), item.part_index) {
+            return Err(invalid("archived clipboard batch or part differs"));
+        }
+    }
     let original = super::outgoing::intent_view(&b.state, request)?;
     let attempts = original["attempts"]
         .as_array()
@@ -1498,6 +1528,7 @@ fn focus_recovery_context(
         || attempts[0]["status"] != "indeterminate"
         || !attempts[0]["finished_at"].is_i64()
         || !attempts[0]["recovery_from_attempt"].is_null()
+        || !attempts[0]["recovery_prior_status"].is_null()
         || original["result_evidence"] != attempts[0]["result_evidence"]
         || !original["receipt_evidence"].is_null()
         || original.get("late_observation").is_some()
@@ -1662,16 +1693,113 @@ fn prepare_header_recovery_artifacts(
     Ok(snapshot.into_iter().collect())
 }
 
+fn clipboard_recovery_artifacts(
+    root: &Path,
+    b: &Binding,
+    request: &str,
+    original: &Value,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let tid = format!(
+        "send-{}",
+        &hex::encode(Sha256::digest(
+            format!("{}\0{}", b.channel_id, request).as_bytes()
+        ))[..48]
+    );
+    let read = |suffix: &str| -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&image_rejection_read(
+            &root.join(format!("{tid}{suffix}")),
+            65536,
+        )?)?)
+    };
+    let report_path = root.join(format!("{tid}.client-result.json"));
+    if original["result_evidence"] != report_path.to_string_lossy().as_ref() {
+        return Err(invalid("clipboard recovery original report path differs"));
+    }
+    let native = read(".prepare-visual.result.json")?;
+    let error = native["error"]
+        .as_str()
+        .ok_or_else(|| invalid("clipboard error missing"))?;
+    if !matches!(
+        error,
+        CLIPBOARD_EMPTY_REJECTION_ERROR | COMPOSER_COPY_ARCHIVE_ERROR
+    ) {
+        return Err(invalid("clipboard recovery native error differs"));
+    }
+    let job = read(".prepare-visual.job.json")?;
+    let snapshot = clipboard_rejection_snapshot(root, &tid, &job, error)?;
+    let report = read(".client-result.json")?;
+    let state = read(".visual-state.json")?;
+    if report["id"] != tid
+        || report["request_id"] != request
+        || report["attempt_number"] != 1
+        || report["channel_id"] != b.channel_id
+        || report["session_id"] != b.session_id
+        || report["status"] != "indeterminate"
+        || report["stage"] != "group_focused"
+        || !["clipboard state changed", "composer draft mismatch"]
+            .iter()
+            .any(|category| report["error"] == *category)
+        || [
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "recovery_from_attempt",
+            "observation",
+            "ui_submit_seconds",
+            "submit_action_seconds",
+            "verification_seconds",
+            "late_observation",
+        ]
+        .iter()
+        .any(|key| report.get(*key).is_some())
+        || native
+            != json!({"id":tid,"ok":false,"error":error,
+            "permissions":{"accessibility":true,"postEvents":true,"screenRecording":true}})
+        || job["id"] != tid
+        || job["action"] != "prepare-visual"
+        || job["expectedDraft"] != ""
+        || job.get("media").is_some_and(|v| !v.is_null())
+        || state["id"] != tid
+        || state["stage"] != "prepare-attempted"
+        || state.get("media").is_some_and(|v| !v.is_null())
+        || [
+            "preparedPixelSHA256",
+            "preparedCopyType",
+            "submitted",
+            "media_prepared",
+            "media_submitted",
+            "event_cursor",
+            "error",
+        ]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid("clipboard recovery original evidence differs"));
+    }
+    let mut expected_state = job.clone();
+    expected_state
+        .as_object_mut()
+        .ok_or_else(|| invalid("invalid prepare job"))?
+        .remove("action");
+    expected_state["stage"] = json!("prepare-attempted");
+    if state != expected_state || job["text"] != original["text"] {
+        return Err(invalid("clipboard recovery original text or state differs"));
+    }
+    Ok(snapshot.into_iter().collect())
+}
+
 #[derive(Clone, Copy)]
 enum RecoveryKind {
     FocusSearch,
     PrepareHeader,
+    ClipboardRejection,
 }
 impl RecoveryKind {
     fn label(self) -> &'static str {
         match self {
             Self::FocusSearch => "focus_recovery",
             Self::PrepareHeader => "prepare_header_recovery",
+            Self::ClipboardRejection => "clipboard_rejection_recovery",
         }
     }
     fn artifacts(
@@ -1685,6 +1813,9 @@ impl RecoveryKind {
             Self::FocusSearch => focus_recovery_artifacts(root, binding, request, original),
             Self::PrepareHeader => {
                 prepare_header_recovery_artifacts(root, binding, request, original)
+            }
+            Self::ClipboardRejection => {
+                clipboard_recovery_artifacts(root, binding, request, original)
             }
         }
     }
@@ -1701,6 +1832,9 @@ impl RecoveryKind {
             }
             Self::PrepareHeader => {
                 super::outgoing::prepare_header_recovery_preflight(state, request, driver, fd)
+            }
+            Self::ClipboardRejection => {
+                super::outgoing::clipboard_recovery_preflight(state, request, driver, fd)
             }
         }
     }
@@ -1755,7 +1889,8 @@ fn recover_reviewed(
     }
     let sender_fd = locks[1].as_raw_fd();
     let mut db = open(root, true)?;
-    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch)?;
+    let archived = matches!(kind, RecoveryKind::ClipboardRejection);
+    let (b, snapshot) = focus_recovery_context(&db, id, request, owner, epoch, archived)?;
     let artifacts = kind.artifacts(root, &b, request, &snapshot["original"])?;
     let driver = b.state.join("conversation-sender");
     let meta = fs::symlink_metadata(&driver)?;
@@ -1770,7 +1905,7 @@ fn recover_reviewed(
     }
     kind.preflight(&b.state, request, &driver, sender_fd)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch)?;
+    let (_, latest) = focus_recovery_context(&tx, id, request, owner, epoch, archived)?;
     if latest != snapshot || kind.artifacts(root, &b, request, &snapshot["original"])? != artifacts
     {
         return Err(invalid(
@@ -1780,12 +1915,20 @@ fn recover_reviewed(
     let claim_token = token()?;
     let purpose = format!("reviewed_{}", kind.label());
     let worker = format!("reviewed-{}", kind.label().replace('_', "-"));
-    let changed = tx.execute("UPDATE dispatch SET status='claimed',result=?6,token=?2,worker=?7,lease_until=?3,updated_at=?4 WHERE id=?1 AND status='unknown' AND result='indeterminate' AND epoch=?5",
-        params![id,claim_token,now()+120,now(),epoch,purpose,worker])?;
+    let (previous_status, previous_result) = if archived {
+        ("done", "clipboard_prepare_rejected")
+    } else {
+        ("unknown", "indeterminate")
+    };
+    let changed = tx.execute("UPDATE dispatch SET status='claimed',result=?6,token=?2,worker=?7,lease_until=?3,updated_at=?4 WHERE id=?1 AND status=?8 AND result=?9 AND epoch=?5",
+        params![id,claim_token,now()+120,now(),epoch,purpose,worker,previous_status,previous_result])?;
     if changed != 1 {
-        return Err(invalid("stale focus recovery dispatch claim"));
+        return Err(invalid("stale reviewed recovery dispatch claim"));
     }
-    tx.execute("UPDATE surface SET active_dispatch=?1,epoch=epoch+1 WHERE singleton=1 AND active_dispatch IS NULL AND paused_reason IS NOT NULL",[id])?;
+    let changed = tx.execute("UPDATE surface SET active_dispatch=?1,epoch=epoch+1 WHERE singleton=1 AND active_dispatch IS NULL AND paused_reason IS NOT NULL",[id])?;
+    if changed != 1 {
+        return Err(invalid("recovery surface changed"));
+    }
     tx.execute("INSERT INTO surface_review(reason,reviewed_at,unknown_count) VALUES(?1,?2,(SELECT COUNT(*) FROM dispatch WHERE status='unknown'))",
         params![format!("{} dispatch={id} request={request} owner={owner} epoch={epoch} attempt=1->2: {reason}", kind.label()),now()])?;
     // Durable recovery reservation and audit precede attempt 2 and all effects.
@@ -1811,7 +1954,11 @@ fn recover_reviewed(
     }
     let attempt =
         super::outgoing::claim_managed_focus_recovery(&b.state, request, &snapshot["original"])?;
-    super::outgoing::execute_managed_focus_recovery(&b.state, &driver, attempt, sender_fd)?;
+    if archived {
+        super::outgoing::execute_managed_clipboard_recovery(&b.state, &driver, attempt, sender_fd)?;
+    } else {
+        super::outgoing::execute_managed_focus_recovery(&b.state, &driver, attempt, sender_fd)?;
+    }
     tx.commit()?;
     let mut completed = dispatch_complete(root, id, &claim_token, None)?;
     completed["surface_paused"] = json!(true);
@@ -4345,6 +4492,25 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
             } => recover_reviewed(
                 root,
                 RecoveryKind::PrepareHeader,
+                RecoveryReview {
+                    id: dispatch_id,
+                    request: &request_id,
+                    expected_attempt,
+                    owner: &owner,
+                    epoch: expected_epoch,
+                    reason: &reason,
+                },
+            )?,
+            DispatchAction::RecoverClipboardRejection {
+                dispatch_id,
+                request_id,
+                expected_attempt,
+                owner,
+                expected_epoch,
+                reason,
+            } => recover_reviewed(
+                root,
+                RecoveryKind::ClipboardRejection,
                 RecoveryReview {
                     id: dispatch_id,
                     request: &request_id,
