@@ -45,7 +45,7 @@ wx-agent inbox --config /ABS/private/conversations.json complete \
   --reason '文案待审' --condition '等待负责人审阅' < /ABS/private/draft.txt
 ```
 
-defer/draft 保存为持续待办。处理游标前进不删除它们；`inbox status --id` 可继续发现。defer 的期限到达或显式设置的 `--condition new_information` 遇到新入站时重新进入待办；其他条件满足后用 `inbox resume --delivery-id … --owner … --expected-epoch …` 明确续办。待审草稿到期不会自动发送；`inbox cancel --delivery-id … --owner … --expected-epoch … --reason …` 显式取消。待办重开或取消保留决定、原草稿与来源历史。
+defer/draft 保存为持续待办。处理游标前进不删除它们；`inbox status --id` 可继续发现。defer 的期限到达或显式设置的 `--condition new_information` 遇到新入站时重新进入待办；其他条件满足后用 `inbox resume --delivery-id … --owner … --expected-epoch …` 明确续办。待审草稿到期不会自动发送。回复策略为 `authorized` 的会话中，操作者可在[控制面板](CONTROL_PANEL.md)查看并批准草稿：先把草稿原文作为托管回复入队，再用 `inbox approve-draft --delivery-id … --owner … --expected-epoch … --request-id … --approver …` 关联决定；该命令只核对并记账，不发送。`inbox cancel --delivery-id … --owner … --expected-epoch … --reason …` 显式取消。待办重开或取消保留决定、原草稿与来源历史。
 
 `inbox events --delivery-id … --owner …` 对已冻结范围分页，只读本地日志，不再次采集微信源，也不确认处理。受管 Session 可只拥有自己的 channel/协调器写入范围，直接用此入口读取通知中的源事件。
 

@@ -783,12 +783,15 @@ class ConversationTests(unittest.TestCase):
                                         "--request-id", "image-rid", "--image", "/synthetic/image.png"]), 0)
             self.assertEqual(conv.main(["--config", "/synthetic/config.json", "reply", *common,
                                         "--cursor", "3", "--text-stdin"]), 0)
+            self.assertEqual(conv.main(["--config", "/synthetic/config.json", "reply", *common,
+                                        "--cursor", "4", "--text-stdin", "--no-wait"]), 0)
         sending.assert_called_once_with(self.settings, "rid", "hello", target,
                                         owner="session-a", expected_epoch=4, wait=True, publisher=None, scheduling={})
         image_sending.assert_called_once_with(self.settings, "image-rid", Path("/synthetic/image.png"), target,
                                               owner="session-a", expected_epoch=4, wait=True, publisher=None, scheduling={})
-        replying.assert_called_once_with(self.settings, 3, "", target,
-                                         owner="session-a", expected_epoch=4)
+        self.assertEqual(replying.call_args_list, [
+            mock.call(self.settings, 3, "", target, owner="session-a", expected_epoch=4, wait=True),
+            mock.call(self.settings, 4, "", target, owner="session-a", expected_epoch=4, wait=False)])
 
     def test_managed_image_uses_same_dispatch_seam(self):
         self.choose(2)

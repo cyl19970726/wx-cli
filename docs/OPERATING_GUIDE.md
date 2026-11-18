@@ -139,6 +139,8 @@ sender 模板绑定准确目标、助手二进制哈希和新鲜窗口校准数�
 
 每会话 owner、输入方式和回复策略、持久 inbox、共享文字/图片发送队列以及 Session 推送都属于托管模式，见[托管指南](MANAGED_CONVERSATIONS.md)、[通道合同](CHANNEL_SUBSCRIPTIONS.md)和 [Session 插件](SESSION_PLUGIN.md)。常驻进程只有共享桌面执行器 `wx-agent dispatch run`、采集器与通知器；它们不自动回复每条消息。运行时间、锁屏、微信注销、系统授权失效、UI 变化和不可读剪贴板都会影响可用性；现有有限现场验证不代表长期无人值守可靠性。
 
+托管会话的整体状态、待办与草稿批准可以用本机[控制面板](CONTROL_PANEL.md)查看和处理。
+
 ## 8. 退役旧单群 controller
 
 旧的单群 runner（`wx-agent start/status/pause/resume/stop/run`、`wx-agent chat`、`wx-agent reply`、`wx-agent-reply`）已移除。早期通过 `controller_configs` 导入到注册表的会话，在迁移前会以 `legacy_controller` 拒绝读取和发送。升级 Python 包前后按以下顺序迁移：
@@ -183,6 +185,7 @@ sender 模板绑定准确目标、助手二进制哈希和新鲜窗口校准数�
 - [快速开始](quickstart.md)
 - [群/个人会话 CLI](CONVERSATIONS_CLI.md)
 - [托管会话](MANAGED_CONVERSATIONS.md)
+- [控制面板](CONTROL_PANEL.md)
 - [channel CLI](SINGLE_GROUP_CLI.md)
 - [渠道、Agent 与发送契约](contracts.md)
 - [原生发送助手](../native/macos/wechat-bridge/README.md)

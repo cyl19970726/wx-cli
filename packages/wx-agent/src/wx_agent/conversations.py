@@ -618,7 +618,7 @@ def send(settings, request_id, text, id=None, media=None, owner=None, expected_e
                            publisher=publisher)
 
 
-def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None):
+def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None, wait=True):
     with selected_channel(settings, id) as (snapshot, entry):
         require(type(cursor) is int and cursor > 0, "cursor", "positive cursor required")
         sender.validate_text(text)
@@ -636,7 +636,7 @@ def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None):
                 "not_replyable", "cursor is not an incoming observed text")
         request_id = local.reply_request_id(entry["channel_id"], event["server_id"])
         result = send_intent(settings, entry, request_id, text, snapshot,
-                             owner=owner, expected_epoch=expected_epoch)
+                             owner=owner, expected_epoch=expected_epoch, wait=wait)
         result["cursor"] = cursor
         # A generic manual read/reply does not own a consumer cursor.
         return result
@@ -757,6 +757,7 @@ def main(argv=None):
     replying = commands.choices["reply"]
     replying.add_argument("--cursor", type=int, required=True)
     replying.add_argument("--text-stdin", action="store_true", required=True)
+    replying.add_argument("--no-wait", action="store_true")
     for name in ("send", "send-image", "reply"):
         commands.choices[name].add_argument("--owner")
         commands.choices[name].add_argument("--expected-epoch", type=int)
@@ -812,7 +813,7 @@ def main(argv=None):
             raw = sys.stdin.buffer.read(local.MAX_REPLY + 1)
             require(len(raw) <= local.MAX_REPLY, "text", "message text too large")
             result = reply(settings, args.cursor, raw.decode("utf-8"), args.id,
-                           owner=args.owner, expected_epoch=args.expected_epoch)
+                           owner=args.owner, expected_epoch=args.expected_epoch, wait=not args.no_wait)
         else:
             raise ConversationError("command", "unsupported conversation command")
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))

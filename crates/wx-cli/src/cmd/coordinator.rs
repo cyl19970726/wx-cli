@@ -419,6 +419,20 @@ pub enum InboxAction {
         #[arg(long)]
         reason: String,
     },
+    /// Record an operator's approval of a draft whose exact text is already a
+    /// managed reply intent for the same owner epoch. It never sends by itself.
+    ApproveDraft {
+        #[arg(long)]
+        delivery_id: i64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        expected_epoch: i64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        approver: String,
+    },
     Status {
         #[arg(long)]
         conversation_id: String,
@@ -3737,6 +3751,96 @@ fn inbox_resume(root: &Path, id: i64, owner: &str, epoch: i64) -> Result<Value, 
     tx.commit()?;
     Ok(json!({"delivery_id":id,"status":"pending"}))
 }
+type DraftApprovalRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Close a draft todo as replied after an operator approved its exact text.
+///
+/// The reply itself must already be a managed outbox intent for the current
+/// owner epoch with a dispatch reference; this only links the decision to it.
+/// The reply policy stays the dispatch authority: a draft-only conversation
+/// cannot be approved into a send.
+fn inbox_approve_draft(
+    root: &Path,
+    id: i64,
+    owner: &str,
+    epoch: i64,
+    request: &str,
+    approver: &str,
+) -> Result<Value, Box<dyn Error>> {
+    check_id(owner)?;
+    check_id(request)?;
+    check_id(approver)?;
+    let mut db = open(root, true)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let row: Option<DraftApprovalRow> = tx
+        .query_row(
+            "SELECT conversation_id,status,draft_text,decision_request_id,turn_state FROM delivery WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let Some((conversation, status, draft, saved_request, turn)) = row else {
+        return Err(invalid("delivery absent"));
+    };
+    if status == "replied" && saved_request.as_deref() == Some(request) {
+        return Ok(
+            json!({"delivery_id":id,"status":"replied","request_id":request,"already_approved":true}),
+        );
+    }
+    let b = binding(&tx, &conversation)?;
+    if b.owner != owner || b.epoch != epoch || b.control != "active" {
+        return Err(invalid("owner epoch or control state changed"));
+    }
+    if b.reply_policy != "authorized" {
+        return Err(invalid(
+            "reply policy does not authorize sending an approved draft",
+        ));
+    }
+    if status != "draft"
+        || turn
+            .as_deref()
+            .is_some_and(|x| matches!(x, "reserved" | "recorded"))
+    {
+        return Err(invalid("delivery is not an idle draft todo"));
+    }
+    let Some(draft) = draft else {
+        return Err(invalid("draft text is absent"));
+    };
+    verify_binding(&b)?;
+    let path = b.state.join("outgoing.sqlite3");
+    private(&path, false)?;
+    let out = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let matched: bool = out.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outgoing_intent WHERE request_id=?1 AND channel_id=?2 AND session_id=?3 AND content_kind='text' AND text=?4 AND managed_owner=?5 AND managed_epoch=?6)",
+        params![request, b.channel_id, b.session_id, draft, b.owner, b.epoch],
+        |r| r.get(0),
+    )?;
+    let dispatched: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch WHERE conversation_id=?1 AND request_id=?2 AND operation='send' AND epoch=?3)",
+        params![conversation, request, b.epoch],
+        |r| r.get(0),
+    )?;
+    if !matched || !dispatched {
+        return Err(invalid(
+            "approved draft must already be the exact managed reply intent for this owner epoch",
+        ));
+    }
+    let reason = format!("draft approved by {approver}");
+    tx.execute("INSERT INTO delivery_decision_history(delivery_id,owner,epoch,decision,request_id,draft_text,reason,recorded_at) VALUES(?1,?2,?3,'approve_draft',?4,?5,?6,?7)",params![id,b.owner,b.epoch,request,draft,reason,now()])?;
+    tx.execute(
+        "UPDATE delivery SET status='replied',decision_request_id=?2,reason=?3,resume_condition=NULL,due_at=NULL,updated_at=?4 WHERE id=?1",
+        params![id, request, reason, now()],
+    )?;
+    advance_processed(&tx, &conversation)?;
+    tx.commit()?;
+    Ok(json!({"delivery_id":id,"status":"replied","request_id":request,"already_approved":false}))
+}
 fn inbox_status(root: &Path, id: &str) -> Result<Value, Box<dyn Error>> {
     let db = open(root, false)?;
     let b = binding(&db, id)?;
@@ -4025,6 +4129,20 @@ pub fn run(root: &Path, action: CoordinatorAction) -> Result<(), Box<dyn Error>>
                 expected_epoch,
                 reason,
             } => inbox_cancel(root, delivery_id, &owner, expected_epoch, &reason)?,
+            InboxAction::ApproveDraft {
+                delivery_id,
+                owner,
+                expected_epoch,
+                request_id,
+                approver,
+            } => inbox_approve_draft(
+                root,
+                delivery_id,
+                &owner,
+                expected_epoch,
+                &request_id,
+                &approver,
+            )?,
             InboxAction::ReserveTurn {
                 delivery_id,
                 token,
@@ -4241,6 +4359,90 @@ mod tests {
             inbox_claim(&root, "conversation1", "owner1", 300, None).unwrap()["delivery_id"],
             id
         );
+    }
+    fn drafted(root: &Path, state: &Path, policy: ReplyPolicy, text: &str) -> i64 {
+        enroll(
+            root,
+            "conversation1",
+            state,
+            "owner1",
+            InputMode::Pull,
+            policy,
+        )
+        .unwrap();
+        observed(state, "synthetic_other");
+        inbox_reconcile(root, "conversation1").unwrap();
+        let claim = inbox_claim(root, "conversation1", "owner1", 300, None).unwrap();
+        let id = claim["delivery_id"].as_i64().unwrap();
+        inbox_complete(
+            root,
+            id,
+            claim["token"].as_str().unwrap(),
+            DecisionInput {
+                decision: Decision::Draft,
+                request: None,
+                draft: Some(text),
+                reason: Some("needs approval"),
+                condition: None,
+                due_at: None,
+            },
+        )
+        .unwrap();
+        id
+    }
+    fn queued_text(state: &Path, request: &str, text: &str, epoch: i64) {
+        let b = load_binding(state).unwrap();
+        let db = Connection::open(state.join("outgoing.sqlite3")).unwrap();
+        db.execute("INSERT INTO outgoing_intent(request_id,channel_id,session_id,text,content_kind,status,managed_owner,managed_epoch,created_at,updated_at) VALUES(?1,?2,?3,?4,'text','managed_queued','owner1',?5,?6,?6)",params![request,b.channel_id,b.session_id,text,epoch,now()]).unwrap();
+    }
+    #[test]
+    fn approved_draft_links_only_the_exact_dispatched_reply_intent() {
+        let (_tmp, state, root) = fixture();
+        let id = drafted(&root, &state, ReplyPolicy::Authorized, "reviewed text");
+        let approve =
+            |request: &str| inbox_approve_draft(&root, id, "owner1", 1, request, "operator");
+        assert!(approve("missing-intent").is_err());
+        queued_text(&state, "other-text", "different text", 1);
+        enqueue(&root, "conversation1", "other-text", 1, false).unwrap();
+        assert!(approve("other-text").is_err());
+        queued_text(&state, "exact-text", "reviewed text", 1);
+        assert!(
+            approve("exact-text").is_err(),
+            "an undispatched intent is not enough"
+        );
+        enqueue(&root, "conversation1", "exact-text", 1, false).unwrap();
+        assert!(inbox_approve_draft(&root, id, "owner2", 1, "exact-text", "operator").is_err());
+        assert!(inbox_approve_draft(&root, id, "owner1", 2, "exact-text", "operator").is_err());
+        assert!(inbox_approve_draft(&root, id, "owner1", 1, "exact-text", "bad approver").is_err());
+        let first = approve("exact-text").unwrap();
+        assert_eq!(first["status"], "replied");
+        assert_eq!(first["already_approved"], false);
+        assert_eq!(approve("exact-text").unwrap()["already_approved"], true);
+        assert!(approve("other-text").is_err());
+        let shown = inbox_show(&root, id, "owner1").unwrap();
+        assert_eq!(shown["status"], "replied");
+        assert_eq!(shown["request_id"], "exact-text");
+        let db = open(&root, false).unwrap();
+        let history: (String, String) = db
+            .query_row(
+                "SELECT decision,reason FROM delivery_decision_history WHERE delivery_id=?1 ORDER BY id DESC LIMIT 1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            history,
+            ("approve_draft".into(), "draft approved by operator".into())
+        );
+    }
+    #[test]
+    fn draft_only_policy_cannot_be_approved_into_a_send() {
+        let (_tmp, state, root) = fixture();
+        let id = drafted(&root, &state, ReplyPolicy::Draft, "reviewed text");
+        queued_text(&state, "exact-text", "reviewed text", 1);
+        assert!(enqueue(&root, "conversation1", "exact-text", 1, false).is_err());
+        assert!(inbox_approve_draft(&root, id, "owner1", 1, "exact-text", "operator").is_err());
+        assert_eq!(inbox_show(&root, id, "owner1").unwrap()["status"], "draft");
     }
     #[test]
     fn resumed_terminal_todo_moves_to_current_owner_without_losing_history() {

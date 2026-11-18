@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `wx-agent panel`: a loopback-only control panel for managed conversations, showing desktop/dispatch state, conversations, to-dos and drafts with their source messages. It can pause the desktop surface and approve a draft in an `authorized` conversation; it never resumes the desktop, changes reply policy or exposes lease tokens.
+- `wx-cli coordinator inbox approve-draft` links an operator-approved draft to the exact managed reply intent already dispatched for the same owner epoch, recording an `approve_draft` decision without sending.
+- `wx-agent conversations reply --no-wait` freezes and enqueues a managed reply without waiting for the desktop executor.
 - `wx-agent conversations retire-controller --id ID` migrates a registry entry imported from the removed runner into a plain entry. It refuses while the old runner is alive, holds an interactive lease or has a pending reply, and leaves the state directory, channel binding, consumer and outbox untouched. Unmigrated imported entries now fail with `legacy_controller`.
 
 ### Changed
