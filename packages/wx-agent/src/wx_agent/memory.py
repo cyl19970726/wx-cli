@@ -54,13 +54,13 @@ def _command(wx_cli, state_dir, *args, timeout=5):
     executable = Path(wx_cli)
     if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
         raise MemoryError("absolute wx-cli executable required")
-    # Reuse the runner's bounded reader: subprocess.run(capture_output=True)
+    # Reuse the bounded reader: subprocess.run(capture_output=True)
     # accumulates unlimited output before it can enforce a size limit.
-    from .channel_agent import RunnerError, command
+    from .local import CommandError, command
     try:
         return command([str(executable), "channel", "--state-dir", str(state_dir), *args],
                        timeout=timeout, limit=MAX_FILE)
-    except (OSError, RunnerError, UnicodeError, subprocess.TimeoutExpired) as exc:
+    except (OSError, CommandError, UnicodeError, subprocess.TimeoutExpired) as exc:
         raise MemoryError("channel read failed") from exc
 
 

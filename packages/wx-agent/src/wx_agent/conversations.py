@@ -13,11 +13,9 @@ import subprocess
 import sys
 import uuid
 
-from . import channel_agent as runner
+from . import local
 from . import dispatch
-from . import interactive
 from . import macos_sender_driver as sender
-from . import wechat_agent_ctl as ctl
 
 
 REGISTRY_NAME = "conversations.json"
@@ -25,6 +23,8 @@ LOCK_NAME = "conversations.lock"
 TERMINAL = ("ui_observed", "recipient_confirmed")
 REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 CONVERSATION_ID = re.compile(r"[0-9a-f]{32}\Z")
+# Registry entry origin for state adopted from the retired single-group runner.
+RETIRED_CONTROLLER = "retired_controller"
 
 
 class ConversationError(Exception):
@@ -46,7 +46,7 @@ def absolute(value, label):
 
 def config(path):
     require(path.is_absolute(), "config", "absolute --config path required")
-    value = ctl.read_json(path)
+    value = local.read_json(path)
     keys = {"version", "wx_cli", "registry_dir", "account", "source", "sender_template",
             "sender_executable", "controller_configs"}
     require(set(value) <= keys and keys - {"controller_configs"} <= set(value) and value["version"] == 1,
@@ -55,12 +55,14 @@ def config(path):
         absolute(value[key], key)
     require(isinstance(value["account"], str) and value["account"] and
             Path(value["source"]).name == value["account"], "config", "account/source mismatch")
+    # Obsolete: entries imported from the retired single-group runner are
+    # migrated with `retire-controller`; listed paths are validated but unused.
     controllers = value.get("controller_configs", [])
     require(isinstance(controllers, list) and all(isinstance(item, str) for item in controllers),
             "config", "controller_configs must be absolute paths")
     for item in controllers:
         absolute(item, "controller config")
-    ctl.private(Path(value["registry_dir"]), True)
+    local.private(Path(value["registry_dir"]), True)
     require(Path(value["source"]).is_dir(), "config", "source directory unavailable")
     value["source"] = str(Path(value["source"]).resolve())
     registry_root = Path(value["registry_dir"]).resolve()
@@ -68,7 +70,7 @@ def config(path):
     require(registry_root != source_root and source_root not in registry_root.parents and
             registry_root not in source_root.parents,
             "config", "registry and source directories must be separate")
-    ctl.read_json(Path(value["sender_template"]))
+    local.read_json(Path(value["sender_template"]))
     for key in ("wx_cli", "sender_executable"):
         executable = Path(value[key])
         require(executable.is_file() and os.access(executable, os.X_OK), "config", key + " unavailable")
@@ -80,7 +82,7 @@ def registry_lock(settings):
     path = Path(settings["registry_dir"]) / LOCK_NAME
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        ctl.private(path)
+        local.private(path)
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -94,7 +96,7 @@ def channel_lock(settings, id):
     path = Path(settings["registry_dir"]) / ("channel-" + id + ".lock")
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        ctl.private(path)
+        local.private(path)
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -110,7 +112,7 @@ def registry(settings):
     if not path.exists() and not path.is_symlink():
         return {"version": 1, "account": settings["account"], "source": settings["source"],
                 "selected_id": None, "entries": {}}
-    value = ctl.read_json(path)
+    value = local.read_json(path)
     require(value.get("version") == 1 and value.get("account") == settings["account"] and
             value.get("source") == settings["source"] and isinstance(value.get("entries"), dict),
             "registry_drift", "conversation registry has different ownership")
@@ -118,7 +120,7 @@ def registry(settings):
 
 
 def save_registry(settings, value):
-    ctl.atomic_json(registry_path(settings), value)
+    local.atomic_json(registry_path(settings), value)
 
 
 def conversation_id(account, talker):
@@ -135,15 +137,15 @@ def command(settings, section, state_dir=None, *parts, data=None):
         argv += ["--state-dir", str(state_dir)]
     argv += list(parts)
     try:
-        return runner.command(argv, data=data, timeout=75)
-    except (runner.RunnerError, OSError, subprocess.SubprocessError) as exc:
+        return local.command(argv, data=data, timeout=75)
+    except (local.CommandError, OSError, subprocess.SubprocessError) as exc:
         raise ConversationError("command_failed", "local " + section + " command failed") from exc
 
 
 def one_json(settings, section, state_dir=None, *parts, data=None):
     try:
-        return runner.one_json(command(settings, section, state_dir, *parts, data=data))
-    except runner.RunnerError as exc:
+        return local.one_json(command(settings, section, state_dir, *parts, data=data))
+    except local.CommandError as exc:
         raise ConversationError("invalid_output", "local command returned invalid JSON") from exc
 
 
@@ -194,37 +196,6 @@ def fresh(settings, id, entry=None, unique_name=False):
     return current
 
 
-def controllers(settings):
-    result = []
-    seen = set()
-    for path_value in settings.get("controller_configs", []):
-        path = Path(path_value)
-        value = ctl.config(path, require_executables=False)
-        state = Path(value["state_dir"])
-        require(str(state) not in seen, "controller_drift", "duplicate controller state")
-        seen.add(str(state))
-        binding = one_json(settings, "channel", state, "status").get("binding")
-        require(isinstance(binding, dict), "controller_drift", "controller binding unavailable")
-        result.append((path, value, binding))
-    return result
-
-
-def controller_api(settings,value):
-    """Use the candidate CLI for an enrolled, stopped legacy controller.
-
-    Paths are deployment details, not a second binding. Preserve the original
-    controller file, commands, consumer and state, and never adopt a live writer.
-    """
-    if value["wx_cli"]==settings["wx_cli"]:
-        return value
-    root=dispatch.managed_root(value["state_dir"])
-    require(root is not None and root==dispatch.root_from_settings(settings),
-            "controller_drift","controller uses another wx-cli outside managed migration")
-    require(not ctl.status(value)["alive"],"controller_running",
-            "stop the original controller before using a candidate CLI")
-    return dict(value,wx_cli=settings["wx_cli"])
-
-
 def binding_matches(settings, binding, metadata):
     return (binding.get("account") == settings["account"] and
             binding.get("source") == settings["source"] and
@@ -254,15 +225,9 @@ def selected(settings, id=None):
     entry = current["entries"][chosen].copy()
     current["_explicit_id"] = id is not None
     require(entry.get("conversation_id") == chosen, "registry_drift", "conversation registry entry differs")
-    if entry.get("imported"):
-        require(entry.get("controller_config") in settings.get("controller_configs", []),
-                "controller_drift", "registered controller is no longer configured")
-        controller = ctl.config(Path(entry["controller_config"]), require_executables=False)
-        require(controller["state_dir"] == entry.get("state_dir"),
-                "controller_drift", "controller state directory changed")
-    else:
-        expected = Path(settings["registry_dir"]) / "channels" / chosen
-        require(entry.get("state_dir") == str(expected), "registry_drift", "manual channel path changed")
+    require(not entry.get("imported"), "legacy_controller",
+            "run `conversations retire-controller --id ID` before using this conversation")
+    _check_state_dir(settings, chosen, entry)
     channel_status(settings, entry)
     return current, entry
 
@@ -287,7 +252,7 @@ def selected_channel(settings, id=None):
 def _private_dir(path):
     if not path.exists() and not path.is_symlink():
         path.mkdir(mode=0o700, exist_ok=True)
-    ctl.private(path, True)
+    local.private(path, True)
 
 
 def _driver_paths(entry):
@@ -298,12 +263,12 @@ def _driver_paths(entry):
 def prepare_driver(settings, entry):
     state = Path(entry["state_dir"])
     binding = channel_status(settings, entry)["binding"]
-    template = ctl.read_json(Path(settings["sender_template"]))
+    template = local.read_json(Path(settings["sender_template"]))
     template.update(binding=binding, channel_state_dir=str(state), wx_cli=settings["wx_cli"],
                     target_name=entry["name"], conversation_kind=entry["kind"])
     template.pop("target_group", None)
     config_path, driver_path = _driver_paths(entry)
-    ctl.atomic_json(config_path, template)
+    local.atomic_json(config_path, template)
     command = shlex.quote(settings["sender_executable"])
     if Path(settings["sender_executable"]).name.startswith("python"):
         module = Path(settings["sender_executable"]).parent.parent / "lib"
@@ -329,26 +294,87 @@ def prepare_driver(settings, entry):
     return str(driver_path)
 
 
+def _check_state_dir(settings, id, entry):
+    """A registry entry owns either its own registry channel or a retired runner's state."""
+    expected = Path(settings["registry_dir"]) / "channels" / id
+    if entry.get("state_origin") == RETIRED_CONTROLLER:
+        state = absolute(entry.get("state_dir"), "retired controller state")
+        require(state != expected, "registry_drift", "retired controller state path changed")
+        local.private(state, True)
+    else:
+        require(entry.get("state_dir") == str(expected), "registry_drift", "manual channel path changed")
+
+
+def _unregistered_legacy_state(settings, metadata):
+    """Whether a still-configured legacy controller holds this conversation's channel.
+
+    Selecting it anew would create a second channel for the same conversation,
+    detaching the existing history and outbox, so such a selection is refused.
+    """
+    for path_value in settings.get("controller_configs", []):
+        state = local.read_json(Path(path_value)).get("state_dir")
+        if not isinstance(state, str) or not Path(state).is_dir():
+            continue
+        binding = one_json(settings, "channel", state, "status").get("binding")
+        if isinstance(binding, dict) and binding_matches(settings, binding, metadata):
+            return True
+    return False
+
+
+def retire_controller(settings, id):
+    """Turn an entry imported from the retired single-group runner into a plain entry.
+
+    The runner's state directory, channel binding, consumer, outbox and files
+    stay where they are; only the registry stops depending on the old runner.
+    """
+    require(isinstance(id, str) and bool(CONVERSATION_ID.fullmatch(id)),
+            "conversation_id", "retire-controller requires an explicit conversation ID")
+    with channel_lock(settings, id):
+        with registry_lock(settings):
+            old = registry(settings)["entries"].get(id)
+        require(isinstance(old, dict) and old.get("conversation_id") == id,
+                "selection_required", "conversation is not registered")
+        if not old.get("imported"):
+            return {"retired": False, "conversation_id": id,
+                    "state_origin": old.get("state_origin", "registry")}
+        state = absolute(old.get("state_dir"), "controller state")
+        local.private(state, True)
+        controller_path = absolute(old.get("controller_config"), "controller config")
+        controller = local.read_json(controller_path)
+        require(controller.get("state_dir") == str(state), "controller_drift",
+                "controller state directory changed")
+        blockers = local.legacy_runner_blockers(state)
+        require(not blockers, "legacy_runner_active", "; ".join(blockers))
+        entry = dict(old, imported=False, controller_config=None, state_origin=RETIRED_CONTROLLER,
+                     retired_controller_config=str(controller_path))
+        _check_state_dir(settings, id, entry)
+        binding = channel_status(settings, entry)["binding"]
+        require(binding_matches(settings, binding, entry), "binding_drift", "channel binding differs")
+        entry["revision"] = old.get("revision", 0) + 1
+        with registry_lock(settings):
+            current = registry(settings)
+            require(current["entries"].get(id) == old, "registry_drift", "conversation entry changed")
+            current["entries"][id] = entry
+            save_registry(settings, current)
+    return {"retired": True, "conversation_id": id, "state_dir": str(state),
+            "state_origin": RETIRED_CONTROLLER}
+
+
 def select(settings, id, focus=False):
     metadata = fresh(settings, id)
     with channel_lock(settings, id):
         with registry_lock(settings):
             old = registry(settings)["entries"].get(id)
-        matches = [(path, value, binding) for path, value, binding in controllers(settings)
-                   if binding_matches(settings, binding, metadata)]
-        require(len(matches) <= 1, "controller_drift", "more than one controller owns this conversation")
-        if matches:
-            path, _, binding = matches[0]
-            state_dir = str(Path(matches[0][1]["state_dir"]))
-            imported = True
-            controller_config = str(path)
-        elif old is not None:
+        if old is not None:
+            require(not old.get("imported"), "legacy_controller",
+                    "run `conversations retire-controller --id ID` before selecting this conversation")
+            _check_state_dir(settings, id, old)
             state_dir = old["state_dir"]
             binding = channel_status(settings, old)["binding"]
-            imported = old.get("imported", False)
-            controller_config = old.get("controller_config")
-            require(not imported, "controller_drift", "registered controller is no longer configured")
         else:
+            require(not _unregistered_legacy_state(settings, metadata), "legacy_controller",
+                    "a configured legacy controller already owns this conversation; select it with the "
+                    "previous release, then run `conversations retire-controller --id ID`")
             channels = Path(settings["registry_dir"]) / "channels"
             _private_dir(channels)
             state = channels / id
@@ -359,12 +385,12 @@ def select(settings, id, focus=False):
             binding = one_json(settings, "channel", state, "bind", "--account", settings["account"],
                                "--talker", metadata["talker"], "--session", "conversation-" + id,
                                "--source", settings["source"], "--encrypted-snapshot")
-            imported = False
-            controller_config = None
         require(binding_matches(settings, binding, metadata), "binding_drift", "channel binding differs")
         entry = dict(metadata, state_dir=state_dir, session_id=binding["session_id"],
-                     channel_id=binding["channel_id"], imported=imported,
-                     controller_config=controller_config)
+                     channel_id=binding["channel_id"], imported=False, controller_config=None)
+        for key in ("state_origin", "retired_controller_config"):
+            if old is not None and key in old:
+                entry[key] = old[key]
         if old is not None:
             require(old["state_dir"] == state_dir and old["session_id"] == entry["session_id"] and
                     old["channel_id"] == entry["channel_id"], "registry_drift", "selection would rebind existing state")
@@ -380,7 +406,7 @@ def select(settings, id, focus=False):
     if focus:
         return focus_conversation(settings, id)
     return {"selected": True, "conversation": metadata, "state_dir": state_dir,
-            "imported_controller": imported}
+            "state_origin": entry.get("state_origin", "registry")}
 
 
 def status(settings, id=None):
@@ -388,10 +414,7 @@ def status(settings, id=None):
     channel = channel_status(settings, entry)
     result = {"conversation": {key: entry[key] for key in ("conversation_id", "talker", "name", "kind")},
               "binding": channel["binding"], "latest_cursor": channel["latest_cursor"],
-              "history_complete": False, "imported_controller": entry["imported"]}
-    if entry["imported"]:
-        value = ctl.config(Path(entry["controller_config"]), require_executables=False)
-        result["controller"] = ctl.status(value)
+              "history_complete": False, "state_origin": entry.get("state_origin", "registry")}
     return result
 
 
@@ -425,7 +448,7 @@ def control(settings, id, action, expected_epoch):
 def _managed_root(settings, entry):
     root = dispatch.managed_root(entry["state_dir"])
     if root is None:
-        desktop=Path(ctl.read_json(Path(settings["sender_template"]))["ui_dir"])
+        desktop=Path(local.read_json(Path(settings["sender_template"]))["ui_dir"])
         require(not (desktop/"coordinator.sqlite3").exists(),"managed_desktop",
                 "desktop is managed; configure this conversation before GUI operations")
     if root is not None:
@@ -485,49 +508,6 @@ def read(settings, after=None, limit=50, id=None):
                 "after": cursor, "next_cursor": visible[-1]["cursor"] if visible else cursor,
                 "events": visible, "has_more": len(page) > limit,
                 "latest_cursor": channel["latest_cursor"], "history_complete": False}
-
-
-@contextmanager
-def coordinated(settings, target_entry):
-    acquired = []
-    primary_error = None
-    try:
-        if target_entry.get("controller_config"):
-            require(target_entry["controller_config"] in settings.get("controller_configs", []),
-                    "controller_drift", "target controller is no longer configured")
-            original = ctl.config(Path(target_entry["controller_config"]), require_executables=False)
-            value = controller_api(settings,original)
-            require(value["state_dir"] == target_entry["state_dir"] and
-                    value["wx_cli"] == settings["wx_cli"],
-                    "controller_drift", "target controller changed")
-            lease = Path(value["state_dir"]) / ctl.INTERACTIVE_NAME
-            require(not lease.exists() and not lease.is_symlink(), "external_lease",
-                    "another operator holds an interactive lease")
-            interactive.select(value, target_entry["talker"], compatible=(original,))
-            value["_compatible_fingerprints"] = (interactive._fingerprint(original),)
-            channel = interactive._status(value)
-            _, state, cursor = interactive._runner_state(value, channel["binding"])
-            require(state.get("pending") is None and cursor == channel["consumer_cursor"],
-                    "runner_pending", "controller has an in-flight reply")
-            interactive._check_outbox_clear(value, channel["binding"], channel["consumer_cursor"])
-            interactive.takeover(value)
-            acquired.append(value)
-        yield
-    except BaseException as exc:
-        primary_error = exc
-        raise
-    finally:
-        failures = []
-        for value in reversed(acquired):
-            try:
-                interactive.handback(value)
-            except (interactive.ChatError, ctl.ControlError, runner.RunnerError, OSError) as exc:
-                failures.append(str(exc))
-        if failures:
-            detail = "controller lease retained: " + "; ".join(failures)
-            if primary_error is not None:
-                detail += "; operation also failed: " + str(primary_error)
-            raise ConversationError("handback_incomplete", detail) from primary_error
 
 
 def send_intent(settings, entry, request_id, text, snapshot=None, media=None,
@@ -633,16 +613,9 @@ def send(settings, request_id, text, id=None, media=None, owner=None, expected_e
         sender.validate_text(text)
     with selected_channel(settings, id) as (snapshot, entry):
         fresh(settings, entry["conversation_id"], entry, unique_name=True)
-        with coordinated(settings, entry):
-            if entry["imported"]:
-                value = controller_api(settings,ctl.config(Path(entry["controller_config"]), require_executables=False))
-                status_value = interactive._status(value)
-                interactive._check_outbox_clear(value, status_value["binding"], status_value["consumer_cursor"])
-                _, state, _ = interactive._runner_state(value, status_value["binding"])
-                require(state.get("pending") is None, "runner_pending", "controller has a pending reply")
-            return send_intent(settings, entry, request_id, text, snapshot, media,
-                               owner=owner, expected_epoch=expected_epoch, scheduling=scheduling, wait=wait,
-                               publisher=publisher)
+        return send_intent(settings, entry, request_id, text, snapshot, media,
+                           owner=owner, expected_epoch=expected_epoch, scheduling=scheduling, wait=wait,
+                           publisher=publisher)
 
 
 def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None):
@@ -650,47 +623,23 @@ def reply(settings, cursor, text, id=None, owner=None, expected_epoch=None):
         require(type(cursor) is int and cursor > 0, "cursor", "positive cursor required")
         sender.validate_text(text)
         fresh(settings, entry["conversation_id"], entry, unique_name=True)
-        with coordinated(settings, entry):
-            if entry["imported"]:
-                value = controller_api(settings,ctl.config(Path(entry["controller_config"]), require_executables=False))
-                assert_selection(settings, snapshot, entry)
-                root = _managed_root(settings, entry)
-                managed = root is not None
-                if managed:
-                    _managed_fence(settings, entry, owner, expected_epoch, root)
-                    value = dict(value, _dispatch_owner=owner, _dispatch_epoch=expected_epoch)
-                try:
-                    return interactive.reply(value, cursor, text)
-                except interactive.ChatError as exc:
-                    if not managed or exc.code != "send_uncertain":
-                        raise
-                    lease = interactive._read_optional(Path(entry["state_dir"]) / interactive.LEASE_NAME)
-                    pending = lease.get("pending") if isinstance(lease, dict) else None
-                    if not isinstance(pending, dict) or pending.get("cursor") != cursor or pending.get("text") != text:
-                        raise
-                    item = one_json(settings, "outbox", entry["state_dir"], "show",
-                                    "--request-id", pending["request_id"])
-                    if item.get("status") not in ("managed_queued", "managed_media_queued"):
-                        raise
-                    return {"request_id": pending["request_id"], "cursor": cursor,
-                            "status": "pending", "already_completed": False}
-            one_json(settings, "channel", entry["state_dir"], "sync")
-            page = events(settings, entry, cursor - 1, 1)
-            require(len(page) == 1 and page[0]["cursor"] == cursor, "cursor_missing", "reply source is absent")
-            event = page[0]
-            body = event.get("message", {}).get("content")
-            require(event.get("kind") == "message_observed" and event.get("direction") == "incoming" and
-                    isinstance(body, dict) and isinstance(body.get("Text"), str) and
-                    type(event.get("server_id")) is int and event["server_id"] > 0 and
-                    event.get("message", {}).get("server_id") == event["server_id"] and
-                    event.get("message", {}).get("talker") == entry["talker"],
-                    "not_replyable", "cursor is not an incoming observed text")
-            request_id = runner.reply_request_id(entry["channel_id"], event["server_id"])
-            result = send_intent(settings, entry, request_id, text, snapshot,
-                                 owner=owner, expected_epoch=expected_epoch)
-            result["cursor"] = cursor
-            # A generic manual read/reply does not own a consumer cursor.
-            return result
+        one_json(settings, "channel", entry["state_dir"], "sync")
+        page = events(settings, entry, cursor - 1, 1)
+        require(len(page) == 1 and page[0]["cursor"] == cursor, "cursor_missing", "reply source is absent")
+        event = page[0]
+        body = event.get("message", {}).get("content")
+        require(event.get("kind") == "message_observed" and event.get("direction") == "incoming" and
+                isinstance(body, dict) and isinstance(body.get("Text"), str) and
+                type(event.get("server_id")) is int and event["server_id"] > 0 and
+                event.get("message", {}).get("server_id") == event["server_id"] and
+                event.get("message", {}).get("talker") == entry["talker"],
+                "not_replyable", "cursor is not an incoming observed text")
+        request_id = local.reply_request_id(entry["channel_id"], event["server_id"])
+        result = send_intent(settings, entry, request_id, text, snapshot,
+                             owner=owner, expected_epoch=expected_epoch)
+        result["cursor"] = cursor
+        # A generic manual read/reply does not own a consumer cursor.
+        return result
 
 
 def recover_unsent_send(settings, request_id, expected_attempt, id=None):
@@ -705,83 +654,66 @@ def recover_unsent_send(settings, request_id, expected_attempt, id=None):
         fresh(settings, entry["conversation_id"], entry, unique_name=True)
         require(_managed_root(settings, entry) is None, "managed_recovery_unsupported",
                 "managed recovery requires coordinator review")
-        if entry["imported"]:
-            value = ctl.config(Path(entry["controller_config"]), require_executables=False)
-            lease = interactive._read_optional(Path(value["state_dir"]) / interactive.LEASE_NAME)
-            pending = lease.get("pending") if isinstance(lease, dict) else None
-            require(isinstance(lease, dict) and lease.get("phase") == "active"
-                    and isinstance(pending, dict) and pending.get("request_id") == request_id,
-                    "retained_lease_required", "imported controller recovery requires its retained reply lease")
-            item = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
-            require(item.get("request_id") == request_id and item.get("text") == pending.get("text"),
-                    "outbox_drift", "retained reply and outbox intent differ")
-            require(item.get("attempt_number") == expected_attempt,
-                    "attempt_drift", "outbox attempt differs from the requested recovery")
-            assert_selection(settings, snapshot, entry)
-            return interactive.recover_unsent_reply(value, pending.get("cursor"), expected_attempt)
-
-        with coordinated(settings, entry):
-            assert_selection(settings, snapshot, entry)
-            item = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
-            require(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
-            require(isinstance(item.get("text"), str), "outbox_drift", "outbox text is unavailable")
-            require(item.get("media") is None, "image_recovery_unsupported", "image attempts cannot be recovered")
-            sender.validate_text(item["text"])
-            require(item.get("status") in ("failed", "indeterminate"),
-                    "send_uncertain", "only a failed or indeterminate intent can be recovered")
-            require(item.get("attempt_number") == expected_attempt,
-                    "attempt_drift", "outbox attempt differs from the requested recovery")
-            fresh(settings, entry["conversation_id"], entry, unique_name=True)
-            assert_selection(settings, snapshot, entry)
-            one_json(settings, "channel", entry["state_dir"], "sync")
-            channel_status(settings, entry)
-            driver = prepare_driver(settings, entry)
-            try:
-                one_json(settings, "outbox", entry["state_dir"], "recover-unsent", "--request-id", request_id,
-                         "--expected-attempt", str(expected_attempt), "--driver", driver)
-            except ConversationError:
-                # The claim may have been committed. Inspect its immutable current state only.
-                pass
-            result = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
-            require(result.get("request_id") == request_id and result.get("text") == item["text"],
-                    "outbox_drift", "recovered intent differs from the original")
-            require(result.get("status") in TERMINAL, "send_uncertain", "recovery result needs manual inspection")
-            return {"request_id": request_id, "attempt_number": result.get("attempt_number"),
-                    "status": result["status"], "already_completed": False}
+        assert_selection(settings, snapshot, entry)
+        item = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
+        require(item.get("request_id") == request_id, "outbox_drift", "outbox request ID differs")
+        require(isinstance(item.get("text"), str), "outbox_drift", "outbox text is unavailable")
+        require(item.get("media") is None, "image_recovery_unsupported", "image attempts cannot be recovered")
+        sender.validate_text(item["text"])
+        require(item.get("status") in ("failed", "indeterminate"),
+                "send_uncertain", "only a failed or indeterminate intent can be recovered")
+        require(item.get("attempt_number") == expected_attempt,
+                "attempt_drift", "outbox attempt differs from the requested recovery")
+        fresh(settings, entry["conversation_id"], entry, unique_name=True)
+        assert_selection(settings, snapshot, entry)
+        one_json(settings, "channel", entry["state_dir"], "sync")
+        channel_status(settings, entry)
+        driver = prepare_driver(settings, entry)
+        try:
+            one_json(settings, "outbox", entry["state_dir"], "recover-unsent", "--request-id", request_id,
+                     "--expected-attempt", str(expected_attempt), "--driver", driver)
+        except ConversationError:
+            # The claim may have been committed. Inspect its immutable current state only.
+            pass
+        result = one_json(settings, "outbox", entry["state_dir"], "show", "--request-id", request_id)
+        require(result.get("request_id") == request_id and result.get("text") == item["text"],
+                "outbox_drift", "recovered intent differs from the original")
+        require(result.get("status") in TERMINAL, "send_uncertain", "recovery result needs manual inspection")
+        return {"request_id": request_id, "attempt_number": result.get("attempt_number"),
+                "status": result["status"], "already_completed": False}
 
 
 def focus_conversation(settings, id=None):
     with selected_channel(settings, id) as (snapshot, entry):
         fresh(settings, entry["conversation_id"], entry, unique_name=True)
-        with coordinated(settings, entry):
-            one_json(settings, "channel", entry["state_dir"], "sync")
-            driver = prepare_driver(settings, entry)
-            assert_selection(settings, snapshot, entry)
-            root = _managed_root(settings, entry)
-            if root is not None:
-                binding = dispatch.call(settings["wx_cli"], root, "status", "--conversation-id",
-                                        entry["conversation_id"])
-                require(binding.get("channel_state_dir") == entry["state_dir"] and
-                        binding.get("channel_id") == entry["channel_id"] and
-                        binding.get("session_id") == entry["session_id"],
-                        "coordinator_drift", "managed conversation binding changed")
-                operation_id = "focus-" + uuid.uuid4().hex
-                queued = dispatch.call(settings["wx_cli"], root, "enqueue-focus", "--conversation-id",
-                                       entry["conversation_id"], "--operation-id", operation_id,
-                                       "--expected-epoch", binding["epoch"])
-                dispatch.drain(settings["wx_cli"], root)
-                queue = dispatch.call(settings["wx_cli"], root, "dispatch", "status")
-                matching = [item for item in queue.get("dispatches", [])
-                            if item.get("dispatch_id") == queued.get("dispatch_id")]
-                require(len(matching) == 1, "dispatch_drift", "focus dispatch is unavailable")
-                item = matching[0]
-                if item.get("status") == "done" and item.get("result") == "focus_completed":
-                    return {"focused": True, "dispatch_id": item["dispatch_id"]}
-                return {"focused": False, "status": "pending", "dispatch_id": item["dispatch_id"]}
-            try:
-                return runner.one_json(runner.command([driver, "--focus-only"], timeout=75))
-            except (runner.RunnerError, OSError, subprocess.SubprocessError) as exc:
-                raise ConversationError("focus_failed", "desktop focus was not confirmed") from exc
+        one_json(settings, "channel", entry["state_dir"], "sync")
+        driver = prepare_driver(settings, entry)
+        assert_selection(settings, snapshot, entry)
+        root = _managed_root(settings, entry)
+        if root is not None:
+            binding = dispatch.call(settings["wx_cli"], root, "status", "--conversation-id",
+                                    entry["conversation_id"])
+            require(binding.get("channel_state_dir") == entry["state_dir"] and
+                    binding.get("channel_id") == entry["channel_id"] and
+                    binding.get("session_id") == entry["session_id"],
+                    "coordinator_drift", "managed conversation binding changed")
+            operation_id = "focus-" + uuid.uuid4().hex
+            queued = dispatch.call(settings["wx_cli"], root, "enqueue-focus", "--conversation-id",
+                                   entry["conversation_id"], "--operation-id", operation_id,
+                                   "--expected-epoch", binding["epoch"])
+            dispatch.drain(settings["wx_cli"], root)
+            queue = dispatch.call(settings["wx_cli"], root, "dispatch", "status")
+            matching = [item for item in queue.get("dispatches", [])
+                        if item.get("dispatch_id") == queued.get("dispatch_id")]
+            require(len(matching) == 1, "dispatch_drift", "focus dispatch is unavailable")
+            item = matching[0]
+            if item.get("status") == "done" and item.get("result") == "focus_completed":
+                return {"focused": True, "dispatch_id": item["dispatch_id"]}
+            return {"focused": False, "status": "pending", "dispatch_id": item["dispatch_id"]}
+        try:
+            return local.one_json(local.command([driver, "--focus-only"], timeout=75))
+        except (local.CommandError, OSError, subprocess.SubprocessError) as exc:
+            raise ConversationError("focus_failed", "desktop focus was not confirmed") from exc
 
 
 def main(argv=None):
@@ -794,6 +726,9 @@ def main(argv=None):
     query.add_argument("--id")
     lookup.add_argument("--exact", action="store_true")
     lookup.add_argument("--kind", choices=("all", "group", "private"), default="all")
+    retiring = commands.add_parser("retire-controller",
+                                   help="stop depending on a retired single-group runner entry")
+    retiring.add_argument("--id", required=True)
     choose = commands.add_parser("select")
     choose.add_argument("--id", required=True)
     choose.add_argument("--focus", action="store_true")
@@ -843,6 +778,8 @@ def main(argv=None):
         if args.command == "find":
             require(not args.exact or args.name is not None, "lookup", "--exact requires --name")
             result = find(settings, args.name, args.exact, args.id, args.kind)
+        elif args.command == "retire-controller":
+            result = retire_controller(settings, args.id)
         elif args.command == "select":
             result = select(settings, args.id, args.focus)
         elif args.command == "configure":
@@ -865,24 +802,24 @@ def main(argv=None):
                                 publisher=args.publisher,
                                 scheduling={key: getattr(args, key) for key in ("batch_id", "part_index", "priority", "expires_at") if getattr(args,key) is not None})
         elif args.command == "send":
-            raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
-            require(len(raw) <= runner.MAX_REPLY, "text", "message text too large")
+            raw = sys.stdin.buffer.read(local.MAX_REPLY + 1)
+            require(len(raw) <= local.MAX_REPLY, "text", "message text too large")
             result = send(settings, args.request_id, raw.decode("utf-8"), args.id,
                           owner=args.owner, expected_epoch=args.expected_epoch, wait=not args.no_wait,
                           publisher=args.publisher,
                           scheduling={key: getattr(args,key) for key in ("batch_id", "part_index", "priority", "expires_at") if getattr(args,key) is not None})
         elif args.command == "reply":
-            raw = sys.stdin.buffer.read(runner.MAX_REPLY + 1)
-            require(len(raw) <= runner.MAX_REPLY, "text", "message text too large")
+            raw = sys.stdin.buffer.read(local.MAX_REPLY + 1)
+            require(len(raw) <= local.MAX_REPLY, "text", "message text too large")
             result = reply(settings, args.cursor, raw.decode("utf-8"), args.id,
                            owner=args.owner, expected_epoch=args.expected_epoch)
         else:
             raise ConversationError("command", "unsupported conversation command")
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
-    except (ConversationError, dispatch.DispatchError, interactive.ChatError, ctl.ControlError, runner.RunnerError,
+    except (ConversationError, dispatch.DispatchError, local.StateError, local.CommandError,
             sender.Refused, OSError, ValueError, UnicodeError, subprocess.SubprocessError) as exc:
-        code = exc.code if isinstance(exc, (ConversationError, interactive.ChatError)) else "local_state_error"
+        code = exc.code if isinstance(exc, ConversationError) else "local_state_error"
         print(json.dumps({"error": {"code": code, "message": str(exc)}}, ensure_ascii=False), file=sys.stderr)
         return 1
 

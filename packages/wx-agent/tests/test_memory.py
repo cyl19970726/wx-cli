@@ -138,7 +138,7 @@ class MemoryTests(unittest.TestCase):
         self.cli.write_text("#!/usr/bin/env python3\nprint('x' * 100001)\n")
         with self.assertRaisesRegex(MemoryError, "channel read failed"):
             load_memory(self.state, self.cli)
-        with patch("wx_agent.channel_agent.command", side_effect=subprocess.TimeoutExpired("wx-cli", 5)):
+        with patch("wx_agent.local.command", side_effect=subprocess.TimeoutExpired("wx-cli", 5)):
             with self.assertRaisesRegex(MemoryError, "channel read failed"):
                 load_memory(self.state, self.cli)
 

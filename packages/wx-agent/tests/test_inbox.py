@@ -61,8 +61,7 @@ class CoreBoundaryTests(unittest.TestCase):
             from pathlib import Path
             from unittest import mock
 
-            blocked = {'wx_agent.session_adapter', 'wx_agent.integrations.codex',
-                       'wx_agent.codex_reply_agent'}
+            blocked = {'wx_agent.session_adapter', 'wx_agent.integrations.codex'}
             class DenyProvider(importlib.abc.MetaPathFinder):
                 def find_spec(self, fullname, path=None, target=None):
                     if fullname in blocked:
@@ -365,7 +364,7 @@ class RunHealthTests(unittest.TestCase):
             return {"paused_reason": None, "dispatches": []}
 
         with ExitStack() as stack:
-            atomic_json = inbox.ctl.atomic_json
+            atomic_json = inbox.local.atomic_json
             def record_health(path, value):
                 if Path(path).name == "inbox-health.json":
                     self.health_states.append(value.get("run_state"))
@@ -381,11 +380,11 @@ class RunHealthTests(unittest.TestCase):
             self.popen_mock = stack.enter_context(mock.patch.object(inbox.subprocess, "Popen", return_value=self.executor))
             stack.enter_context(mock.patch.object(inbox, "ThreadPoolExecutor", return_value=self.collector))
             stack.enter_context(mock.patch.object(inbox.signal, "signal"))
-            stack.enter_context(mock.patch.object(inbox.ctl, "atomic_json", side_effect=record_health))
+            stack.enter_context(mock.patch.object(inbox.local, "atomic_json", side_effect=record_health))
             args = ["--config", str(self.config), "run", "--once", "--seconds", "5"]
             args += list(extra_args)
             if push is not None:
-                stack.enter_context(mock.patch.object(inbox.ctl, "read_json", return_value={"version": 1, "sessions": {}}))
+                stack.enter_context(mock.patch.object(inbox.local, "read_json", return_value={"version": 1, "sessions": {}}))
                 stack.enter_context(mock.patch.object(inbox, "PushLoop", return_value=push))
                 args += ["--session-config", str(self.root / "sessions.json")]
             return inbox.main(args)
@@ -536,7 +535,7 @@ class ScopedCollectionTests(unittest.TestCase):
                 return {"channel_state_dir": "/synthetic/" + args[-1]}
             return {"conversation_id": args[-1], "created": 0}
         with mock.patch.object(inbox.dispatch, "call", side_effect=coordinator), \
-                mock.patch.object(inbox.runner, "command", return_value='{"events_appended":0}') as command:
+                mock.patch.object(inbox.local, "command", return_value='{"events_appended":0}') as command:
             result = inbox.collect("/bin/false", "/synthetic/ui", conversation_ids=["two"])
         self.assertEqual([r["conversation_id"] for r in result], ["two"])
         self.assertEqual(command.call_args.args[0][3], "/synthetic/two")
@@ -545,7 +544,7 @@ class ScopedCollectionTests(unittest.TestCase):
     def test_unknown_or_duplicate_scope_never_reads_a_channel(self):
         for ids in (["other"], ["two", "two"], []):
             with mock.patch.object(inbox.dispatch, "call", return_value={"conversations": ["two"]}), \
-                    mock.patch.object(inbox.runner, "command") as command:
+                    mock.patch.object(inbox.local, "command") as command:
                 with self.assertRaises(inbox.dispatch.DispatchError):
                     inbox.collect("/bin/false", "/synthetic/ui", conversation_ids=ids)
             command.assert_not_called()

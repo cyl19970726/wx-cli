@@ -13,7 +13,7 @@
 | 层 | 提供什么 | 入口 |
 | --- | --- | --- |
 | Rust / wx-cli | 加密副本读取、稳定身份、事件/consumer/outbox，以及托管 owner、inbox 与调度引用 | `wx-cli conversations` / `channel` / `outbox` / `coordinator` |
-| Python / wx-agent | 按需 CLI、旧单群兼容、托管采集/Session 分发、独立桌面执行器及派生健康状态 | `wx-agent` |
+| Python / wx-agent | 按需 CLI、托管采集/Session 分发、独立桌面执行器及派生健康状态（旧单群 runner 已移除，导入条目用 `retire-controller` 迁移） | `wx-agent` |
 | Swift / macOS bridge | 核验目标窗口与草稿，准备文本或单张 PNG/JPEG，单次点击发送 | 独立构建和授权的原生助手 |
 
 项目内 [wechat-group-agent skill](.agents/skills/wechat-group-agent/SKILL.md) 教 Agent 如何操作上述 CLI。skill 不自带后台监听器，也不会为手动会话启动模型；MCP 尚未实现，后续若开发应复用同一套状态和协议。

@@ -5,9 +5,8 @@ import socket
 import time
 from pathlib import Path
 
-from .. import channel_agent as runner
+from .. import local
 from .. import dispatch
-from .. import wechat_agent_ctl as ctl
 from ..errors import SessionError
 
 
@@ -63,7 +62,7 @@ class PushLoop:
                         if not token or previous.get("thread_id") != adapter.session.thread_id:
                             raise SessionError("recorded transport identity is incomplete")
                         self.active[session_owner] = (dict(old, token=token), {"turn_id": previous["turn_id"]})
-                    except (SessionError, runner.RunnerError, OSError):
+                    except (SessionError, local.CommandError, OSError):
                         self.errors[session_owner] = "previous turn requires inspection"
         # Read transport completion independently from explicit business results.
         for owner, value in list(self.active.items()):
@@ -76,7 +75,7 @@ class PushLoop:
                                   "--delivery-id", claim["delivery_id"], "--token", claim["token"],
                                   "--status", status)
                     del self.active[owner]
-            except (SessionError, runner.RunnerError, OSError):
+            except (SessionError, local.CommandError, OSError):
                 self.errors[owner] = "turn status unknown; original reservation retained"
         for cid in (dispatch.call(self.binary, self.root, "status")["conversations"] if allow_new else []):
             binding = dispatch.call(self.binary, self.root, "status", "--conversation-id", cid)
@@ -115,7 +114,7 @@ class PushLoop:
                 self.errors.pop(owner, None)
             except SessionBusy:
                 continue
-            except (DeliveryUnknown, SessionError, runner.RunnerError, OSError):
+            except (DeliveryUnknown, SessionError, local.CommandError, OSError):
                 self.errors[owner] = ("delivery requires inspection; no replacement turn started" if claimed
                                       else "Session unavailable; inbox retained for reconnect")
                 if claimed:
@@ -129,22 +128,22 @@ def provision(path, owner, cwd, codex, writable_roots=()):
         raise dispatch.DispatchError("owner must be a bounded safe identifier")
     if not path.is_absolute() or path.resolve()!=path or not cwd.is_dir():
         raise dispatch.DispatchError("provisioning requires canonical config and an existing project directory")
-    ctl.private(path.parent,True)
+    local.private(path.parent,True)
     with dispatch.exclusive(path.parent,path.name+".provision.lock",blocking=True):
-        existing = ctl.read_json(path) if path.exists() else {"version": 1, "sessions": {}}
+        existing = local.read_json(path) if path.exists() else {"version": 1, "sessions": {}}
         metadata=existing.setdefault("provisioning",{})
         if owner in existing["sessions"] or owner in metadata:
             raise dispatch.DispatchError("owner already has a Session; inspect its saved initialization instead of replacing it")
         with AppServer(codex) as server:
             metadata[owner]={"state":"creating"}
-            ctl.atomic_json(path,existing)
+            local.atomic_json(path,existing)
             session = SessionAdapter.create_managed(server, socket.gethostname(), str(cwd.resolve()),
                                                    str(path.parent / ("session-" + owner + ".lock")),
                                                    writable_roots=tuple(str(root.resolve()) for root in writable_roots))
             existing["sessions"][owner]=dict(session.__dict__)
             metadata[owner]={"state":"starting","thread_id":session.thread_id}
             # Save the original reference before the first mutating turn RPC.
-            ctl.atomic_json(path,existing)
+            local.atomic_json(path,existing)
             with dispatch.exclusive(path.parent,Path(session.lock_path).name):
                 turn=server.request("turn/start",{
                     "threadId":session.thread_id,"clientUserMessageId":"wx-provision-"+owner,
@@ -154,7 +153,7 @@ def provision(path, owner, cwd, codex, writable_roots=()):
                 if not turn_id:
                     raise SessionError("initialization response unknown; original thread reference is retained")
                 metadata[owner].update(state="initializing",turn_id=turn_id)
-                ctl.atomic_json(path,existing)
+                local.atomic_json(path,existing)
                 deadline=time.monotonic()+120
                 while time.monotonic()<deadline:
                     try:
@@ -178,6 +177,6 @@ def provision(path, owner, cwd, codex, writable_roots=()):
             if adapter.turn_status(turn_id)["status"]!="completed":
                 raise SessionError("cold resume could not verify initialization")
         metadata[owner].update(state="ready",cold_resume_verified=True)
-        ctl.atomic_json(path,existing)
+        local.atomic_json(path,existing)
         return {"provisioned": True, "owner": owner, "ownership": "managed-app-server",
                 "initialized":True,"cold_resume_verified":True}

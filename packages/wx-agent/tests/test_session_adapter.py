@@ -226,7 +226,7 @@ class SessionAdapterTests(unittest.TestCase):
             '{"delivery_id":42,"turn_state":"reserved","session_ref":"codex:test-host:thread-1","already_reserved":false}',
             '{"delivery_id":42,"turn_state":"recorded","thread_id":"thread-1","turn_id":"turn-1"}',
         ))
-        with patch("wx_agent.channel_agent.command", side_effect=lambda argv, **kw: next(responses)) as run:
+        with patch("wx_agent.local.command", side_effect=lambda argv, **kw: next(responses)) as run:
             self.assertTrue(evidence.reserve(delivery, self.session))
             evidence.record_turn(delivery, self.session, "turn-1")
         self.assertEqual(run.call_args_list[0].args[0], [
@@ -241,7 +241,7 @@ class SessionAdapterTests(unittest.TestCase):
         delivery = Delivery(42, "conversation-1", 1, 1, "owner-1", 1, "private-token")
         response = ('{"delivery_id":42,"turn_state":"reserved",'
                     '"session_ref":"codex:test-host:thread-1","already_reserved":true}')
-        with patch("wx_agent.channel_agent.command", return_value=response):
+        with patch("wx_agent.local.command", return_value=response):
             adapter = SessionAdapter(self.session, self.server, evidence,
                                      local_host="test-host")
             self.addCleanup(adapter.close)

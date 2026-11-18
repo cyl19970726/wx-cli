@@ -3,6 +3,7 @@ import base64
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -90,7 +91,7 @@ class FakeCLI:
         if action == "queue-image":
             media = conv.sender.image_descriptor(argv[argv.index("--image") + 1])
             if media["sha256"] != argv[argv.index("--expected-sha256") + 1]:
-                raise conv.runner.RunnerError("source changed before queue")
+                raise conv.local.CommandError("source changed before queue")
             box.setdefault(rid, {"request_id": rid, "text": "", "media": media,
                                  "publisher_id": argv[argv.index("--publisher") + 1] if "--publisher" in argv else None,
                                  "status": "managed_media_queued" if state in self.managed_states else "media_queued",
@@ -154,7 +155,7 @@ class ConversationTests(unittest.TestCase):
                          "account": "account", "source": str(source), "sender_template": str(template),
                          "sender_executable": str(sender), "controller_configs": []}
         self.fake = FakeCLI(self.settings)
-        self.patch = mock.patch.object(conv.runner, "command", side_effect=self.fake)
+        self.patch = mock.patch.object(conv.local, "command", side_effect=self.fake)
         self.patch.start()
 
     def tearDown(self):
@@ -195,23 +196,6 @@ class ConversationTests(unittest.TestCase):
         with mock.patch.object(conv,"channel_status",return_value={"binding":{}}):
             conv.prepare_driver(settings,{"state_dir":str(state),"name":"Synthetic Group","kind":"group"})
         self.assertIn("-m wx_agent.macos_sender_driver",(state/"conversation-sender").read_text())
-
-    def test_candidate_cli_uses_only_stopped_enrolled_controller_without_rewriting_config(self):
-        legacy={"wx_cli":"/legacy/bin/wx-cli","state_dir":str(self.registry/"legacy")}
-        original=legacy.copy();root=self.registry/"ui"
-        with mock.patch.object(conv.dispatch,"managed_root",return_value=root), \
-             mock.patch.object(conv.dispatch,"root_from_settings",return_value=root), \
-             mock.patch.object(conv.ctl,"status",return_value={"alive":False}) as status:
-            selected=conv.controller_api(self.settings,legacy)
-            self.assertEqual(selected["wx_cli"],self.settings["wx_cli"])
-            self.assertEqual(legacy,original)
-            status.assert_called_once_with(legacy)
-            status.return_value={"alive":True}
-            with self.assertRaisesRegex(conv.ConversationError,"stop the original"):
-                conv.controller_api(self.settings,legacy)
-        with mock.patch.object(conv.dispatch,"managed_root",return_value=None):
-            with self.assertRaisesRegex(conv.ConversationError,"outside managed migration"):
-                conv.controller_api(self.settings,legacy)
 
     def managed_binding(self, entry, owner="session-a", epoch=4):
         return {"channel_state_dir": entry["state_dir"], "channel_id": entry["channel_id"],
@@ -259,7 +243,7 @@ class ConversationTests(unittest.TestCase):
             if "queue-image" in argv:
                 path.write_bytes(path.read_bytes() + b"changed")
             return original(argv, **kwargs)
-        with mock.patch.object(conv.runner, "command", side_effect=changed), self.assertRaises(conv.ConversationError):
+        with mock.patch.object(conv.local, "command", side_effect=changed), self.assertRaises(conv.ConversationError):
             conv.send_image(self.settings, "race-image", path)
         self.assertFalse(any("race-image" in box for box in self.fake.outboxes.values()))
         self.assertEqual(self.fake.sent, [])
@@ -286,8 +270,9 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(self.fake.synced), 1)
         self.assertFalse(any("ack" in str(call) for call in self.fake.sent))
 
-    def test_existing_controller_state_is_reused(self):
-        metadata = self.fake.metadata[0]
+    def legacy_entry(self, index=0):
+        """Write a registry entry the way the retired single-group import recorded it."""
+        metadata = self.fake.metadata[index]
         state = self.registry / "existing-controller"
         state.mkdir(mode=0o700)
         binding = {"channel_id": "existing-channel", "session_id": "existing-session",
@@ -296,16 +281,109 @@ class ConversationTests(unittest.TestCase):
                    "self_wxid": "wxid_self"}
         self.fake.channels[str(state)] = binding
         controller_path = self.registry / "controller.json"
-        controller = {"state_dir": str(state)}
+        write_private(controller_path, {"state_dir": str(state)})
         self.settings["controller_configs"] = [str(controller_path)]
-        with mock.patch.object(conv, "controllers", return_value=[(controller_path, controller, binding)]), \
-             mock.patch.object(conv.ctl, "config", return_value=controller):
-            result = conv.select(self.settings, metadata["conversation_id"])
-            self.assertTrue(result["imported_controller"])
-            self.assertEqual(result["state_dir"], str(state))
-            self.assertEqual(conv.selected(self.settings)[1]["channel_id"], "existing-channel")
-        self.assertFalse((self.registry / "channels" / metadata["conversation_id"]).exists())
+        entry = dict(metadata, state_dir=str(state), session_id=binding["session_id"],
+                     channel_id=binding["channel_id"], imported=True,
+                     controller_config=str(controller_path), revision=3)
+        value = conv.registry(self.settings)
+        value["selected_id"] = metadata["conversation_id"]
+        value["entries"][metadata["conversation_id"]] = entry
+        conv.save_registry(self.settings, value)
+        return metadata["conversation_id"], state, entry
 
+    def test_imported_entry_is_refused_until_retired(self):
+        id, state, entry = self.legacy_entry()
+        for call in (lambda: conv.read(self.settings), lambda: conv.status(self.settings, id),
+                     lambda: conv.select(self.settings, id),
+                     lambda: conv.send(self.settings, "legacy-send", "hello", id)):
+            with self.assertRaises(conv.ConversationError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "legacy_controller")
+        self.assertEqual(conv.registry(self.settings)["entries"][id], entry)
+        self.assertFalse(any("queue" in item for item in self.fake.calls))
+
+    def test_retire_controller_keeps_state_and_unblocks_conversation(self):
+        id, state, entry = self.legacy_entry()
+        legacy_files = {conv.local.LEGACY_STATE_NAME: {"version": 1, "pending": None},
+                        "channel-agent-health.json": {"version": 1}}
+        for name, value in legacy_files.items():
+            write_private(state / name, value)
+        result = conv.retire_controller(self.settings, id)
+        self.assertEqual(result, {"retired": True, "conversation_id": id, "state_dir": str(state),
+                                  "state_origin": conv.RETIRED_CONTROLLER})
+        retired = conv.registry(self.settings)["entries"][id]
+        self.assertFalse(retired["imported"])
+        self.assertIsNone(retired["controller_config"])
+        self.assertEqual(retired["state_origin"], conv.RETIRED_CONTROLLER)
+        self.assertEqual(retired["retired_controller_config"], entry["controller_config"])
+        self.assertEqual(retired["revision"], entry["revision"] + 1)
+        for key in ("state_dir", "channel_id", "session_id", "talker"):
+            self.assertEqual(retired[key], entry[key])
+        for name in legacy_files:
+            self.assertTrue((state / name).is_file(), name)
+        self.assertEqual(conv.status(self.settings, id)["state_origin"], conv.RETIRED_CONTROLLER)
+        self.assertEqual(conv.read(self.settings, id=id)["events"], [])
+        selected = conv.select(self.settings, id)
+        self.assertEqual(selected["state_dir"], str(state))
+        self.assertEqual(conv.registry(self.settings)["entries"][id]["state_origin"], conv.RETIRED_CONTROLLER)
+        self.assertFalse((self.registry / "channels" / id).exists())
+        self.assertEqual(conv.retire_controller(self.settings, id)["retired"], False)
+
+    def test_retire_controller_refuses_live_or_unfinished_legacy_runner(self):
+        id, state, entry = self.legacy_entry()
+        pid = os.getpid()
+        cases = (
+            (conv.local.LEGACY_STATE_NAME, {"version": 1, "pending": {"cursor": 4}}, "pending reply"),
+            (conv.local.LEGACY_LEASE_NAME, {"phase": "active"}, "interactive lease"),
+            (conv.local.LEGACY_PID_NAME, {"version": 1, "pid": pid,
+                                          "start_stamp": conv.local._process_start(pid)}, "still alive"),
+        )
+        for name, value, reason in cases:
+            write_private(state / name, value)
+            with self.assertRaises(conv.ConversationError) as caught:
+                conv.retire_controller(self.settings, id)
+            self.assertEqual(caught.exception.code, "legacy_runner_active")
+            self.assertIn(reason, str(caught.exception))
+            self.assertEqual(conv.registry(self.settings)["entries"][id], entry)
+            (state / name).unlink()
+        write_private(state / conv.local.LEGACY_PID_NAME,
+                      {"version": 1, "pid": pid, "start_stamp": "an earlier process"})
+        self.assertTrue(conv.retire_controller(self.settings, id)["retired"])
+
+    def test_select_refuses_conversation_owned_by_unimported_legacy_controller(self):
+        id, state, entry = self.legacy_entry()
+        value = conv.registry(self.settings)
+        del value["entries"][id]
+        value["selected_id"] = None
+        conv.save_registry(self.settings, value)
+        with self.assertRaises(conv.ConversationError) as caught:
+            conv.select(self.settings, id)
+        self.assertEqual(caught.exception.code, "legacy_controller")
+        self.assertFalse((self.registry / "channels" / id).exists())
+        other = self.fake.metadata[1]["conversation_id"]
+        self.assertTrue(conv.select(self.settings, other)["selected"])
+
+    def test_retire_controller_requires_matching_controller_state(self):
+        id, state, entry = self.legacy_entry()
+        write_private(Path(entry["controller_config"]), {"state_dir": str(self.registry / "elsewhere")})
+        with self.assertRaises(conv.ConversationError) as caught:
+            conv.retire_controller(self.settings, id)
+        self.assertEqual(caught.exception.code, "controller_drift")
+        self.assertEqual(conv.registry(self.settings)["entries"][id], entry)
+
+    def test_retired_state_cannot_be_redirected_to_another_channel(self):
+        id, state, _ = self.legacy_entry()
+        conv.retire_controller(self.settings, id)
+        other = self.registry / "other-state"
+        other.mkdir(mode=0o700)
+        self.fake.channels[str(other)] = dict(self.fake.channels[str(state)], channel_id="other-channel")
+        value = conv.registry(self.settings)
+        value["entries"][id]["state_dir"] = str(other)
+        conv.save_registry(self.settings, value)
+        with self.assertRaises(conv.ConversationError) as caught:
+            conv.read(self.settings, id=id)
+        self.assertEqual(caught.exception.code, "binding_drift")
     def test_rename_and_ambiguous_name_refuse_desktop_send(self):
         self.choose()
         self.fake.metadata[0]["name"] = "Renamed"
@@ -374,7 +452,7 @@ class ConversationTests(unittest.TestCase):
             return code, stdout.getvalue(), stderr.getvalue()
 
         for raw in ("你好 😊\n第二行\n".encode(), "你好 😊\n第二行\r\n".encode()):
-            with mock.patch.object(conv, "coordinated", side_effect=AssertionError("invalid text reached coordination")):
+            with mock.patch.object(conv, "selected_channel", side_effect=AssertionError("invalid text reached selection")):
                 code, _, stderr = invoke(raw)
             self.assertEqual(code, 1)
             self.assertIn("trailing line break", stderr)
@@ -446,7 +524,7 @@ class ConversationTests(unittest.TestCase):
             except BaseException as exc:
                 errors.append(exc)
 
-        with mock.patch.object(conv.runner, "command", side_effect=blocked):
+        with mock.patch.object(conv.local, "command", side_effect=blocked):
             thread = threading.Thread(target=read_group)
             thread.start()
             try:
@@ -487,7 +565,7 @@ class ConversationTests(unittest.TestCase):
                 if done is not None:
                     done.set()
 
-        with mock.patch.object(conv.runner, "command", side_effect=blocked):
+        with mock.patch.object(conv.local, "command", side_effect=blocked):
             first = threading.Thread(target=read_target, name="first")
             second = threading.Thread(target=read_target, args=(second_done,), name="second")
             first.start()
@@ -760,32 +838,6 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(calls[1][-2:], ("--expected-epoch", 4))
         self.assertFalse(any("--focus-only" in call for call in self.fake.calls))
 
-    def test_managed_imported_reply_pending_keeps_consumer_unacknowledged(self):
-        self.choose()
-        entry = conv.selected(self.settings)[1]
-        entry.update(imported=True, controller_config="/synthetic/controller.json")
-        state = Path(entry["state_dir"])
-        write_private(state / conv.interactive.LEASE_NAME,
-                      {"pending": {"cursor": 3, "text": "answer", "request_id": "existing-reply"}})
-        self.fake.outboxes[str(state)] = {"existing-reply": {"request_id": "existing-reply",
-            "text": "answer", "status": "managed_queued"}}
-        with mock.patch.object(conv, "selected_channel", return_value=contextlib.nullcontext(({}, entry))), \
-             mock.patch.object(conv, "fresh"), mock.patch.object(conv, "assert_selection"), \
-             mock.patch.object(conv, "coordinated", return_value=contextlib.nullcontext()), \
-             mock.patch.object(conv, "_managed_root", return_value=self.registry), \
-             mock.patch.object(conv.dispatch, "call", return_value=self.managed_binding(entry)), \
-             mock.patch.object(conv.ctl, "config", return_value={"state_dir": str(state),"wx_cli":self.settings["wx_cli"]}), \
-             mock.patch.object(conv.interactive, "reply",
-                               side_effect=conv.interactive.ChatError("send_uncertain", "queued")) as imported_reply:
-            result = conv.reply(self.settings, 3, "answer", id=entry["conversation_id"],
-                                owner="session-a", expected_epoch=4)
-        self.assertEqual(result["status"], "pending")
-        self.assertEqual(result["request_id"], "existing-reply")
-        passed_settings = imported_reply.call_args.args[0]
-        self.assertEqual((passed_settings["_dispatch_owner"], passed_settings["_dispatch_epoch"]),
-                         ("session-a", 4))
-        self.assertFalse(any("ack" in call for call in self.fake.calls))
-
     def test_registry_cannot_redirect_channel_state(self):
         self.choose()
         id = self.fake.metadata[0]["conversation_id"]
@@ -804,7 +856,7 @@ class ConversationTests(unittest.TestCase):
             "server_id": 7, "message": {"talker": entry["talker"], "server_id": 7,
                                       "content": {"Text": "hello"}}}]
         result = conv.reply(self.settings, 1, "reply")
-        self.assertEqual(result["request_id"], conv.runner.reply_request_id(entry["channel_id"], 7))
+        self.assertEqual(result["request_id"], conv.local.reply_request_id(entry["channel_id"], 7))
         self.assertEqual(result["cursor"], 1)
         self.assertTrue(conv.reply(self.settings, 1, "reply")["already_completed"])
         self.fake.events[entry["state_dir"]][0]["direction"] = "outgoing"
@@ -831,22 +883,20 @@ class ConversationTests(unittest.TestCase):
         state = group["state_dir"]
         self.fake.outboxes[state] = {failed["request_id"]: failed.copy()}
         original = json.dumps(self.fake.outboxes[state], sort_keys=True)
-        # Model/runner coordination is not needed for a manual channel read or reply.
-        with mock.patch.object(conv.interactive, "takeover", side_effect=AssertionError("runner started")), \
-             mock.patch.object(conv.interactive, "handback", side_effect=AssertionError("runner started")):
-            for entry in (private, group):
-                conv.select(self.settings, entry["conversation_id"])
-                self.assertTrue(conv.focus_conversation(self.settings)["focused"])
-                first = conv.read(self.settings, limit=1)
-                self.assertEqual(first["conversation"]["conversation_id"], entry["conversation_id"])
-                self.assertTrue(first["has_more"])
-                second = conv.read(self.settings, after=first["next_cursor"], limit=1)
-                self.assertFalse(second["has_more"])
-                self.assertEqual([first["events"][0]["cursor"], second["events"][0]["cursor"]], [1, 2])
-                reply = conv.reply(self.settings, 2, "answer to " + entry["kind"])
-                self.assertEqual(reply["request_id"], conv.runner.reply_request_id(entry["channel_id"], 12))
-                self.assertTrue(conv.reply(self.settings, 2, "answer to " + entry["kind"])["already_completed"])
-                self.assertEqual(conv.read(self.settings, after=1)["events"], second["events"])
+        # No runner coordination is involved for a manual channel read or reply.
+        for entry in (private, group):
+            conv.select(self.settings, entry["conversation_id"])
+            self.assertTrue(conv.focus_conversation(self.settings)["focused"])
+            first = conv.read(self.settings, limit=1)
+            self.assertEqual(first["conversation"]["conversation_id"], entry["conversation_id"])
+            self.assertTrue(first["has_more"])
+            second = conv.read(self.settings, after=first["next_cursor"], limit=1)
+            self.assertFalse(second["has_more"])
+            self.assertEqual([first["events"][0]["cursor"], second["events"][0]["cursor"]], [1, 2])
+            reply = conv.reply(self.settings, 2, "answer to " + entry["kind"])
+            self.assertEqual(reply["request_id"], conv.local.reply_request_id(entry["channel_id"], 12))
+            self.assertTrue(conv.reply(self.settings, 2, "answer to " + entry["kind"])["already_completed"])
+            self.assertEqual(conv.read(self.settings, after=1)["events"], second["events"])
         self.assertEqual(len(self.fake.sent), 2)
         self.assertNotEqual(self.fake.sent[0][1], self.fake.sent[1][1])
         self.assertEqual(self.fake.recoveries, [])
@@ -896,101 +946,12 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("--id", errors.getvalue())
         self.assertIn("required", errors.getvalue())
 
-    def test_imported_controller_recovery_uses_retained_lease_without_coordinator(self):
-        metadata = self.fake.metadata[0]
-        state = self.registry / "imported-controller"
-        state.mkdir(mode=0o700)
-        binding = {"channel_id": "imported-channel", "session_id": "imported-session",
-                   "account": self.settings["account"], "talker": metadata["talker"],
-                   "source": self.settings["source"], "encrypted_snapshot": True,
-                   "self_wxid": "wxid_self"}
-        self.fake.channels[str(state)] = binding
-        config_path = self.registry / "imported-controller.json"
-        controller = {"state_dir": str(state), "wx_cli": self.settings["wx_cli"]}
-        self.settings["controller_configs"] = [str(config_path)]
-        with mock.patch.object(conv, "controllers", return_value=[(config_path, controller, binding)]), \
-             mock.patch.object(conv.ctl, "config", return_value=controller):
-            conv.select(self.settings, metadata["conversation_id"])
-            entry = conv.registry(self.settings)["entries"][metadata["conversation_id"]]
-            request_id = "stable-reply"
-            lease = {"version": 1, "phase": "active", "pending": {
-                "cursor": 8, "request_id": request_id, "text": "same text"}}
-            write_private(state / conv.interactive.LEASE_NAME, lease)
-            self.fake.outboxes[str(state)] = {request_id: {"request_id": request_id, "text": "same text",
-                "status": "failed", "attempt_number": 1}}
-            with mock.patch.object(conv, "coordinated", side_effect=AssertionError("retakeover")), \
-                 mock.patch.object(conv.interactive, "recover_unsent_reply",
-                                   return_value={"request_id": request_id, "status": "ui_observed"}) as recover:
-                result = conv.recover_unsent_send(self.settings, request_id, 1, entry["conversation_id"])
-        self.assertEqual(result["request_id"], request_id)
-        recover.assert_called_once_with(controller, 8, 1)
-
-    def test_controller_takeover_restores_only_acquired_lease(self):
-        config_one = {"state_dir": str(self.registry / "controller-one")}
-        config_two = {"state_dir": str(self.registry / "controller-two")}
-        for value in (config_one, config_two):
-            Path(value["state_dir"]).mkdir(mode=0o700)
-        self.settings["controller_configs"] = ["/one", "/two"]
-        config_one["wx_cli"] = config_two["wx_cli"] = self.settings["wx_cli"]
-        calls = []
-        with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \
-             mock.patch.object(conv.interactive, "select",
-                               side_effect=lambda value, talker, compatible=(): calls.append(
-                                   ("select", talker, compatible))), \
-             mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
-             mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
-             mock.patch.object(conv.interactive, "_check_outbox_clear"), \
-             mock.patch.object(conv.interactive, "takeover",
-                               side_effect=lambda value: calls.append(
-                                   ("take", value["state_dir"], value.get("_compatible_fingerprints")))), \
-             mock.patch.object(conv.interactive, "handback", side_effect=lambda value: calls.append(("back", value["state_dir"]))):
-            with conv.coordinated(self.settings, {"state_dir": config_one["state_dir"],
-                                                  "controller_config": "/one", "talker": "one@chatroom"}):
-                pass
-        self.assertEqual([item[0] for item in calls], ["select", "take", "back"])
-        self.assertEqual(calls[0][2], (config_one,))
-        self.assertEqual(calls[1][2], (conv.interactive._fingerprint(config_one),))
-        lease = Path(config_two["state_dir"]) / conv.ctl.INTERACTIVE_NAME
-        write_private(lease, {"version": 1})
-        with mock.patch.object(conv.ctl, "config", side_effect=lambda path, **_: config_one if str(path) == "/one" else config_two), \
-             mock.patch.object(conv.interactive, "select"), \
-             mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
-             mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
-             mock.patch.object(conv.interactive, "_check_outbox_clear"), \
-             mock.patch.object(conv.interactive, "takeover"), \
-             mock.patch.object(conv.interactive, "handback"):
-            with conv.coordinated(self.settings, {"state_dir": config_one["state_dir"],
-                                                  "controller_config": "/one", "talker": "one@chatroom"}):
-                pass
-            with self.assertRaisesRegex(conv.ConversationError, "another operator"):
-                with conv.coordinated(self.settings, {"state_dir": config_two["state_dir"],
-                                                      "controller_config": "/two", "talker": "two@chatroom"}):
-                    pass
-
-    def test_handback_failure_is_reported_and_not_retried(self):
-        value = {"state_dir": str(self.registry / "controller")}
-        Path(value["state_dir"]).mkdir(mode=0o700)
-        self.settings["controller_configs"] = ["/controller"]
-        value["wx_cli"] = self.settings["wx_cli"]
-        with mock.patch.object(conv.ctl, "config", return_value=value), \
-             mock.patch.object(conv.interactive, "select"), \
-             mock.patch.object(conv.interactive, "_status", return_value={"binding": {}, "consumer_cursor": 0}), \
-             mock.patch.object(conv.interactive, "_runner_state", return_value=(None, {"pending": None}, 0)), \
-             mock.patch.object(conv.interactive, "_check_outbox_clear"), \
-             mock.patch.object(conv.interactive, "takeover"), \
-             mock.patch.object(conv.interactive, "handback", side_effect=conv.interactive.ChatError("pending", "pending send")) as back:
-            with self.assertRaisesRegex(conv.ConversationError, "lease retained"):
-                with conv.coordinated(self.settings, {"state_dir": value["state_dir"],
-                                                      "controller_config": "/controller", "talker": "one@chatroom"}):
-                    pass
-        back.assert_called_once()
-
     def test_config_private_permissions(self):
         path = self.registry / "config.json"
         write_private(path, self.settings)
         self.assertEqual(conv.config(path)["account"], "account")
         path.chmod(0o644)
-        with self.assertRaises(conv.ctl.ControlError):
+        with self.assertRaises(conv.local.StateError):
             conv.config(path)
 
 

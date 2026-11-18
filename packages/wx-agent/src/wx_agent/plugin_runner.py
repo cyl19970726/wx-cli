@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from . import wechat_agent_ctl as ctl
+from . import local
 
 
 KNOWN_STATUSES = {"empty", "queued_for_host", "original_transport_pending",
@@ -28,14 +28,14 @@ class PluginRunnerError(RuntimeError):
 def _runtime_dir(config_path: Path) -> Path:
     if not config_path.is_absolute() or config_path.resolve() != config_path:
         raise PluginRunnerError("invalid_config_path")
-    ctl.private(config_path)
+    local.private(config_path)
     digest = hashlib.sha256(str(config_path).encode()).hexdigest()[:20]
     path = config_path.parent / (".wx-agent-plugin-runner-" + digest)
     try:
         path.mkdir(mode=0o700)
     except FileExistsError:
         pass
-    ctl.private(path, True)
+    local.private(path, True)
     return path
 
 
@@ -44,7 +44,7 @@ def _exclusive(runtime: Path):
     path = runtime / "runner.lock"
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        ctl.private(path)
+        local.private(path)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -99,7 +99,7 @@ def run(config_path, *, seconds=3600, interval=2, plugin_factory=None,
 
             def write_health():
                 health["updated_at"] = wall_time()
-                ctl.atomic_json(runtime / "health.json", health)
+                local.atomic_json(runtime / "health.json", health)
 
             write_health()
             failed = False

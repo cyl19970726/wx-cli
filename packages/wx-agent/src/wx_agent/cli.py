@@ -1,32 +1,25 @@
-"""One local entry point for the channel controller and its guarded tools."""
+"""One local entry point for managed WeChat conversations and their guarded tools."""
 import argparse
 import sys
+
+COMMANDS = ("conversations", "dispatch", "inbox", "memory", "sender", "probe")
 
 
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="wx-agent", description=__doc__)
-    parser.add_argument("command", choices=("start", "status", "pause", "resume", "stop", "run", "reply", "sender", "probe", "memory", "chat", "conversations", "dispatch", "inbox"))
+    parser.add_argument("command", choices=COMMANDS)
     if not args or args[0] in ("-h", "--help"):
         parser.parse_args(args)
         return 0
     command = parser.parse_args(args[:1]).command
     remaining = args[1:]
-    if command in ("start", "status", "pause", "resume", "stop", "run"):
-        from .wechat_agent_ctl import main as control
-        return control([*remaining, command])
-    if command == "reply":
-        from .codex_reply_agent import main as reply
-        return reply(remaining)
     if command == "sender":
         from .macos_sender_driver import main as sender
         return sender(remaining)
     if command == "probe":
         from .sender_guard_probe import main as probe
         return probe(remaining)
-    if command == "chat":
-        from .interactive import main as chat
-        return chat(remaining)
     if command == "conversations":
         from .conversations import main as conversations
         return conversations(remaining)

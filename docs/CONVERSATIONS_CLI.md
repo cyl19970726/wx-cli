@@ -19,7 +19,7 @@ chmod 700 /ABS/private/wx-agent/conversations
 
 若已确认空输入框中的系统提示会被视觉检查识别为文字，可为支持该功能的 helper 显式校准 `empty_composer_reference`，值为仅含 `path`、`sha256` 的对象。它必须指向 `ui_dir` 直属的私有 `0600` PNG，尺寸等于整数 `composer_rect` 的宽高。必须先确认没有用户草稿；不得把未知草稿截为“空框”。助手要求完整输入区域像素精确匹配，且复制操作保留原 sentinel 和剪贴板计数；不按提示文字放行。未配置时仍用原空白检查。界面、主题或尺寸变化后可能拒绝，需要重新校准，详见[原生助手](../native/macos/wechat-bridge/README.md)。
 
-创建 `0600` 的会话配置，路径全部使用绝对路径，不要包含 `..`。`registry_dir` 必须预先创建，且和微信来源目录互不嵌套；`account` 必须等于 `source` 的目录末级名称。`controller_configs` 可省略；填入要导入并协调的既有单群 controller 配置路径：
+创建 `0600` 的会话配置，路径全部使用绝对路径，不要包含 `..`。`registry_dir` 必须预先创建，且和微信来源目录互不嵌套；`account` 必须等于 `source` 的目录末级名称。旧配置中的 `controller_configs` 已不再使用，可以删除：
 
 ```json
 {
@@ -29,14 +29,11 @@ chmod 700 /ABS/private/wx-agent/conversations
   "account": "synthetic_account_001",
   "source": "/ABS/wechat/synthetic_account_001",
   "sender_template": "/ABS/private/wx-agent/sender-template.json",
-  "sender_executable": "/ABS/venv/bin/wx-agent-sender",
-  "controller_configs": [
-    "/ABS/private/wx-agent/group-controller.json"
-  ]
+  "sender_executable": "/ABS/venv/bin/wx-agent-sender"
 }
 ```
 
-`controller_configs` 中的绑定必须使用同一 `wx_cli`、账号、来源目录和群 ID。只有匹配到唯一现有 controller 时才复用其 channel；其余会话创建各自的私有 channel 状态。不要复制真实绑定标识到示例、仓库或共享文档。配置信息与消息都属于私有运行数据。
+每个会话在 `registry_dir/channels/ID` 下创建各自的私有 channel 状态。早期从单群 controller 导入、经 `retire-controller` 迁移的会话继续使用其原状态目录（`state_origin: retired_controller`）。不要复制真实绑定标识到示例、仓库或共享文档。配置信息与消息都属于私有运行数据。
 
 ## 查找与选择
 
@@ -102,9 +99,9 @@ chmod 700 /ABS/private/wx-agent/conversations
   --cursor 121 --text-stdin < /ABS/private/wx-agent/reply.txt
 ```
 
-对 CLI 自己创建的会话，reply 派生稳定 request ID 并发送，但**不确认/推进 consumer**；后续读取仍可看到这条入站事件。对于导入的旧单群 controller，reply 委托给原 `wx-agent chat reply` 流程，沿用其 request ID、outbox 和 CAS 消费确认。CLI 会在 focus/send/reply 等桌面写操作前协调配置中正在运行的原 controller，完成后交还原启停状态。若交还失败会报告并保留 lease；检查原状态并修复后再恢复，不能删除 lease。
+reply 由源消息 ID 派生稳定 request ID 并发送，但**不确认/推进 consumer**；后续读取仍可看到这条入站事件。迁移自旧单群 controller 的会话使用同一派生方式，已完成的回复不会重发。
 
-普通读取和手动回复无需模型、常驻 Agent 或 takeover。对导入并正在运行的单群 controller，桌面写操作会自动协调这一个原 writer；不要再启动第二个回复 Agent。当前没有通用 `skip` 子命令：不需回复时仅阅读并结束即可，普通读取不会自动 ack。旧单群 `wx-agent chat skip` 仍只适用于其既有单群 controller 流程。
+普通读取和手动回复无需模型或常驻 Agent。当前没有通用 `skip` 子命令：不需回复时仅阅读并结束即可，普通读取不会自动 ack；托管会话的 skip 是 inbox 决定，见[托管指南](MANAGED_CONVERSATIONS.md)。
 
 ## 只对证实未提交的原意图做显式恢复
 
@@ -120,8 +117,8 @@ chmod 700 /ABS/private/wx-agent/conversations
   --request-id synthetic-request-001 --expected-attempt 1
 ```
 
-`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。若该会话导入单群 controller，命令复用原 lease 与 reply pending；不会创建新的 channel/consumer。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态以[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
+`--id` 必须是注册表返回的稳定 conversation ID；恢复会校验 request ID 与正文未变、attempt 精确匹配。已发生的现场验证结果、已确认收件的意图及当前禁止操作状态以[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)为准。完整拒绝条件见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
 
-## 现有单群入口与功能状态
+## 旧单群 controller 与功能状态
 
-未迁移单群的 `wx-agent chat`、`channel`、`outbox` 和会话笔记仍按[交互 CLI](INTERACTIVE_CLI.md)与[操作指南](OPERATING_GUIDE.md)使用。托管会话需走[owner、inbox 与共享桌面队列](MANAGED_CONVERSATIONS.md)，旧 runner 不得操作托管状态。MCP 尚未实现；历史部署见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)，新版本状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。
+旧的 `wx-agent chat` 单群 runner 已移除。仍标记为导入的注册表条目会以 `legacy_controller` 拒绝，迁移用 `retire-controller --id ID`，步骤见[操作指南](OPERATING_GUIDE.md#8-退役旧单群-controller)。托管会话走[owner、inbox 与共享桌面队列](MANAGED_CONVERSATIONS.md)。MCP 尚未实现；历史部署见[日期验收记录](CONVERSATIONS_ACCEPTANCE_20261020.md)，新版本状态见[实施记录](MULTI_CONVERSATION_IMPLEMENTATION.md)。

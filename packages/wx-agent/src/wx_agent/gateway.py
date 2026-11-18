@@ -12,7 +12,7 @@ import stat
 import sys
 
 from .application_client import ApplicationClient, ApplicationError, ResultUnknown, APP_ID
-from . import channel_agent as runner
+from . import local
 from .errors import IntegrationError
 
 
@@ -120,8 +120,8 @@ class Gateway:
     def _co(client, *parts, data=None):
         argv = [str(client.wx_cli), "coordinator", "--state-dir", str(client.coordinator_root), *map(str, parts)]
         try:
-            return runner.one_json(runner.command(argv, data=data, timeout=30, limit=MAX_RESPONSE))
-        except (runner.RunnerError, OSError, ValueError) as exc:
+            return local.one_json(local.command(argv, data=data, timeout=30, limit=MAX_RESPONSE))
+        except (local.CommandError, OSError, ValueError) as exc:
             raise GatewayError("result_unknown" if parts[0] == "inbox" and parts[1] in
                                {"claim", "reserve-turn", "record-turn", "finish-turn", "complete"}
                                else "backend_unavailable") from exc
@@ -131,9 +131,9 @@ class Gateway:
         argv = [str(client.wx_cli), "channel", "--state-dir", str(state), "events",
                 "--after", str(after), "--limit", str(limit)]
         try:
-            raw = runner.command(argv, timeout=30, limit=MAX_RESPONSE)
+            raw = local.command(argv, timeout=30, limit=MAX_RESPONSE)
             return [json.loads(line) for line in raw.splitlines() if line.strip()]
-        except (runner.RunnerError, OSError, ValueError, TypeError) as exc:
+        except (local.CommandError, OSError, ValueError, TypeError) as exc:
             raise GatewayError("backend_unavailable") from exc
 
     def _route(self, client, cid):

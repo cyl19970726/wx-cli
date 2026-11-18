@@ -11,8 +11,7 @@ import sys
 import time
 import uuid
 
-from . import channel_agent as runner
-from . import wechat_agent_ctl as ctl
+from . import local
 
 
 class DispatchError(RuntimeError):
@@ -20,7 +19,7 @@ class DispatchError(RuntimeError):
 
 
 def call(binary, root, *parts, data=None):
-    return runner.one_json(runner.command(
+    return local.one_json(local.command(
         [str(binary), "coordinator", "--state-dir", str(root), *map(str, parts)],
         data=data, timeout=90))
 
@@ -29,11 +28,11 @@ def managed_root(state):
     marker = Path(state) / "managed-coordinator.json"
     if not marker.exists():
         return None
-    value = ctl.read_json(marker)
+    value = local.read_json(marker)
     root = Path(value["root"])
     if value.get("version") != 1 or not root.is_absolute() or root.resolve() != root:
         raise DispatchError("invalid coordinator identity")
-    ctl.private(root, True)
+    local.private(root, True)
     return root
 
 
@@ -42,7 +41,7 @@ def exclusive(root, name, blocking=False):
     path = Path(root) / name
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        ctl.private(path)
+        local.private(path)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         except BlockingIOError:
@@ -73,7 +72,7 @@ def enqueue_existing(binary, state, request_id, owner=None, expected_epoch=None)
 
 
 def _outbox(binary, state, *parts):
-    return runner.one_json(runner.command(
+    return local.one_json(local.command(
         [str(binary), "outbox", "--state-dir", str(state), *map(str, parts)], timeout=90))
 
 
@@ -104,7 +103,7 @@ def execute_one(binary, root, claim):
             _outbox(binary, state, "managed-send", "--request-id", claim["request_id"],
                     "--driver", driver, "--root", root, "--dispatch-id", claim["dispatch_id"],
                     "--token", claim["token"])
-    except (runner.RunnerError, OSError, subprocess.SubprocessError, ValueError, DispatchError):
+    except (local.CommandError, OSError, subprocess.SubprocessError, ValueError, DispatchError):
         # No retry here, including when transport died after a successful click.
         if claim["operation"] == "focus":
             focus_result = "failed"
@@ -136,7 +135,7 @@ def reconcile(binary, root):
     for cid in call(binary,root,"status")["conversations"]:
         try:
             results.append(call(binary,root,"reconcile-outbox","--conversation-id",cid))
-        except (runner.RunnerError,OSError):
+        except (local.CommandError,OSError):
             results.append({"conversation_id":cid,"error":"outbox reconciliation requires inspection"})
     return results
 
@@ -156,9 +155,9 @@ def send_existing(binary, state, request_id, wait_seconds=90, owner=None, expect
 
 
 def root_from_settings(settings):
-    template = ctl.read_json(Path(settings["sender_template"]))
+    template = local.read_json(Path(settings["sender_template"]))
     root = Path(template["ui_dir"])
-    ctl.private(root, True)
+    local.private(root, True)
     if root.resolve() != root:
         raise DispatchError("desktop root must be canonical")
     return root
@@ -167,16 +166,12 @@ def root_from_settings(settings):
 def configure(settings, entry, owner, input_mode="pull", reply_policy="observe", expected_epoch=None):
     from . import conversations
     root = root_from_settings(settings)
-    if expected_epoch is None and entry.get("imported"):
-        controller = ctl.config(Path(entry["controller_config"]), require_executables=False)
-        if ctl.status(controller)["alive"]:
-            ctl.action(controller, "stop", 90)
-        state = Path(entry["state_dir"])
-        if (state / ctl.INTERACTIVE_NAME).exists():
-            raise DispatchError("finish the existing interactive lease before migration")
-        original = state / runner.STATE_NAME
-        if original.exists() and runner.load(original).get("pending") is not None:
-            raise DispatchError("resolve the original pending reply before migration")
+    if entry.get("imported"):
+        raise DispatchError("retire the legacy controller entry before configuring it")
+    if expected_epoch is None and entry.get("state_origin") == conversations.RETIRED_CONTROLLER:
+        blockers = local.legacy_runner_blockers(entry["state_dir"])
+        if blockers:
+            raise DispatchError("; ".join(blockers))
     conversations.prepare_driver(settings, entry)
     parts = ["bind", "--channel-state-dir", entry["state_dir"]] if expected_epoch is None else ["configure", "--expected-epoch", expected_epoch]
     result = call(settings["wx_cli"], root, *parts, "--conversation-id", entry["conversation_id"],
@@ -285,7 +280,7 @@ def main(argv=None):
             value = call(binary, root, "dispatch", "status")
         print(json.dumps(value, separators=(",", ":")))
         return 0
-    except (DispatchError, conversations.ConversationError, ctl.ControlError,
-            runner.RunnerError, OSError, ValueError) as exc:
+    except (DispatchError, conversations.ConversationError, local.StateError,
+            local.CommandError, OSError, ValueError) as exc:
         print(json.dumps({"error": type(exc).__name__, "message": str(exc)}), file=sys.stderr)
         return 1

@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 from wx_agent import plugin_runner
-from wx_agent import wechat_agent_ctl as ctl
+from wx_agent import local
 
 
 class Clock:
@@ -202,7 +202,7 @@ class PluginRunnerTests(unittest.TestCase):
             with original(runtime):
                 yield
                 observed.append(json.loads((runtime / "health.json").read_text())["run_state"])
-            ctl.atomic_json(runtime / "health.json", {"run_state": "running", "pid": 999})
+            local.atomic_json(runtime / "health.json", {"run_state": "running", "pid": 999})
 
         host = mock.Mock()
         host.notify_once.return_value = {"notifications": []}
@@ -217,7 +217,7 @@ class PluginRunnerTests(unittest.TestCase):
             self.run_loop(factory, seconds=0, install_signals=False)
         runtime = plugin_runner._runtime_dir(self.config)
         runtime.chmod(0o755)
-        with self.assertRaises(ctl.ControlError):
+        with self.assertRaises(local.StateError):
             self.run_loop(factory, seconds=1, install_signals=False)
         factory.assert_not_called()
         self.assertEqual(self.root.stat().st_mode & 0o777, 0o755)
@@ -227,7 +227,7 @@ class PluginRunnerTests(unittest.TestCase):
         runtime.rmdir()
         runtime.symlink_to(self.root, target_is_directory=True)
         factory = mock.Mock()
-        with self.assertRaises(ctl.ControlError):
+        with self.assertRaises(local.StateError):
             self.run_loop(factory, seconds=1, install_signals=False)
         factory.assert_not_called()
 

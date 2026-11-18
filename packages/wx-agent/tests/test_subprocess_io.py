@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from wx_agent import channel_agent, macos_sender_driver
+from wx_agent import local, macos_sender_driver
 
 
 class SubprocessIOTests(unittest.TestCase):
@@ -33,9 +33,9 @@ class SubprocessIOTests(unittest.TestCase):
                     raise BlockingIOError(errno.EWOULDBLOCK, "try again")
                 return actual_write(fd, data)
 
-            with mock.patch.object(channel_agent.os, "read", side_effect=read), \
-                 mock.patch.object(channel_agent.os, "write", side_effect=write):
-                result = channel_agent.command(
+            with mock.patch.object(local.os, "read", side_effect=read), \
+                 mock.patch.object(local.os, "write", side_effect=write):
+                result = local.command(
                     [sys.executable, "-c", child, str(marker)], data=payload, timeout=5)
             self.assertEqual(result, payload)
             self.assertEqual(injected, {"read": True, "write": True})

@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-This fork provides authorized group/private conversation access, per-conversation owners and a shared managed desktop queue. Preserve the legacy single-group baseline where not migrated. Make coherent changes within the approved multi-conversation plan; do not broaden this into unrelated product work, multi-account scheduling or MCP.
+This fork provides authorized group/private conversation access, per-conversation owners and a shared managed desktop queue. The legacy single-group runner (`wx-agent chat`, `start/stop/...`, `wx-agent-reply`) has been removed; registry entries imported from it are migrated only through `conversations retire-controller`, which keeps their state in place. Make coherent changes within the approved multi-conversation plan; do not broaden this into unrelated product work, multi-account scheduling or MCP.
 
 Read only the context relevant to the change. Start with `README.md`, `docs/architecture.md`, `CONTRIBUTING.md`, and the specific CLI or contract document being changed. Read the security and deployment guidance when touching source data, credentials, desktop automation or a live runtime. Preserve unrelated work in the shared checkout.
 
@@ -24,7 +24,7 @@ Read only the context relevant to the change. Start with `README.md`, `docs/arch
 ## Data and sending safety
 
 - Copy encrypted WeChat source files to a private snapshot before database access. Never open or mutate the live source database with SQLite; do not change keys or commit decrypted content.
-- Keep one active writer per bound state directory. Import and coordinate an existing controller instead of duplicating its channel or consumer. All desktop focus/send paths use the shared UI lock.
+- Keep one active writer per bound state directory. Reuse an existing channel state through an explicit registry migration instead of duplicating its channel or consumer. All desktop focus/send paths use the shared UI lock.
 - Managed channels use the Rust coordinator in the canonical desktop `ui_dir`. Preserve origin owner/epoch on intents, turn reservations and pending work; never infer current authorization for an orphan intent. Old clients must not claim managed outbox attempts. A managed Session is distinct from a thread currently held by the desktop app; never resume or copy the latter through an independent transport.
 - Manual reads do not start a model or resident process. Do not enable automatic replies to every message; a reply or skip is a deliberate decision based on authorized context. Keep manual/on-demand and resident-runner behavior distinct.
 - Record an outbox attempt before desktop effects. A failed, submitted, uncertain or unknown outcome is not an automatic retry opportunity. Keep the original request ID and stop for review. Use `recover-unsent` only when its narrow code and evidence contract applies. `ui_observed` is local evidence, not recipient confirmation.

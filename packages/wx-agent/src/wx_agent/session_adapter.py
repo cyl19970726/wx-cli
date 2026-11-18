@@ -90,13 +90,13 @@ class RustDeliveryEvidence:
         self.state_dir = state_dir
 
     def _call(self, action: str, *args: str) -> dict:
-        from . import channel_agent as runner
+        from . import local
 
         argv = [self.binary, "coordinator", "--state-dir", self.state_dir,
                 "inbox", action, *args]
         try:
-            return runner.one_json(runner.command(argv, timeout=30))
-        except (runner.RunnerError, OSError, subprocess.SubprocessError) as exc:
+            return local.one_json(local.command(argv, timeout=30))
+        except (local.CommandError, OSError, subprocess.SubprocessError) as exc:
             # A timed-out reserve may have committed. The caller must inspect
             # Rust state; neither an RPC nor a turn is retried here.
             raise DeliveryUnknown("Rust inbox result unknown; inspect delivery state") from exc

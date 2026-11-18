@@ -1,6 +1,6 @@
-# 单群 CLI：读取、确认与发送
+# channel CLI：读取、确认与发送
 
-安装和自动回复配置见 [开始使用](quickstart.md)。本页集中说明 Rust 的 channel/outbox 契约。
+安装与日常使用见[开始使用](quickstart.md)。本页集中说明 Rust 的 channel/outbox 底层契约；日常读取和发送请用 `wx-agent conversations`。
 
 ## 绑定
 
@@ -65,8 +65,8 @@ wx-cli outbox --state-dir "$STATE_DIR" show --request-id "$REQUEST_ID"
 
 驱动从标准输入接收 `protocol_version`、`request_id`、`channel_id`、`session_id`、`account`、`talker` 和 `text`，返回带 `status` 与非空 `evidence` 的 JSON。`ui_observed` 表示本地发送端出现相符的出站消息，**不代表收件人已收到**。`failed`、`indeterminate` 或仍为 `attempt_recorded` 的请求不得自动重发；同一请求不能第二次执行 `send`。安装包提供 `wx-agent-sender` 作为驱动。需按 [图形助手说明](../native/macos/wechat-bridge/README.md) 配置私有 `WX_SENDER_CONFIG`，并完成操作端权限与窗口校准。`wx-agent sender --focus-only` 可以核验并切换到配置中的群，不创建消息。现场范围见 [验证记录](REAL_READ_VALIDATION_20261015.md)。
 
-## 自动回复和会话记忆
+## Python 入口与会话记忆
 
-安装后的 `wx-agent` 提供 start/status/pause/resume/stop/run、reply、sender、probe 和 memory。每个状态目录绑定一个群和 session；默认近期上下文最多12条有限文本，有效私有笔记补充更早需求。具体流程见 [开始使用](quickstart.md) 与 [契约](contracts.md)。
+安装后的 `wx-agent` 提供 conversations、dispatch、inbox、memory、sender 和 probe。每个状态目录绑定一个会话和 session；有效私有笔记保存有来源的较早需求。具体流程见[开始使用](quickstart.md)与[契约](contracts.md)。旧的单群自动回复 runner 已移除。
 
 探针要求包内原始 `macos_sender_driver.py`，拒绝任意包装脚本。安装后的 `wx-agent probe` 默认选择正确源模块；旧 `scripts/macos_sender_driver.py` 兼容入口不再作为探针原始驱动使用。
