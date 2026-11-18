@@ -4,12 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- A just-started Codex turn that `thread/read` briefly reports as `interrupted`/`failed` without a completion time is no longer treated as terminal, and provisioning tolerates the transient `list_turns is not supported yet` response.
+- A managed turn that ends without a recorded decision is reported in push health `attention` and the panel instead of staying silent.
+
 ### Removed
 
 - Remove the legacy single-group runner from `wx-agent`: the `start`, `status`, `pause`, `resume`, `stop`, `run`, `reply` and `chat` commands, the `wx-agent-reply` script and their compatibility launchers. Conversation, dispatch, inbox and memory commands are unchanged.
 
 ### Added
 
+- `wx-agent mcp`: an owner-scoped MCP stdio server with `wechat_pending`, `wechat_read`, `wechat_memory`, `wechat_decide` and `wechat_reply`. Lease tokens stay inside the server; replies are only queued as managed intents and only under an `authorized` reply policy.
+- `inbox provision --tools mcp --model M --effort E`: managed Codex Sessions can load the MCP tools on every resume, run in a read-only sandbox and pin their model.
 - `wx-agent panel`: a loopback-only control panel for managed conversations, showing desktop/dispatch state, conversations, to-dos and drafts with their source messages. It can pause the desktop surface and approve a draft in an `authorized` conversation; it never resumes the desktop, changes reply policy or exposes lease tokens.
 - `wx-cli coordinator inbox approve-draft` links an operator-approved draft to the exact managed reply intent already dispatched for the same owner epoch, recording an `approve_draft` decision without sending.
 - `wx-agent conversations reply --no-wait` freezes and enqueues a managed reply without waiting for the desktop executor.

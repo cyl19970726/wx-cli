@@ -177,6 +177,53 @@ class SessionAdapterTests(unittest.TestCase):
             another.deliver(self.delivery)
         self.assertEqual(len([c for c in self.server.calls if c[0] == "turn/start"]), 1)
 
+    def test_mcp_session_loads_tools_on_resume_and_runs_read_only(self):
+        from wx_agent.integrations.codex import MCP_INSTRUCTIONS, mcp_thread_config
+        session = ManagedSession("codex", "test-host", "thread-1", self.temp.name,
+                                 str(Path(self.temp.name) / "mcp.lock"), tools="mcp",
+                                 model="synthetic-model", effort="low")
+        config = mcp_thread_config(Path("/synthetic/config.json"), "owner-1", python="/synthetic/python")
+        server = FakeServer()
+        adapter = SessionAdapter(session, server, Evidence(), local_host="test-host",
+                                 thread_config=config, instructions=MCP_INSTRUCTIONS)
+        self.addCleanup(adapter.close)
+        adapter.deliver(self.delivery)
+        resume = next(params for method, params in server.calls if method == "thread/resume")
+        self.assertEqual(resume["config"]["mcp_servers"]["wechat"]["args"],
+                         ["-m", "wx_agent.mcp_server", "--config", "/synthetic/config.json", "--owner", "owner-1"])
+        self.assertEqual(resume["config"]["mcp_servers"]["wechat"]["default_tools_approval_mode"], "approve")
+        self.assertEqual(resume["developerInstructions"], MCP_INSTRUCTIONS)
+        turn = next(params for method, params in server.calls if method == "turn/start")
+        self.assertEqual((turn["approvalPolicy"], turn["sandboxPolicy"]), ("never", {"type": "readOnly"}))
+        self.assertEqual((resume["model"], turn["model"], turn["effort"]), ("synthetic-model", "synthetic-model", "low"))
+        with self.assertRaises(SessionError):
+            ManagedSession("codex", "h", "t", self.temp.name, "/l", model="bad model; rm")
+        self.assertIn("your wechat tools", turn["input"][0]["text"])
+        self.assertNotIn("claim-token-1", turn["input"][0]["text"])
+
+    def test_transient_interrupted_projection_is_not_terminal(self):
+        from wx_agent.session_adapter import turn_state
+        self.assertEqual(turn_state({"status": "interrupted", "completedAt": None}), "inProgress")
+        self.assertEqual(turn_state({"status": "failed"}), "inProgress")
+        self.assertEqual(turn_state({"status": "interrupted", "completedAt": 5}), "interrupted")
+        self.assertEqual(turn_state({"status": "completed"}), "completed")
+        self.server.state = "idle"
+        self.adapter.deliver(self.delivery)
+        self.server.request = lambda method, params: (
+            {"thread": {"id": "thread-1", "status": {"type": "active"},
+                        "turns": [{"id": "turn-1", "status": "interrupted", "completedAt": None}]}})
+        self.assertEqual(self.adapter.turn_status("turn-1")["status"], "inProgress")
+        self.assertEqual(self.adapter.status()["state"], "active", "the live turn keeps its lock")
+
+    def test_tools_option_is_validated(self):
+        with self.assertRaises(SessionError):
+            ManagedSession("codex", "h", "t", self.temp.name, "/l", tools="shell")
+        with self.assertRaises(SessionError):
+            ManagedSession("codex", "h", "t", self.temp.name, "/l", writable_roots=(self.temp.name,), tools="mcp")
+        ref = SessionAdapter.create_managed(FakeServer(), "test-host", self.temp.name, self.session.lock_path,
+                                            local_host="test-host", tools="mcp")
+        self.assertEqual(ref.tools, "mcp")
+
     def test_resume_same_thread_and_query_turn(self):
         self.server.state = "notLoaded"
         self.assertEqual(self.adapter.status()["state"], "idle")

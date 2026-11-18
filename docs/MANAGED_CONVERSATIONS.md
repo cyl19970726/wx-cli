@@ -144,6 +144,26 @@ wx-agent inbox --config /ABS/private/conversations.json run \
   --session-config /ABS/private/sessions.json --codex /ABS/bin/codex --seconds 86400
 ```
 
+### 用 MCP 工具代替 shell（推荐）
+
+`--tools mcp` 新建的受管 Session 不需要 shell 写权限，回合在只读沙箱中运行。每次续接 thread 时，适配器通过 thread 配置注册一个只属于该 owner 的 `wechat` MCP 服务（`wx-agent mcp --config … --owner …`），并给出处理规则：
+
+```sh
+wx-agent inbox --config /ABS/private/conversations.json provision \
+  --session-config /ABS/private/sessions.json --owner project-session-a \
+  --cwd /ABS/project --codex /ABS/bin/codex --tools mcp --model MODEL --effort medium
+```
+
+| 工具 | 作用 |
+| --- | --- |
+| `wechat_pending` | 列出该 owner 当前领取的 delivery 与会话回复策略 |
+| `wechat_read` | 分页读取 delivery 冻结范围内的消息，标出可回复的入站文字 |
+| `wechat_memory` | 读取该会话有来源的需求笔记 |
+| `wechat_decide` | 记录 skip / defer / draft，不发送 |
+| `wechat_reply` | 仅在回复策略为 `authorized` 时，把回复冻结为托管意图并入队，再记录 reply 决定 |
+
+inbox 领取令牌只保存在 MCP 进程内，不进入模型上下文；工具只操作 owner 匹配的 delivery。该服务的工具在 thread 配置中设为预先批准（`default_tools_approval_mode = "approve"`），因为 `approvalPolicy=never` 下交互式批准无法应答；权限由服务自身的 owner、回复策略和托管队列校验保证。`--model`/`--effort` 固定该 Session 的模型，避免随操作员全局默认值变化。回合结束但没有记录决定时，推送健康信息的 `attention` 与[控制面板](CONTROL_PANEL.md)都会提示，需由操作员检查后 `inbox resume`，不会自动另起回合。
+
 写入范围必须来自项目授权，包含协调器和该 owner 的 channel；不授予原始微信数据库写权限。不配置时保留原只读策略，不能假定 model 能完成业务回执。显式 roots 使用 Codex 的 workspaceWrite 和禁止网络/权限升级策略；其配置形状见 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server)。已首次登记的 Session 引用保存在 Rust；仅改 sessions.json 不能静默换 thread，替换需显式 configure 更新 epoch。
 
 监听每次先持久采集再通知，源采集并发上限为 2，新事件按 1 秒静默、最长 5 秒合并，每个冻结范围最多 256 项。忙时保留 inbox；Rust 在 `turn/start` 之前保留投递，同 Session 不能并发 reserve。连接重启仍使用原 thread ID，查询已记录 turn 后更新 transport 结果；没有 turn ID 的未知 reservation 留待核查。transport 完成与业务决定分开记录；模型必须通过 inbox CLI 明确完成业务处理，日志与最终回答不会进入微信。采集使用独立线程，监听进程持有 Session 连接，桌面执行器为独立进程；长 GUI 操作不阻塞采集，正常停止让当前发送先走到安全边界。

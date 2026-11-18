@@ -21,7 +21,7 @@ ssh -L 8765:127.0.0.1:8765 WECHAT_HOST
 ## 能看到什么
 
 - **桌面状态**：共享桌面执行器是否暂停、当前执行的调度、各状态的调度数量和最近 20 条调度。
-- **需要处理**：`blocked`、`unknown` 或正在执行的调度；仍是旧单群导入记录的会话；被人工接管的会话；待审草稿。
+- **需要处理**：`blocked`、`unknown` 或正在执行的调度；Session 回合已结束却没有决定的消息；仍是旧单群导入记录的会话；被人工接管的会话；待审草稿。
 - **会话**：注册表与 coordinator 中的全部会话，包括 owner、输入方式、回复策略、控制状态、epoch 和处理进度。
 - **待办**：每个会话 `pending`、`claimed`、`deferred`、`draft` 状态的 delivery。草稿可展开查看原文与对应的源消息（最多 50 条）。
 
@@ -32,6 +32,7 @@ ssh -L 8765:127.0.0.1:8765 WECHAT_HOST
 | 操作 | 行为 | 不会做的事 |
 | --- | --- | --- |
 | 暂停桌面发送 | 调用 `coordinator dispatch pause --reason`，正在执行的一项会完成，之后不再领取新调度 | 不恢复、不审查；恢复仍需在宿主上按托管指南执行 `dispatch review` |
+| 重新交给 Session | 只对"回合已结束但没有记录决定"的 delivery 可用：核对 epoch 后调用 `inbox resume`，交回 owner 的 Session 重新处理 | 不发送；不处理仍在进行或结果不明的回合 |
 | 批准并发送草稿 | 1. 核对会话 epoch、控制状态，回复策略必须是 `authorized`；2. 用所选源消息游标调用 `conversations reply --no-wait`，把草稿原文冻结为托管回复意图并入队；3. 调用 `coordinator inbox approve-draft` 把该 delivery 记为 `replied` 并关联请求 ID | 不修改回复策略；不绕过共享执行器；草稿文字不可在面板中编辑 |
 
 `inbox approve-draft` 只在以下条件全部成立时生效：delivery 仍是空闲的 `draft`，owner/epoch 未变且控制为 `active`，会话回复策略是 `authorized`，outbox 中已有同一 owner/epoch、正文与草稿逐字相同的托管文字意图，并且该请求已有发送调度。它记录 `approve_draft` 决定历史，本身不发送。重复批准同一请求返回 `already_approved: true`，不会重复入队；回复请求 ID 由源消息派生，重复操作也不会重发。

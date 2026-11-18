@@ -2,7 +2,7 @@
 import argparse
 import sys
 
-COMMANDS = ("conversations", "dispatch", "inbox", "memory", "panel", "sender", "probe")
+COMMANDS = ("conversations", "dispatch", "inbox", "mcp", "memory", "panel", "sender", "probe")
 
 
 def main(argv=None):
@@ -26,6 +26,9 @@ def main(argv=None):
     if command == "dispatch":
         from .dispatch import main as dispatch
         return dispatch(remaining)
+    if command == "mcp":
+        from .mcp_server import main as mcp
+        return mcp(remaining)
     if command == "panel":
         from .panel import main as panel
         return panel(remaining)

@@ -52,6 +52,9 @@ class FakeCoordinator:
             request = parts[parts.index("--request-id") + 1]
             self.delivery.update(status="replied", request_id=request)
             return {"delivery_id": 7, "status": "replied", "request_id": request, "already_approved": False}
+        if parts[:2] == ("inbox", "resume"):
+            self.delivery.update(status="pending", turn_state=None)
+            return {"delivery_id": 7, "status": "pending"}
         if parts[:2] == ("dispatch", "pause"):
             return {"paused_reason": parts[-1]}
         raise AssertionError("unexpected coordinator call: %r" % (parts,))
@@ -149,6 +152,18 @@ class PanelTests(PanelBase):
                     self.panel.approve_draft(*args)
             self.assertEqual(caught.exception.code, code)
         self.assertFalse([c for c in self.fake.calls if c[:2] == ("inbox", "approve-draft")])
+
+    def test_resume_only_hands_back_a_finished_undecided_turn(self):
+        with self.assertRaises(panel_module.PanelError) as caught:
+            self.panel.resume_delivery(CID, 7, 4)
+        self.assertEqual(caught.exception.code, "not_stuck")
+        self.fake.delivery.update(status="claimed", turn_state="failed")
+        with self.assertRaises(panel_module.PanelError):
+            self.panel.resume_delivery(CID, 7, 3)
+        self.assertEqual(self.panel.resume_delivery(CID, 7, 4)["status"], "pending")
+        resumed = [c for c in self.fake.calls if c[:2] == ("inbox", "resume")]
+        self.assertEqual(resumed, [("inbox", "resume", "--delivery-id", "7", "--owner", "owner1",
+                                    "--expected-epoch", "4")])
 
     def test_pause_requires_reason(self):
         with self.assertRaises(panel_module.PanelError):

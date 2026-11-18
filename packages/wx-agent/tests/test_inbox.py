@@ -37,7 +37,18 @@ class CoreBoundaryTests(unittest.TestCase):
                                      "--session-config", str(sessions), "--owner", "owner1",
                                      "--cwd", str(root), "--codex", "synthetic-codex"])
             self.assertEqual(result, 0)
-            provision.assert_called_once_with(sessions, "owner1", root, "synthetic-codex", [])
+            provision.assert_called_once_with(sessions, "owner1", root, "synthetic-codex", [], "cli", None, None)
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(conversations, "config", return_value={"wx_cli": "/bin/false"}))
+                stack.enter_context(mock.patch.object(inbox.dispatch, "root_from_settings", return_value=root))
+                provision = stack.enter_context(mock.patch.object(inbox, "provision", return_value={"provisioned": True}))
+                result = inbox.main(["--config", str(root / "config.json"), "provision",
+                                     "--session-config", str(sessions), "--owner", "owner1",
+                                     "--cwd", str(root), "--codex", "synthetic-codex", "--tools", "mcp",
+                                     "--model", "synthetic-model", "--effort", "low"])
+            self.assertEqual(result, 0)
+            provision.assert_called_once_with(sessions, "owner1", root, "synthetic-codex", [], "mcp",
+                                              "synthetic-model", "low")
 
     def test_claim_cli_fences_optional_epoch_without_changing_legacy_call(self):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
@@ -148,6 +159,7 @@ class PushLoopTests(unittest.TestCase):
         self.calls = []
         self.claims = 0
         self.previous = []
+        self.show_status = "claimed"
         self.patches = [
             mock.patch.object(session_adapter, "AppServer", FakeServer),
             mock.patch.object(session_adapter, "SessionAdapter", FakeAdapter),
@@ -174,7 +186,7 @@ class PushLoopTests(unittest.TestCase):
             return {"deliveries": self.previous}
         if args[:2] == ("inbox", "show"):
             return {"delivery_id": 42, "turn_id": "turn-42", "thread_id": "thread1",
-                    "transport_token": "synthetic-transport-token", "status": "claimed"}
+                    "transport_token": "synthetic-transport-token", "status": self.show_status}
         if args[:2] == ("inbox", "finish-turn"):
             return {"delivery_id": 42, "turn_state": "completed"}
         if args[:2] == ("inbox", "claim"):
@@ -210,6 +222,20 @@ class PushLoopTests(unittest.TestCase):
         self.assertEqual(FakeAdapter.deliveries, [])
         self.assertEqual(self.claims, 0)
         self.assertTrue(any(args[:2] == ("inbox", "finish-turn") for args in self.calls))
+
+    def test_finished_turn_without_decision_is_surfaced_not_retried(self):
+        self.loop.tick()
+        self.assertEqual(FakeAdapter.deliveries, ["42"])
+        FakeAdapter.turn_status_value = "failed"
+        result = self.loop.tick(allow_new=False)
+        self.assertEqual(result["attention"],
+                         {"owner1": "delivery 42 turn failed without a decision; review it and resume explicitly"})
+        self.assertEqual(FakeAdapter.deliveries, ["42"], "no replacement turn")
+
+    def test_finished_turn_with_decision_needs_no_attention(self):
+        self.loop.tick()
+        self.show_status = "replied"
+        self.assertEqual(self.loop.tick(allow_new=False)["attention"], {})
 
     def test_restart_keeps_unmapped_reservation_for_inspection(self):
         session = self.loop.adapters["owner1"].session
@@ -271,7 +297,7 @@ class ProvisioningTests(unittest.TestCase):
                 if method=="thread/read":
                     if not self.loaded:raise session_adapter.SessionError("thread not loaded")
                     return {"thread":{"id":"thread-init","status":{"type":"idle"},
-                                      "turns":[{"id":"init-turn","status":Server.terminal}]}}
+                                      "turns":[{"id":"init-turn","status":Server.terminal,"completedAt":1}]}}
                 raise AssertionError(method)
         self.server=Server
         patch=mock.patch.object(session_adapter,"AppServer",Server)
