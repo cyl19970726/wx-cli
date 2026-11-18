@@ -12,8 +12,8 @@ import os
 from pathlib import Path
 import re
 
-from . import channel_agent as runner
-from . import conversations, dispatch, wechat_agent_ctl as ctl
+from . import local
+from . import conversations, dispatch
 
 
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,255}\Z")
@@ -56,7 +56,7 @@ class LocalInbox:
         self.root = dispatch.root_from_settings(settings)
 
     def call(self, *parts):
-        return runner.one_json(runner.command(
+        return local.one_json(local.command(
             [str(self.binary), "coordinator", "--state-dir", str(self.root), *map(str, parts)], timeout=15))
 
     def transport_records(self, route):
@@ -138,7 +138,7 @@ class GatewayInbox:
 class SessionBindings:
     def __init__(self, config_path, *, inbox=None, allow_shared_routes=False):
         self.config_path = canonical(str(config_path))
-        value = ctl.read_json(self.config_path)
+        value = local.read_json(self.config_path)
         required = {"version", "conversation_config", "wx_agent", "codex", "bindings"}
         if any(key in value for key in ("remote", "remote_auth_token_env", "resume_queued")):
             raise PluginError("hook_transport_removed")

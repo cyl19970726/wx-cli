@@ -27,11 +27,9 @@ wx-cli/
 ├── packages/wx-agent/               Python 安装包
 │   └── src/wx_agent/
 │       ├── cli.py                  wx-agent 统一入口
-│       ├── interactive.py          选群、分页、接管与交还编排
 │       ├── conversations.py        群/私聊目录、独立绑定、选择与按需操作
-│       ├── channel_agent.py        入站 → 模型 → 发件箱 → 确认
-│       ├── wechat_agent_ctl.py      生命周期与进程身份校验
-│       ├── codex_reply_agent.py     已登录 Codex 的文本生成适配
+│       ├── dispatch.py / inbox.py  共享桌面执行器、托管 inbox 与采集
+│       ├── local.py                有界子进程调用与私有 JSON 状态
 │       ├── memory.py                带来源和版本的会话需求笔记
 │       ├── macos_sender_driver.py  图形助手适配与本地出站核对
 │       └── sender_guard_probe.py   有界保护条件核验
@@ -50,27 +48,23 @@ wx-cli/
 | 临时加密副本 | Rust snapshot | 一轮采集使用，正常退出清理 |
 | channel 绑定与事件、consumer cursor | Rust channel | 群绑定不变；增量持久化，显式 ack |
 | outgoing intent / attempt | Rust outbox | 请求 ID 幂等；尝试后不盲重发 |
-| 当前待回复正文、健康与控制状态 | Python runner/controller | 重启续接；错误停发，状态日志不含正文 |
+| 会话注册表、派生健康状态 | Python conversations / inbox | 显式迁移；健康文件不替代 Rust 状态 |
 | 会话需求笔记 | Python memory | 派生上下文，版本检查，保留入站来源；不能改消息原文 |
 | 图形准备与提交标记 | Swift helper | 单个请求只提交一次，结果未知保留证据 |
 
 outbox 的未知结果不自动重试。窄范围 `recover-unsent` 只允许操作者按原 request ID 和当前 attempt 显式请求恢复；Rust 先要求驱动能力握手及只读 preflight，再以事务 CAS 领取下一次不可变 attempt。驱动在共享 UI 锁内重新校验原始准备失败、完整匹配的私有作业/结果、权限证据、无 submit 记录及无存活 helper 后写入恢复证明，并且只执行一次尝试。缺少任一证据都停止，不回退到普通发送、不换 ID。可恢复形态由契约严格限定为准备阶段的剪贴板/草稿失败，以及有完整历史证明的更早 inspect/focus 停止；超时本身不是未发送证明，真实提交或错误目标发送不属于此机制。详细规则见[发件箱恢复契约](contracts.md#显式恢复已证实未提交的尝试)。
 
-读取事件不会自动确认消费。运行器仅处理绑定群的明确入站文本；自己的出站、更新事件及非文本不会触发自我对话。准备好的回复先落盘，再进入 outbox。达到本地 `ui_observed` 才确认事件；不明结果保留 pending 并停止，重启也不会换 ID 重发。
-
-控制器与执行器分开：`wx-agent start` 启动本机运行器，`status/pause/resume/stop` 控制它。暂停和停止在安全边界生效，不强杀正在提交的发送。Mac mini 可以同时运行读取、模型适配和发送，不依赖控制笔记本的 SSH 会话。
-
-交互 Agent 使用 `wx-agent chat`，直接读取结构化事件并撰写文案；它与常驻运行器共用同一 Rust outbox。接管通过等待后台退出、检查 pending、取得运行锁与持久占用标记完成。手动回复按源消息生成相同请求 ID，并比较原 consumer 游标后确认。交还恢复先前运行状态；新进程完成就绪握手后才解除占用。图中 Agent 运行器节点概括此编排层，交互命令细节见 [交互 CLI](INTERACTIVE_CLI.md)。
+读取事件不会自动确认消费。托管会话的入站先进入 Rust inbox，由 owner 显式记录 skip、defer、draft 或 reply；自己的出站、更新事件及非文本不会触发自我对话。发送意图先冻结在 outbox，再由唯一的共享桌面执行器 `wx-agent dispatch run` 逐项执行；不明结果保留并暂停，重启也不会换 ID 重发。Mac mini 可以独立运行采集与执行器，不依赖控制笔记本的 SSH 会话。旧的单群自动回复 runner 已移除，导入条目用 `conversations retire-controller` 迁移。
 
 ## 会话记忆
 
-持久事件日志保存可查询的原文，模型的短上下文保留最近 12 条有限长度文本；需求笔记提供更早的重要事项。笔记由操作者或接入 Agent 通过明确 CLI 更新，分为摘要、已确认事项和未决问题，指向同一群内已存在的入站游标。比较 revision 防止覆盖他人的更新。
+持久事件日志保存可查询的原文；需求笔记提供更早的重要事项。笔记由操作者或接入 Agent 通过明确 CLI 更新，分为摘要、已确认事项和未决问题，指向同一群内已存在的入站游标。比较 revision 防止覆盖他人的更新。
 
-来源校验只证明该消息存在且属于当前群，不证明笔记的解释必然正确。当前不会让回复模型自动写“已确认需求”，也不会用笔记代替原文。旧笔记与新入站矛盾时需要追问或修订。缺少笔记保持原有行为；有笔记但损坏、绑定错误时拒绝继续生成。
+来源校验只证明该消息存在且属于当前群，不证明笔记的解释必然正确。当前不会让回复模型自动写“已确认需求”，也不会用笔记代替原文。旧笔记与新入站矛盾时需要追问或修订。有笔记但损坏或绑定错误时读取会被拒绝。
 
 ## 适配边界
 
-Agent 通过 JSON stdin/stdout 调用，可替换 Codex 文本适配器。该适配器禁用 shell、应用和联网工具，只产文案。群消息没有授权本机操作的能力。CLI 才拥有群绑定和状态；skill 解释何时调用、如何处理人工接管和确认需求。
+Session 通过项目 Skill 与 queue-snapshot 插件读取冻结快照并提交决定。群消息没有授权本机操作的能力。CLI 才拥有会话绑定和状态；skill 解释何时调用、如何处理人工接管和确认需求。
 
 MCP 后续暴露相同契约，不拥有第二份消费进度。托管扩展通过 Rust coordinator 和独立桌面执行器协调多个会话，使用显式模式和 owner；不复制自动回复循环。跨宿主 App-held Session 接入由项目 Skill、插件 bundle、queue-snapshot adapter 和受限网关提供；桌面 App 持有的 thread 只经原宿主队列通知，不创建第二个 writer。面向自有宿主连接的托管适配是独立路径。自动冷唤醒未实现，跨账号切换未接入。
 
@@ -78,4 +72,4 @@ MCP 后续暴露相同契约，不拥有第二份消费进度。托管扩展通�
 
 已部署的旧版完成过单群有限实测。新包、会话笔记和安装流程有自己的离线验证；未经明确升级和现场回归，不把旧证据写成新版本已部署。桌面锁定、微信退出、权限失效或无法完整读取剪贴板时，发送会停止。当前助手的输出目录仍有部署约束，详见 [原生助手](../native/macos/wechat-bridge/README.md)。
 
-[仓库决策](adr/0001-unified-repository.md) · [消息契约](contracts.md) · [单群用法](SINGLE_GROUP_CLI.md) · [验证记录](REAL_READ_VALIDATION_20261015.md)
+[仓库决策](adr/0001-unified-repository.md) · [消息契约](contracts.md) · [channel CLI](SINGLE_GROUP_CLI.md) · [验证记录](REAL_READ_VALIDATION_20261015.md)

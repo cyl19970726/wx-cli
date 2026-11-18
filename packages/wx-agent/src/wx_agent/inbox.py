@@ -10,9 +10,8 @@ import subprocess
 import sys
 import time
 
-from . import channel_agent as runner
+from . import local
 from . import dispatch
-from . import wechat_agent_ctl as ctl
 from .errors import IntegrationError
 
 
@@ -36,15 +35,15 @@ def collect(binary, root, settle_seconds=0, conversation_ids=None):
         try:
             binding = dispatch.call(binary, root, "status", "--conversation-id", cid)
             command=[str(binary), "channel", "--state-dir", binding["channel_state_dir"], "sync"]
-            synced=runner.one_json(runner.command(command, timeout=90))
+            synced=local.one_json(local.command(command, timeout=90))
             stop=time.monotonic()+5
             while settle_seconds and synced.get("events_appended",0)>0 and time.monotonic()<stop:
                 time.sleep(min(settle_seconds,max(0,stop-time.monotonic())))
-                synced=runner.one_json(runner.command(command,timeout=90))
+                synced=local.one_json(local.command(command,timeout=90))
             result=dispatch.call(binary, root, "inbox", "reconcile", "--conversation-id", cid)
             result["read_seconds"]=round(time.monotonic()-started,3)
             return result
-        except (runner.RunnerError, OSError, subprocess.SubprocessError):
+        except (local.CommandError, OSError, subprocess.SubprocessError):
             return {"conversation_id": cid, "error": "read_unavailable"}
 
     # Bound encrypted snapshot work; the source files are never opened as SQLite.
@@ -127,7 +126,7 @@ def main(argv=None):
             start=claim["cursor_start"]-1 if args.after is None else args.after
             if not claim["cursor_start"]-1<=start<=claim["cursor_end"] or not 1<=args.limit<=100:
                 raise dispatch.DispatchError("event pagination must stay within the frozen delivery range")
-            raw=runner.command([str(binary),"channel","--state-dir",claim["channel_state_dir"],"events",
+            raw=local.command([str(binary),"channel","--state-dir",claim["channel_state_dir"],"events",
                                 "--after",str(start),"--limit",str(args.limit)],timeout=30)
             page=[json.loads(line) for line in raw.splitlines() if line.strip()]
             page=[event for event in page if event["cursor"]<=claim["cursor_end"]]
@@ -154,12 +153,12 @@ def main(argv=None):
             signal.signal(signal.SIGINT,stop_after_current)
             if not args.collector_only:
                 fd=os.open(root/"executor.log",os.O_CREAT|os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW,0o600)
-                ctl.private(root/"executor.log")
+                local.private(root/"executor.log")
                 executor_log=os.fdopen(fd,"ab",buffering=0)
                 executor=subprocess.Popen([sys.executable,"-m","wx_agent.cli","dispatch","--config",str(args.config),
                                            "run","--seconds",str(args.seconds)],stdout=executor_log,stderr=executor_log)
             if args.session_config:
-                sessions = ctl.read_json(args.session_config)
+                sessions = local.read_json(args.session_config)
                 if sessions.get("version") != 1:
                     raise dispatch.DispatchError("invalid Session configuration")
                 if any(item.get("state")!="ready" for item in sessions.get("provisioning",{}).values()):
@@ -177,7 +176,7 @@ def main(argv=None):
                 if collection is not None and collection.done():
                     try:
                         last_collection=collection.result()
-                    except (runner.RunnerError,OSError):
+                    except (local.CommandError,OSError):
                         last_collection=[{"error":"collection unavailable; durable inbox retained"}]
                     collected=True
                     collection=None
@@ -196,7 +195,7 @@ def main(argv=None):
                 value["pid"]=os.getpid()
                 value["run_state"]="running"
                 last_health=value
-                ctl.atomic_json(root / "inbox-health.json", {"version": 1, "updated_at": time.time(), **value})
+                local.atomic_json(root / "inbox-health.json", {"version": 1, "updated_at": time.time(), **value})
                 if stopping or (args.once and collected and (not push or not push.active)) or time.monotonic() >= stop:
                     break
                 time.sleep(min(args.interval,1))
@@ -212,8 +211,8 @@ def main(argv=None):
                                   data=sys.stdin.read(65537) if getattr(args, "draft_stdin", False) else None)
         print(json.dumps(value, separators=(",", ":")))
         return 0
-    except (dispatch.DispatchError, conversations.ConversationError, ctl.ControlError,
-            runner.RunnerError, IntegrationError, OSError, ValueError) as exc:
+    except (dispatch.DispatchError, conversations.ConversationError, local.StateError,
+            local.CommandError, IntegrationError, OSError, ValueError) as exc:
         run_error=type(exc).__name__
         print(json.dumps({"error": type(exc).__name__, "message": str(exc)}), file=sys.stderr)
         return 1
@@ -242,7 +241,7 @@ def main(argv=None):
 
         executor_alive, executor_exitcode = executor_result()
         if health_owned:
-            cleanup("health_stopping", lambda: ctl.atomic_json(root / "inbox-health.json", {
+            cleanup("health_stopping", lambda: local.atomic_json(root / "inbox-health.json", {
                 "version": 1, "updated_at": time.time(), **last_health,
                 "pid": os.getpid(), "run_state": "stopping",
                 "shutdown_started_at": shutdown_started_at, "stopped_at": None,
@@ -292,7 +291,7 @@ def main(argv=None):
             if run_error or original_error:
                 final_health["run_error"] = run_error or original_error.__name__
             try:
-                ctl.atomic_json(root / "inbox-health.json", final_health)
+                local.atomic_json(root / "inbox-health.json", final_health)
             except Exception as exc:
                 if not (run_error or original_error):
                     final_health_error = exc
@@ -309,7 +308,7 @@ def main(argv=None):
                 else:
                     final_health.update(run_state="stopping", stopped_at=None,
                                         cleanup_errors=cleanup_errors, updated_at=time.time())
-                    cleanup("health_release_error", lambda: ctl.atomic_json(root / "inbox-health.json", final_health))
+                    cleanup("health_release_error", lambda: local.atomic_json(root / "inbox-health.json", final_health))
                     cleanup("runner_lock_fd_close", lambda: os.close(runner_lock_fd))
         if final_health_error is not None:
             raise final_health_error

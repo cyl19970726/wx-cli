@@ -16,7 +16,6 @@ Repository = "https://github.com/cyl19970726/wx-cli"
 [project.scripts]
 wx-agent = "wx_agent.cli:main"
 wx-agent-sender = "wx_agent.macos_sender_driver:main"
-wx-agent-reply = "wx_agent.codex_reply_agent:main"
 wx-agent-probe = "wx_agent.sender_guard_probe:main"
 wx-agent-queue-session = "wx_agent.queued_snapshot:main"
 wx-agent-plugin-runner = "wx_agent.plugin_runner:main"

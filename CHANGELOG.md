@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- Remove the legacy single-group runner from `wx-agent`: the `start`, `status`, `pause`, `resume`, `stop`, `run`, `reply` and `chat` commands, the `wx-agent-reply` script and their compatibility launchers. Conversation, dispatch, inbox and memory commands are unchanged.
+
+### Added
+
+- `wx-agent conversations retire-controller --id ID` migrates a registry entry imported from the removed runner into a plain entry. It refuses while the old runner is alive, holds an interactive lease or has a pending reply, and leaves the state directory, channel binding, consumer and outbox untouched. Unmigrated imported entries now fail with `legacy_controller`.
+
 ### Changed
 
 - Accept WeChat 4.1.7 and newer for key extraction instead of maintaining a fixed version-prefix allowlist.
