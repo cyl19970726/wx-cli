@@ -112,6 +112,7 @@ async function api(path, body) {
   return data;
 }
 
+const TERMINAL = ["completed", "interrupted", "failed"];
 const POLICY = { observe: "只观察", draft: "只起草", authorized: "可发送" };
 const STATUS = { pending: "待处理", claimed: "处理中", deferred: "延后", draft: "草稿待审",
                  replied: "已回复", skipped: "已跳过", queued: "排队", done: "完成", blocked: "阻塞", unknown: "结果不明" };
@@ -134,6 +135,8 @@ function renderAttention(ov) {
   for (const c of ov.conversations) {
     if (c.state_origin === "legacy_controller") items.push(el("div", { class: "warn" }, `${c.name || c.conversation_id}：旧单群记录，需执行 retire-controller`));
     if (c.control === "taken_over") items.push(el("div", { class: "warn" }, `${c.name || c.conversation_id}：已被人工接管`));
+    const stuck = (c.todos || []).filter((t) => t.status === "claimed" && TERMINAL.includes(t.turn_state)).length;
+    if (stuck) items.push(el("div", { class: "bad" }, `${c.name || c.conversation_id}：${stuck} 条消息的 Session 回合已结束但没有决定`));
     const drafts = (c.todos || []).filter((t) => t.status === "draft").length;
     if (drafts) items.push(el("div", {}, `${c.name || c.conversation_id}：${drafts} 条草稿待审`));
   }
@@ -186,6 +189,19 @@ async function select(cid) {
         el("span", { class: "muted" }, `游标 ${t.cursor_start}–${t.cursor_end}`), t.reason ? el("span", {}, t.reason) : ""));
     if (t.status === "draft") {
       box.append(el("button", { onclick: () => openDraft(c, t, box) }, "查看草稿与原消息"));
+    }
+    if (t.status === "claimed" && TERMINAL.includes(t.turn_state)) {
+      box.append(el("p", { class: "bad" }, `Session 回合已结束（${t.turn_state}），但没有记录决定。`));
+      const resume = el("button", { onclick: async () => {
+        if (!confirm("把这条消息重新交给 Session 处理？不会直接发送任何内容。")) return;
+        resume.disabled = true;
+        try {
+          await api("/api/resume-delivery", { conversation_id: c.conversation_id, delivery_id: t.delivery_id,
+                                              expected_epoch: c.epoch });
+          notice("已重新交给 Session。", "ok"); await refresh(true);
+        } catch (e) { notice("交回失败：" + e.message, "bad"); resume.disabled = false; }
+      } }, "重新交给 Session");
+      box.append(resume);
     }
     body.append(box);
   }

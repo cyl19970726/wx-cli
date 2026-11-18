@@ -101,6 +101,9 @@ def main(argv=None):
     init.add_argument("--cwd", type=Path, required=True)
     init.add_argument("--codex", default="codex")
     init.add_argument("--writable-root", type=Path, action="append", default=[])
+    init.add_argument("--tools", choices=("cli", "mcp"), default="cli")
+    init.add_argument("--model")
+    init.add_argument("--effort")
     args = parser.parse_args(argv)
     from . import conversations
     push = None
@@ -120,7 +123,8 @@ def main(argv=None):
         binary, root = settings["wx_cli"], dispatch.root_from_settings(settings)
         if args.action == "provision":
             value = getattr(sys.modules[__name__], "provision")(
-                args.session_config, args.owner, args.cwd, args.codex, args.writable_root)
+                args.session_config, args.owner, args.cwd, args.codex, args.writable_root, args.tools,
+                args.model, args.effort)
         elif args.action == "events":
             claim=dispatch.call(binary,root,"inbox","show","--delivery-id",args.delivery_id,"--owner",args.owner)
             start=claim["cursor_start"]-1 if args.after is None else args.after

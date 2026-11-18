@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-This fork provides authorized group/private conversation access, per-conversation owners and a shared managed desktop queue. The legacy single-group runner (`wx-agent chat`, `start/stop/...`, `wx-agent-reply`) has been removed; registry entries imported from it are migrated only through `conversations retire-controller`, which keeps their state in place. Make coherent changes within the approved multi-conversation plan; do not broaden this into unrelated product work, multi-account scheduling or MCP.
+This fork provides authorized group/private conversation access, per-conversation owners and a shared managed desktop queue. The legacy single-group runner (`wx-agent chat`, `start/stop/...`, `wx-agent-reply`) has been removed; registry entries imported from it are migrated only through `conversations retire-controller`, which keeps their state in place. Make coherent changes within the approved multi-conversation plan; do not broaden this into unrelated product work or multi-account scheduling. The `wx-agent mcp` server is a thin, owner-scoped tool adapter over the same Rust contracts; it must not hold its own progress, memory or retry state.
 
 Read only the context relevant to the change. Start with `README.md`, `docs/architecture.md`, `CONTRIBUTING.md`, and the specific CLI or contract document being changed. Read the security and deployment guidance when touching source data, credentials, desktop automation or a live runtime. Preserve unrelated work in the shared checkout.
 

@@ -24,6 +24,7 @@ from . import conversations, dispatch, local
 MAX_BODY = 16 * 1024
 TODO_STATUSES = ("pending", "claimed", "deferred", "draft")
 ATTENTION_DISPATCH = ("blocked", "unknown", "claimed")
+TERMINAL_TURNS = ("completed", "interrupted", "failed")
 DELIVERY_FIELDS = ("delivery_id", "conversation_id", "cursor_start", "cursor_end", "owner", "epoch",
                    "status", "turn_state", "draft_text", "reason", "condition", "due_at", "request_id")
 MAX_EVENTS = 50
@@ -151,6 +152,21 @@ class Panel:
                 "send_status": sent.get("status"), "dispatch_id": sent.get("dispatch_id"),
                 "already_approved": approved.get("already_approved", False)}
 
+    def resume_delivery(self, cid, delivery_id, expected_epoch):
+        """Hand a delivery whose turn ended without a decision back to its owner Session."""
+        for value, label in ((delivery_id, "delivery_id"), (expected_epoch, "expected_epoch")):
+            require(type(value) is int and value > 0, label, label + " must be a positive integer")
+        binding = self._binding(cid)
+        require(binding.get("epoch") == expected_epoch, "epoch_changed",
+                "conversation owner epoch changed; reload before resuming", HTTPStatus.CONFLICT)
+        shown = self.call("inbox", "show", "--delivery-id", delivery_id, "--owner", binding["owner"])
+        require(shown.get("conversation_id") == cid, "delivery_drift", "delivery belongs to another conversation")
+        require(shown.get("status") == "claimed" and shown.get("turn_state") in TERMINAL_TURNS, "not_stuck",
+                "only a delivery whose turn ended without a decision can be handed back here",
+                HTTPStatus.CONFLICT)
+        return self.call("inbox", "resume", "--delivery-id", delivery_id, "--owner", binding["owner"],
+                         "--expected-epoch", expected_epoch)
+
     def pause(self, reason):
         require(isinstance(reason, str) and 1 <= len(reason.strip()) and len(reason) <= 512,
                 "reason", "pause requires a reason of 1..512 characters")
@@ -260,6 +276,9 @@ def make_handler(panel, token, allowed_hosts):
             if path == "/api/approve-draft":
                 self._run(lambda: panel.approve_draft(body.get("conversation_id"), body.get("delivery_id"),
                                                       body.get("expected_epoch"), body.get("cursor")))
+            elif path == "/api/resume-delivery":
+                self._run(lambda: panel.resume_delivery(body.get("conversation_id"), body.get("delivery_id"),
+                                                        body.get("expected_epoch")))
             elif path == "/api/pause":
                 self._run(lambda: panel.pause(body.get("reason")))
             else:
