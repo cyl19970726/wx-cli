@@ -25,3 +25,6 @@ wx-agent-gateway-client = "wx_agent.gateway_client:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+wx_agent = ["panel.html"]

@@ -8,7 +8,7 @@
 
 ## 一个仓库，三个执行层
 
-多会话扩展的设计见[批准方案](docs/MULTI_CONVERSATION_PLAN.md)，新增入口见[托管会话指南](docs/MANAGED_CONVERSATIONS.md)，实际进度见[实施与验证记录](docs/MULTI_CONVERSATION_IMPLEMENTATION.md)。本分支增加逐会话控制、Rust 持久 inbox/文字图片调度与受管 Codex Session 适配器；新版本的工程验证、实机发送和独立收件分别记录，不扩大下述历史验收范围。
+多会话扩展的设计见[批准方案](docs/MULTI_CONVERSATION_PLAN.md)，新增入口见[托管会话指南](docs/MANAGED_CONVERSATIONS.md)与[控制面板](docs/CONTROL_PANEL.md)，实际进度见[实施与验证记录](docs/MULTI_CONVERSATION_IMPLEMENTATION.md)。本分支增加逐会话控制、Rust 持久 inbox/文字图片调度与受管 Codex Session 适配器；新版本的工程验证、实机发送和独立收件分别记录，不扩大下述历史验收范围。
 
 | 层 | 提供什么 | 入口 |
 | --- | --- | --- |

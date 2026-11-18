@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信 Agent 控制面板</title>
+<style nonce="__NONCE__">
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2430; --muted: #5f6b7a; --line: #dfe3e8;
+  --accent: #1f6feb; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; --chip: #eef1f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0f1216; --panel: #171b21; --text: #e6e9ee; --muted: #9aa4b2; --line: #2a313b;
+          --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --bad: #f85149; --chip: #222832; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+         padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 10px; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.muted { color: var(--muted); }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--text);
+         border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.table { width: 100%; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+tr.selectable { cursor: pointer; } tr.selected { background: var(--chip); }
+.todo { border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-top: 10px; }
+.msg { padding: 6px 8px; border-left: 3px solid var(--line); margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+.msg.incoming { border-color: var(--accent); }
+.draft { white-space: pre-wrap; word-break: break-word; background: var(--chip); padding: 8px; border-radius: 6px; }
+#notice { min-height: 1.5em; }
+label { display: inline-flex; gap: 6px; align-items: center; }
+select { font: inherit; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; max-width: 100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>微信 Agent 控制面板</h1>
+  <div class="row">
+    <span id="desktop" class="chip">加载中…</span>
+    <button id="refresh">刷新</button>
+    <button id="pause">暂停桌面发送</button>
+  </div>
+</header>
+<main>
+  <div id="notice" class="muted"></div>
+  <section>
+    <h2>需要处理</h2>
+    <div id="attention" class="muted">—</div>
+  </section>
+  <section>
+    <h2>会话</h2>
+    <div class="table"><table>
+      <thead><tr><th>名称</th><th>类型</th><th>托管</th><th>回复策略</th><th>控制</th><th>epoch</th><th>待办</th></tr></thead>
+      <tbody id="conversations"></tbody>
+    </table></div>
+  </section>
+  <section id="detail" hidden>
+    <h2 id="detail-title"></h2>
+    <div id="detail-body"></div>
+  </section>
+  <section>
+    <h2>最近发送调度</h2>
+    <div class="table"><table>
+      <thead><tr><th>#</th><th>会话</th><th>操作</th><th>状态</th><th>结果</th><th>排队秒数</th></tr></thead>
+      <tbody id="dispatches"></tbody>
+    </table></div>
+  </section>
+</main>
+<script nonce="__NONCE__">
+"use strict";
+const TOKEN_KEY = "wx-panel-token";
+const fromHash = new URLSearchParams(location.hash.slice(1)).get("token");
+if (fromHash) {
+  try { sessionStorage.setItem(TOKEN_KEY, fromHash); } catch (e) {}
+  history.replaceState(null, "", location.pathname);
+}
+let token = fromHash;
+if (!token) { try { token = sessionStorage.getItem(TOKEN_KEY); } catch (e) {} }
+
+let state = { overview: null, selected: null };
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v; else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) node.append(c instanceof Node ? c : document.createTextNode(c ?? ""));
+  return node;
+}
+function notice(text, cls) { const n = $("notice"); n.textContent = text; n.className = cls || "muted"; }
+
+async function api(path, body) {
+  if (!token) throw new Error("缺少面板令牌：请使用启动时打印的完整地址打开。");
+  const init = { headers: { "X-Panel-Token": token } };
+  if (body) { init.method = "POST"; init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
+  const res = await fetch(path, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data.error && (data.error.code + ": " + data.error.message)) || res.statusText);
+  return data;
+}
+
+const POLICY = { observe: "只观察", draft: "只起草", authorized: "可发送" };
+const STATUS = { pending: "待处理", claimed: "处理中", deferred: "延后", draft: "草稿待审",
+                 replied: "已回复", skipped: "已跳过", queued: "排队", done: "完成", blocked: "阻塞", unknown: "结果不明" };
+
+function renderDesktop(d) {
+  const tag = $("desktop");
+  if (d.paused_reason) { tag.textContent = "桌面已暂停：" + d.paused_reason; tag.className = "chip warn"; }
+  else if (d.active_dispatch) { tag.textContent = "正在发送 #" + d.active_dispatch; tag.className = "chip"; }
+  else { tag.textContent = "桌面空闲"; tag.className = "chip ok"; }
+  $("pause").disabled = !!d.paused_reason;
+}
+
+function renderAttention(ov) {
+  const box = $("attention"); box.replaceChildren();
+  const items = [];
+  for (const d of ov.desktop.attention) {
+    items.push(el("div", { class: d.status === "claimed" ? "" : "bad" },
+      `调度 #${d.dispatch_id} ${STATUS[d.status] || d.status}${d.result ? "（" + d.result + "）" : ""} · ${d.request_id}`));
+  }
+  for (const c of ov.conversations) {
+    if (c.state_origin === "legacy_controller") items.push(el("div", { class: "warn" }, `${c.name || c.conversation_id}：旧单群记录，需执行 retire-controller`));
+    if (c.control === "taken_over") items.push(el("div", { class: "warn" }, `${c.name || c.conversation_id}：已被人工接管`));
+    const drafts = (c.todos || []).filter((t) => t.status === "draft").length;
+    if (drafts) items.push(el("div", {}, `${c.name || c.conversation_id}：${drafts} 条草稿待审`));
+  }
+  if (!items.length) box.append("没有需要处理的事项。"); else box.append(...items);
+}
+
+function renderConversations(ov) {
+  const body = $("conversations"); body.replaceChildren();
+  for (const c of ov.conversations) {
+    const todos = c.todos || [];
+    const row = el("tr", { class: "selectable" + (state.selected === c.conversation_id ? " selected" : ""),
+                           onclick: () => select(c.conversation_id) },
+      el("td", {}, c.name || el("span", { class: "muted" }, c.conversation_id.slice(0, 8))),
+      el("td", {}, c.kind === "group" ? "群聊" : c.kind === "private" ? "私聊" : "—"),
+      el("td", {}, c.managed ? "是" : "否"),
+      el("td", {}, c.reply_policy ? (POLICY[c.reply_policy] || c.reply_policy) : "—"),
+      el("td", { class: c.control === "taken_over" ? "warn" : "" }, c.control === "taken_over" ? "人工接管" : c.control ? "正常" : "—"),
+      el("td", {}, c.epoch ?? "—"),
+      el("td", {}, todos.length ? String(todos.length) : "—"));
+    body.append(row);
+  }
+}
+
+function renderDispatches(ov) {
+  const body = $("dispatches"); body.replaceChildren();
+  const names = Object.fromEntries(ov.conversations.map((c) => [c.conversation_id, c.name || c.conversation_id.slice(0, 8)]));
+  for (const d of [...ov.desktop.recent].reverse()) {
+    body.append(el("tr", {},
+      el("td", {}, d.dispatch_id), el("td", {}, names[d.conversation_id] || d.conversation_id.slice(0, 8)),
+      el("td", {}, d.operation === "focus" ? "聚焦" : "发送"),
+      el("td", { class: ["blocked", "unknown"].includes(d.status) ? "bad" : "" }, STATUS[d.status] || d.status),
+      el("td", {}, d.result || "—"), el("td", {}, d.status === "queued" ? d.queued_seconds : "—")));
+  }
+}
+
+async function select(cid) {
+  state.selected = cid;
+  if (state.overview) renderConversations(state.overview);
+  const c = state.overview.conversations.find((x) => x.conversation_id === cid);
+  $("detail").hidden = false;
+  $("detail-title").textContent = (c.name || cid) + " 的待办";
+  const body = $("detail-body"); body.replaceChildren();
+  if (!c.managed) { body.append(el("p", { class: "muted" }, "该会话未托管，没有 inbox 待办。")); return; }
+  body.append(el("p", { class: "muted" },
+    `owner ${c.owner} · epoch ${c.epoch} · 输入 ${c.input} · 回复策略 ${POLICY[c.reply_policy] || c.reply_policy} · 已处理到游标 ${c.processed_cursor}`));
+  if (!c.todos.length) { body.append(el("p", { class: "muted" }, "没有待办。")); return; }
+  for (const t of c.todos) {
+    const box = el("div", { class: "todo" },
+      el("div", { class: "row" }, el("strong", {}, `#${t.delivery_id}`), el("span", { class: "chip" }, STATUS[t.status] || t.status),
+        el("span", { class: "muted" }, `游标 ${t.cursor_start}–${t.cursor_end}`), t.reason ? el("span", {}, t.reason) : ""));
+    if (t.status === "draft") {
+      box.append(el("button", { onclick: () => openDraft(c, t, box) }, "查看草稿与原消息"));
+    }
+    body.append(box);
+  }
+}
+
+async function openDraft(c, t, box) {
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}/deliveries/${t.delivery_id}`);
+    const view = el("div", {});
+    view.append(el("h2", {}, "原消息"));
+    for (const m of data.events) {
+      view.append(el("div", { class: "msg " + (m.direction === "incoming" ? "incoming" : "") },
+        el("span", { class: "muted" }, `#${m.cursor} ${m.direction === "incoming" ? (m.sender || "对方") : "我方"}：`),
+        m.text ?? `[${m.content_type || m.kind}]`));
+    }
+    if (data.truncated) view.append(el("p", { class: "muted" }, "仅显示前 50 条。"));
+    view.append(el("h2", {}, "草稿"), el("div", { class: "draft" }, data.delivery.draft_text || ""));
+    const sources = data.events.filter((m) => m.replyable);
+    const picker = el("select", {}, ...sources.map((m) => el("option", { value: m.cursor }, `#${m.cursor} ${(m.text || "").slice(0, 30)}`)));
+    if (sources.length) picker.value = String(sources[sources.length - 1].cursor);
+    const allowed = data.binding.reply_policy === "authorized" && data.binding.control === "active" && sources.length > 0;
+    const approve = el("button", { class: "primary", disabled: !allowed, onclick: async () => {
+      if (!confirm("确认按原文发送这条草稿？发送后不能撤回。")) return;
+      approve.disabled = true;
+      try {
+        const r = await api("/api/approve-draft", { conversation_id: c.conversation_id, delivery_id: t.delivery_id,
+                                                    expected_epoch: data.binding.epoch, cursor: Number(picker.value) });
+        notice(r.already_approved ? "该草稿已批准过，没有重复发送。" : `已批准并入队发送（请求 ${r.request_id}，状态 ${r.send_status}）。发送结果以调度列表为准。`, "ok");
+        await refresh(true);
+      } catch (e) { notice("批准失败：" + e.message, "bad"); approve.disabled = false; }
+    } }, "批准并发送");
+    view.append(el("div", { class: "row" }, el("label", {}, "回复对象", picker), approve));
+    if (!allowed) view.append(el("p", { class: "muted" },
+      data.binding.reply_policy !== "authorized" ? "该会话回复策略不是“可发送”，面板不会代为修改策略。" :
+      data.binding.control !== "active" ? "会话已被人工接管。" : "范围内没有可回复的入站文字。"));
+    box.replaceChildren(box.firstChild, view);
+  } catch (e) { notice("读取草稿失败：" + e.message, "bad"); }
+}
+
+async function refresh(redrawDetail) {
+  try {
+    const ov = await api("/api/overview");
+    state.overview = ov;
+    renderDesktop(ov.desktop); renderAttention(ov); renderConversations(ov); renderDispatches(ov);
+    // Auto refresh never rebuilds the detail pane, so it cannot swap a button under a click.
+    if (redrawDetail === true && state.selected) select(state.selected);
+    if ($("notice").className === "bad" && $("notice").textContent.startsWith("刷新失败")) notice("");
+  } catch (e) { notice("刷新失败：" + e.message, "bad"); }
+}
+
+$("refresh").addEventListener("click", () => refresh(true));
+$("pause").addEventListener("click", async () => {
+  const reason = prompt("暂停原因（恢复需要在微信主机上按审查流程执行 dispatch review）：");
+  if (!reason) return;
+  try { await api("/api/pause", { reason }); notice("桌面发送已暂停。", "warn"); await refresh(false); }
+  catch (e) { notice("暂停失败：" + e.message, "bad"); }
+});
+refresh(false);
+setInterval(() => { if (!document.hidden) refresh(false); }, 10000);
+</script>
+</body>
+</html>
